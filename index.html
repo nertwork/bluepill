@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BluePill — Native Qt6 Linux iMessage Client, Web UI & Zero-Electron macOS Relay (BlueBubbles / OpenBubbles Alternative)</title>
+    <meta name="description" content="BluePill is an ultra-fast, native Qt6 C++ / QML iMessage client for Linux (Wayland/X11) and zero-Electron macOS relay server. Direct SSH transport, voice memo waveforms, tapbacks, scheduled messages, and embedded Web UI.">
+    <meta name="keywords" content="iMessage on Linux, BlueBubbles alternative, OpenBubbles Linux, Arch Linux iMessage, Wayland Hyprland iMessage client, macOS iMessage relay server, Qt6 iMessage, Apple iMessage on Ubuntu">
+    <link rel="canonical" href="https://nertwork.github.io/bluepill/">
+    <link rel="icon" type="image/png" href="logo.png">
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://nertwork.github.io/bluepill/">
+    <meta property="og:title" content="BluePill — Native Qt6 Linux iMessage Client & Zero-Electron macOS Relay">
+    <meta property="og:description" content="Ultra-fast native Qt6 C++ / QML iMessage client for Linux (<35MB RAM) with a zero-Electron macOS relay server (<15MB RAM). Direct SSH, 28-bar voice memo waveforms, and full Wayland support.">
+    <meta property="og:image" content="https://nertwork.github.io/bluepill/screenshot.png">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:url" content="https://nertwork.github.io/bluepill/">
+    <meta name="twitter:title" content="BluePill — Native Qt6 Linux iMessage Client & macOS Relay">
+    <meta name="twitter:description" content="Break free from 600MB Electron bridges. Native Qt6 C++ iMessage client for Linux with zero-Electron macOS relay daemon.">
+    <meta name="twitter:image" content="https://nertwork.github.io/bluepill/screenshot.png">
+
+    <!-- Schema.org JSON-LD Structured Data -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "SoftwareApplication",
+          "@id": "https://nertwork.github.io/bluepill/#software",
+          "name": "BluePill",
+          "operatingSystem": ["Linux", "macOS"],
+          "applicationCategory": "CommunicationsApplication",
+          "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+          },
+          "description": "High-performance native Qt6 C++ / QML iMessage client for Linux and zero-Electron macOS relay daemon. Features voice memo waveforms, tapbacks, scheduling, and direct SSH encryption.",
+          "softwareVersion": "1.1.0",
+          "license": "https://opensource.org/licenses/MIT",
+          "downloadUrl": "https://github.com/nertwork/bluepill/releases",
+          "author": {
+            "@type": "Organization",
+            "name": "Nertwork",
+            "url": "https://www.nertwork.com"
+          }
+        },
+        {
+          "@type": "TechArticle",
+          "@id": "https://nertwork.github.io/bluepill/#article",
+          "headline": "Why We Built BluePill: Replacing 600 MB Electron BlueBubbles with a 15 MB Native Python & Qt6 Stack",
+          "description": "A technical architectural review of why Electron and Flutter bridges struggle with iMessage on Linux and how a native Qt6 C++ and direct SQLite architecture delivers 10x lower memory and sub-second cold starts.",
+          "datePublished": "2026-11-11T08:00:00Z",
+          "dateModified": "2026-11-11T08:00:00Z",
+          "author": {
+            "@type": "Person",
+            "name": "James Gomez",
+            "url": "https://www.nertwork.com"
+          },
+          "publisher": {
+            "@type": "Organization",
+            "name": "Nertwork",
+            "logo": {
+              "@type": "ImageObject",
+              "url": "https://nertwork.github.io/bluepill/logo.png"
+            }
+          }
+        },
+        {
+          "@type": "FAQPage",
+          "@id": "https://nertwork.github.io/bluepill/#faq",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "How do I run Apple iMessage on Linux?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "BluePill connects your Linux desktop (Arch Linux, Ubuntu, Fedora, Debian) to your own Mac acting as a lightweight zero-Electron relay. The Linux desktop runs a native Qt6 client consuming under 35 MB RAM, connecting over end-to-end encrypted direct SSH tunnels or HTTPS."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "How is BluePill different from BlueBubbles and OpenBubbles?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Unlike BlueBubbles (which requires a 500-700 MB Electron server on macOS and Electron/Flutter desktop clients), BluePill uses an ultra-lean native Python macOS relay (<15 MB RAM) reading chat.db via direct SQLite queries, paired with a compiled Qt6 C++ / QML native client for Linux. It launches in 200ms and uses negligible CPU."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does BluePill require port forwarding or public cloud servers?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "No! BluePill supports native direct SSH transport (ssh://user@mac-host). If you have SSH access to your Mac (via LAN, WireGuard, Tailscale, or Cloudflare Tunnel), BluePill establishes secure authenticated tunnels without opening public HTTP ports or relying on Google Firebase notifications."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does BluePill support voice memos and tapback reactions?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. BluePill features inline 28-bar voice memo waveforms with interactive scrubbing, hardware audio playback, all Apple tapback reactions (heart, thumbs up, haha, exclamation), expressive effects, scheduled messages, and Find My device queries."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "How do I install BluePill on Arch Linux or Omarchy?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "On Arch Linux or Omarchy, run 'yay -S bluepill'. It installs the desktop client, the headless CLI daemon, and the Waybar status bar widget."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "How do I install the BluePill server on macOS?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "On macOS, install via Homebrew: 'brew install nertwork/tap/bluepill'. Then launch the server with 'bluepill-server --port 1234 --password <secret>' or deploy the included LaunchAgent plist for automated boot startup."
+              }
+            }
+          ]
+        }
+      ]
+    }
+    </script>
+
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #121927;
+            --bg-card: #182235;
+            --accent-cyan: #00e5ff;
+            --accent-blue: #3b82f6;
+            --text-main: #f1f5f9;
+            --text-muted: #94a3b8;
+            --border: #23324d;
+            --code-bg: #070a10;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-main);
+            line-height: 1.6;
+            padding-bottom: 80px;
+        }
+        header {
+            background: linear-gradient(180deg, #101827 0%, var(--bg-primary) 100%);
+            padding: 60px 20px 40px;
+            text-align: center;
+            border-bottom: 1px solid var(--border);
+        }
+        .header-container { max-width: 900px; margin: 0 auto; }
+        .logo { width: 96px; height: 96px; margin-bottom: 20px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0, 229, 255, 0.2); }
+        h1 { font-size: 2.8rem; font-weight: 800; margin-bottom: 15px; background: linear-gradient(135deg, #fff 40%, var(--accent-cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .tagline { font-size: 1.25rem; color: var(--text-muted); margin-bottom: 30px; }
+        .btn-group { display: flex; gap: 15px; justify-content: center; flex-wrap: wrap; margin-bottom: 25px; }
+        .btn {
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 12px 24px; border-radius: 10px; font-weight: 600; text-decoration: none;
+            transition: all 0.2s ease;
+        }
+        .btn-primary { background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan)); color: #050811; }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0, 229, 255, 0.3); }
+        .btn-secondary { background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); }
+        .btn-secondary:hover { background: #222f48; }
+        .stats-banner {
+            display: flex; justify-content: center; gap: 30px; flex-wrap: wrap;
+            margin-top: 30px; padding: 15px; background: var(--bg-secondary);
+            border-radius: 12px; border: 1px solid var(--border);
+        }
+        .stat-item { text-align: center; }
+        .stat-val { font-size: 1.6rem; font-weight: 800; color: var(--accent-cyan); }
+        .stat-lbl { font-size: 0.85rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+        .container { max-width: 1000px; margin: 0 auto; padding: 40px 20px; }
+        .hero-img-container { text-align: center; margin: 40px 0; }
+        .hero-img { max-width: 100%; border-radius: 12px; border: 1px solid var(--border); box-shadow: 0 20px 40px rgba(0,0,0,0.6); }
+        h2 { font-size: 2rem; margin: 50px 0 20px; padding-bottom: 10px; border-bottom: 1px solid var(--border); color: #fff; }
+        h3 { font-size: 1.3rem; margin: 30px 0 15px; color: var(--accent-cyan); }
+        p { margin-bottom: 18px; color: #cbd5e1; font-size: 1.05rem; }
+        ul { margin: 0 0 20px 25px; color: #cbd5e1; }
+        li { margin-bottom: 8px; }
+        pre { background: var(--code-bg); padding: 16px 20px; border-radius: 10px; border: 1px solid var(--border); overflow-x: auto; margin-bottom: 24px; }
+        code { font-family: "JetBrains Mono", Menlo, Consolas, Monaco, monospace; font-size: 0.92rem; color: #38bdf8; }
+        .grid-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin: 30px 0; }
+        .card { background: var(--bg-card); padding: 24px; border-radius: 12px; border: 1px solid var(--border); }
+        .card h4 { font-size: 1.15rem; margin-bottom: 10px; color: #fff; }
+        .card p { font-size: 0.95rem; margin-bottom: 0; color: var(--text-muted); }
+        .comparison-table { width: 100%; border-collapse: collapse; margin: 30px 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+        .comparison-table th, .comparison-table td { padding: 14px 18px; text-align: left; border-bottom: 1px solid var(--border); }
+        .comparison-table th { background: var(--bg-secondary); color: var(--accent-cyan); font-weight: 600; }
+        .comparison-table tr:last-child td { border-bottom: none; }
+        .faq-item { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 15px; }
+        .faq-item h4 { font-size: 1.15rem; color: #fff; margin-bottom: 10px; }
+        .faq-item p { margin-bottom: 0; font-size: 0.95rem; }
+        footer { text-align: center; color: var(--text-muted); font-size: 0.9rem; margin-top: 60px; border-top: 1px solid var(--border); padding-top: 30px; }
+        footer a { color: var(--accent-cyan); text-decoration: none; }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="header-container">
+        <img src="logo.png" alt="BluePill Logo" class="logo">
+        <h1>BluePill</h1>
+        <p class="tagline">Native Qt6 C++ / QML iMessage Client for Linux & Zero-Electron macOS Relay Server</p>
+        <div class="btn-group">
+            <a href="https://github.com/nertwork/bluepill" class="btn btn-primary">GitHub Repository (v1.1.0)</a>
+            <a href="INSTALLATION_AND_OPERATIONS_GUIDE.md" class="btn btn-secondary">Installation & Operations Guide</a>
+            <a href="AGENT_INSTALL_PLAYBOOK.md" class="btn btn-secondary">AI Agent Playbook</a>
+            <a href="https://aur.archlinux.org/packages/bluepill" class="btn btn-secondary">Arch AUR</a>
+        </div>
+        <div class="stats-banner">
+            <div class="stat-item"><div class="stat-val">&lt; 35 MB</div><div class="stat-lbl">Linux RAM</div></div>
+            <div class="stat-item"><div class="stat-val">&lt; 15 MB</div><div class="stat-lbl">macOS RAM</div></div>
+            <div class="stat-item"><div class="stat-val">200 ms</div><div class="stat-lbl">Cold Startup</div></div>
+            <div class="stat-item"><div class="stat-val">0</div><div class="stat-lbl">Electron Bloat</div></div>
+            <div class="stat-item"><div class="stat-val">Native</div><div class="stat-lbl">Wayland / SSH</div></div>
+        </div>
+    </div>
+</header>
+
+<div class="container">
+    <div class="hero-img-container">
+        <img src="screenshot.png" alt="BluePill Linux Client Interface" class="hero-img">
+    </div>
+
+    <section>
+        <h2>Why We Built BluePill: Escaping Electron Bloat</h2>
+        <p>For engineers, Linux desktop users, and power enthusiasts, staying connected to Apple ecosystem communication has historically required heavy Electron or Flutter bridges like BlueBubbles. While functional, BlueBubbles carries a staggering footprint: 400 MB to 700 MB of RAM, sluggish startup times, choppy scrolling, and frequent sync stalls when processing multi-gigabyte message databases.</p>
+        <p><strong>BluePill</strong> was designed from first principles to be the uncompromising, high-performance alternative: a compiled native Qt6 C++ / QML Linux client paired with an ultra-lean, native Python macOS relay service that directly interfaces with Apple's <code>chat.db</code> SQLite engine.</p>
+
+        <table class="comparison-table">
+            <thead>
+                <tr>
+                    <th>Feature / Metric</th>
+                    <th>BlueBubbles</th>
+                    <th>BluePill v1.1.0</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Desktop Architecture</strong></td>
+                    <td>Electron / Chromium / Node.js</td>
+                    <td><strong>Compiled Qt6 C++20 / QML</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>Desktop Client Memory</strong></td>
+                    <td>450 MB – 800 MB RAM</td>
+                    <td><strong>&lt; 35 MB RAM</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>macOS Server Memory</strong></td>
+                    <td>350 MB – 650 MB RAM</td>
+                    <td><strong>&lt; 15 MB RAM</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>Launch Time</strong></td>
+                    <td>4 – 8 seconds</td>
+                    <td><strong>Sub-second (200 ms)</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>Display Server</strong></td>
+                    <td>XWayland emulation layer</td>
+                    <td><strong>Native Wayland &amp; X11 (Hyprland / Sway / GNOME)</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>Transport Protocol</strong></td>
+                    <td>HTTP / Firebase Cloud Messaging</td>
+                    <td><strong>Direct SSH Tunnel (<code>ssh://</code>) or HTTPS</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>Voice Memos</strong></td>
+                    <td>Basic HTML5 audio element</td>
+                    <td><strong>Interactive 28-Bar Amplitude Waveforms</strong></td>
+                </tr>
+                <tr>
+                    <td><strong>Credential Storage</strong></td>
+                    <td>Plaintext config / browser cookie</td>
+                    <td><strong>Freedesktop SecretService (<code>secret-tool</code>)</strong></td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h2>Core Capabilities & Architecture</h2>
+        <div class="grid-cards">
+            <div class="card">
+                <h4>Native Qt6 QML Client</h4>
+                <p>Hardware-accelerated rendering at 60fps with sub-second launch times. Native Wayland integration with Hyprland and Sway window rules.</p>
+            </div>
+            <div class="card">
+                <h4>Zero-Electron macOS Daemon</h4>
+                <p>Ultra-lean headless Python server running natively on Intel & Apple Silicon (macOS Big Sur through macOS Tahoe). Uses under 15 MB RAM.</p>
+            </div>
+            <div class="card">
+                <h4>Direct SSH Transport</h4>
+                <p>Connect securely over <code>ssh://user@mac-host</code> without exposing HTTP ports to the internet or relying on Firebase push servers.</p>
+            </div>
+            <div class="card">
+                <h4>Voice Memo Waveforms</h4>
+                <p>28-bar amplitude waveform visualization extracted via FFmpeg with interactive scrub-to-seek and playback speed controls.</p>
+            </div>
+            <div class="card">
+                <h4>Expressive Send & Tapbacks</h4>
+                <p>Full support for heart, thumbs up, haha, exclamation, and question reactions, plus message effects and scheduled future delivery.</p>
+            </div>
+            <div class="card">
+                <h4>Embedded /web UI</h4>
+                <p>Full-featured web client hosted directly by the relay server with in-browser microphone recording and real-time event streaming.</p>
+            </div>
+        </div>
+    </section>
+
+    <section>
+        <h2>Quick Installation</h2>
+
+        <h3>1. macOS Relay Server (Intel &amp; Apple Silicon)</h3>
+        <p>Install via Homebrew Tap and start the daemon:</p>
+        <pre><code># Install from Homebrew Tap
+brew install nertwork/tap/bluepill
+
+# Start the server interactively or configure LaunchAgent
+bluepill-server --port 1234 --password my_secret_token</code></pre>
+
+        <h3>2. Linux Desktop Client (Arch / Omarchy)</h3>
+        <p>Install the native client, CLI tools, and Waybar widget from the Arch User Repository:</p>
+        <pre><code>yay -S bluepill</code></pre>
+
+        <h3>3. Build from Source (Ubuntu, Debian, Fedora, NixOS)</h3>
+        <p>Compile cleanly on any modern Linux distribution:</p>
+        <pre><code>cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+sudo cmake --install build</code></pre>
+    </section>
+
+    <section>
+        <h2>Autonomous AI Agent Playbook</h2>
+        <p>BluePill is built with full automation support. You can point autonomous AI agents (Claude Code, Gemini CLI, Cursor, OpenCode, Codex) at the repository and instruct them to deploy BluePill with zero manual intervention. See our deterministic playbooks:</p>
+        <ul>
+            <li><a href="INSTALLATION_AND_OPERATIONS_GUIDE.md" style="color: var(--accent-cyan);">Complete Installation &amp; Operations Guide</a> — Step-by-step documentation for all platforms, LaunchAgents, and reverse proxies.</li>
+            <li><a href="AGENT_INSTALL_PLAYBOOK.md" style="color: var(--accent-cyan);">Autonomous AI Agent Install Playbook</a> — Deterministic, copy-pasteable execution steps for LLM engineering agents.</li>
+            <li><a href="https://github.com/nertwork/bluepill/blob/main/AGENTS.md" style="color: var(--accent-cyan);">AGENTS.md Directives</a> — Non-interactive execution standards, security bounds, and test suites.</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>Frequently Asked Questions</h2>
+        <div class="faq-item">
+            <h4>How do I run Apple iMessage on Linux?</h4>
+            <p>BluePill connects your Linux desktop (Arch Linux, Ubuntu, Fedora, Debian) to your own Mac acting as a lightweight zero-Electron relay. The Linux desktop runs a native Qt6 client consuming under 35 MB RAM, connecting over end-to-end encrypted direct SSH tunnels or HTTPS.</p>
+        </div>
+        <div class="faq-item">
+            <h4>How is BluePill different from BlueBubbles and OpenBubbles?</h4>
+            <p>Unlike BlueBubbles (which requires a 500-700 MB Electron server on macOS and Electron/Flutter desktop clients), BluePill uses an ultra-lean native Python macOS relay (&lt;15 MB RAM) reading chat.db via direct SQLite queries, paired with a compiled Qt6 C++ / QML native client for Linux. It launches in 200ms and uses negligible CPU.</p>
+        </div>
+        <div class="faq-item">
+            <h4>Does BluePill require port forwarding or public cloud servers?</h4>
+            <p>No! BluePill supports native direct SSH transport (<code>ssh://user@mac-host</code>). If you have SSH access to your Mac (via LAN, WireGuard, Tailscale, or Cloudflare Tunnel), BluePill establishes secure authenticated tunnels without opening public HTTP ports or relying on Google Firebase notifications.</p>
+        </div>
+        <div class="faq-item">
+            <h4>Does BluePill support voice memos and tapback reactions?</h4>
+            <p>Yes. BluePill features inline 28-bar voice memo waveforms with interactive scrubbing, hardware audio playback, all Apple tapback reactions (heart, thumbs up, haha, exclamation), expressive effects, scheduled messages, and Find My device queries.</p>
+        </div>
+    </section>
+
+    <footer>
+        <p>&copy; 2026 <a href="https://www.nertwork.com">Nertwork</a>. Released under the MIT License.</p>
+        <p>Built for the modern Linux workstation, Omarchy, and Apple ecosystem interoperability.</p>
+    </footer>
+</div>
+
+</body>
+</html>
