@@ -27,6 +27,40 @@ ApplicationWindow {
         hoveredActionMessageGuid = ""
     }
 
+    property string activeScreenEffect: ""
+
+    Timer {
+        id: screenEffectTimer
+        interval: 2550
+        repeat: false
+        onTriggered: root.activeScreenEffect = ""
+    }
+
+    function triggerExpressiveEffect(effectText) {
+        var eff = (effectText || "").toLowerCase()
+        if (eff.indexOf("confetti") !== -1) {
+            root.activeScreenEffect = "confetti"
+            screenEffectTimer.restart()
+            effectAnim.restart()
+        } else if (eff.indexOf("firework") !== -1) {
+            root.activeScreenEffect = "fireworks"
+            screenEffectTimer.restart()
+            effectAnim.restart()
+        } else if (eff.indexOf("laser") !== -1) {
+            root.activeScreenEffect = "lasers"
+            screenEffectTimer.restart()
+            effectAnim.restart()
+        } else if (eff.indexOf("balloon") !== -1) {
+            root.activeScreenEffect = "balloons"
+            screenEffectTimer.restart()
+            effectAnim.restart()
+        } else if (eff.indexOf("heart") !== -1 || eff.indexOf("love") !== -1) {
+            root.activeScreenEffect = "hearts"
+            screenEffectTimer.restart()
+            effectAnim.restart()
+        }
+    }
+
     function focusAndScrollChat() {
         messageListView.scrollToBottom()
         composerInput.forceActiveFocus()
@@ -2984,10 +3018,51 @@ ApplicationWindow {
                         id: msgDelegate
                         required property var modelData
                         property bool invisibleInkRevealed: false
+                        readonly property bool isInvisibleInkMsg: (modelData.expressiveEffect === "🕵️ Invisible Ink") || ((modelData.sendEffectLabel || "").toLowerCase().indexOf("invisible ink") !== -1)
+                        readonly property bool isAnyPartHovered: (bubbleHover.hovered || (typeof msgTextHover !== "undefined" && msgTextHover.hovered) || actionZoneHover.hovered || actionBarHover.hovered || (typeof invisibleInkMouse !== "undefined" && invisibleInkMouse.containsMouse))
                         width: messageListView.width
                         spacing: 4
                         property string hoveredReactionEmoji: ""
                         z: (root.activeActionMessageGuid === modelData.guid || hoveredReactionEmoji.length > 0) ? 100 : 1
+
+                        Timer {
+                            id: hoverClearTimer
+                            interval: 380
+                            repeat: false
+                            onTriggered: {
+                                if (!msgDelegate.isAnyPartHovered && root.hoveredActionMessageGuid === modelData.guid) {
+                                    root.hoveredActionMessageGuid = ""
+                                }
+                            }
+                        }
+
+                        onIsAnyPartHoveredChanged: {
+                            if (isAnyPartHovered) {
+                                hoverClearTimer.stop()
+                                root.hoveredActionMessageGuid = modelData.guid
+                            } else {
+                                hoverClearTimer.restart()
+                            }
+                        }
+
+                        function playBubbleEffect(effectLabel) {
+                            var eff = (effectLabel || "").toLowerCase()
+                            if (eff.indexOf("slam") !== -1 || eff.indexOf("impact") !== -1) {
+                                slamAnim.restart()
+                            } else if (eff.indexOf("loud") !== -1) {
+                                loudAnim.restart()
+                            } else if (eff.indexOf("gentle") !== -1) {
+                                gentleAnim.restart()
+                            }
+                        }
+
+                        Component.onCompleted: {
+                            var eff = modelData.expressiveEffect || modelData.sendEffectLabel || ""
+                            if (eff.length > 0 && modelData.isFromMe && index === messageListView.count - 1) {
+                                playBubbleEffect(eff)
+                                root.triggerExpressiveEffect(eff)
+                            }
+                        }
 
                         property string downloadedAttachmentUrl: ""
                         property var downloadedAttachmentUrls: ({})
@@ -3146,18 +3221,13 @@ ApplicationWindow {
                                 Item {
                                     id: actionHoverZone
                                     visible: root.activeActionMessageGuid === modelData.guid
-                                    x: Math.min(0, actionBar.x)
-                                    y: Math.min(0, actionBar.y)
-                                    width: Math.max(bubbleRect.width, actionBar.x + actionBar.width) - Math.min(0, actionBar.x)
-                                    height: Math.max(bubbleRect.height, actionBar.y + actionBar.height) - Math.min(0, actionBar.y)
+                                    x: Math.min(-12, actionBar.x - 12)
+                                    y: Math.min(-8, actionBar.y - 8)
+                                    width: Math.max(bubbleRect.width, actionBar.x + actionBar.width) - Math.min(-12, actionBar.x - 12) + 24
+                                    height: Math.max(bubbleRect.height, actionBar.y + actionBar.height) - Math.min(-8, actionBar.y - 8) + 16
 
                                     HoverHandler {
                                         id: actionZoneHover
-                                        onHoveredChanged: {
-                                            if (!hovered && !bubbleHover.hovered && !actionBarHover.hovered && root.hoveredActionMessageGuid === modelData.guid) {
-                                                root.hoveredActionMessageGuid = ""
-                                            }
-                                        }
                                     }
                                 }
 
@@ -3187,13 +3257,6 @@ ApplicationWindow {
 
                                     HoverHandler {
                                         id: actionBarHover
-                                        onHoveredChanged: {
-                                            if (hovered) {
-                                                root.hoveredActionMessageGuid = modelData.guid
-                                            } else if (!bubbleHover.hovered && !actionZoneHover.hovered && root.hoveredActionMessageGuid === modelData.guid) {
-                                                root.hoveredActionMessageGuid = ""
-                                            }
-                                        }
                                     }
 
                                     RowLayout {
@@ -3454,15 +3517,32 @@ ApplicationWindow {
                                     implicitWidth: Math.max(bubbleContent.width + 28, 96)
                                     implicitHeight: bubbleContent.height + 20
 
+                                    transformOrigin: Item.Center
+
+                                    SequentialAnimation {
+                                        id: slamAnim
+                                        NumberAnimation { target: bubbleRect; property: "scale"; to: 1.38; duration: 120; easing.type: Easing.OutQuad }
+                                        NumberAnimation { target: bubbleRect; property: "scale"; to: 0.90; duration: 100; easing.type: Easing.InOutQuad }
+                                        NumberAnimation { target: bubbleRect; property: "scale"; to: 1.06; duration: 90; easing.type: Easing.InOutQuad }
+                                        NumberAnimation { target: bubbleRect; property: "scale"; to: 1.0; duration: 80; easing.type: Easing.OutQuad }
+                                    }
+
+                                    SequentialAnimation {
+                                        id: loudAnim
+                                        NumberAnimation { target: bubbleRect; property: "scale"; to: 1.24; duration: 140; easing.type: Easing.OutQuad }
+                                        NumberAnimation { target: bubbleRect; property: "scale"; to: 0.95; duration: 110; easing.type: Easing.InOutQuad }
+                                        NumberAnimation { target: bubbleRect; property: "scale"; to: 1.14; duration: 110; easing.type: Easing.InOutQuad }
+                                        NumberAnimation { target: bubbleRect; property: "scale"; to: 1.0; duration: 100; easing.type: Easing.OutQuad }
+                                    }
+
+                                    SequentialAnimation {
+                                        id: gentleAnim
+                                        PropertyAction { target: bubbleRect; property: "scale"; value: 0.70 }
+                                        NumberAnimation { target: bubbleRect; property: "scale"; to: 1.0; duration: 600; easing.type: Easing.OutCubic }
+                                    }
+
                                     HoverHandler {
                                         id: bubbleHover
-                                        onHoveredChanged: {
-                                            if (hovered) {
-                                                root.hoveredActionMessageGuid = modelData.guid
-                                            } else if (!actionZoneHover.hovered && !actionBarHover.hovered && root.hoveredActionMessageGuid === modelData.guid) {
-                                                root.hoveredActionMessageGuid = ""
-                                            }
-                                        }
                                     }
 
                                     MouseArea {
@@ -3858,76 +3938,114 @@ ApplicationWindow {
                                             }
                                         }
 
-                                        // Message Text (Selectable & Copyable)
-                                        TextEdit {
-                                            id: msgText
-                                        // Invisible Ink Click-To-Reveal Overlay
-                                        Rectangle {
-                                            id: invisibleInkOverlay
-                                            visible: msgText.visible && (modelData.expressiveEffect === "🕵️ Invisible Ink" || (modelData.sendEffectLabel || "").indexOf("invisible ink") !== -1) && !msgDelegate.invisibleInkRevealed
-                                            width: msgText.width
-                                            height: msgText.height
-                                            color: modelData.isFromMe ? Qt.rgba(0, 0, 0, 0.45) : theme.darkerBackground
-                                            radius: 6
-                                            border.color: theme.accent
-                                            border.width: 1
-                                            z: 10
-
-                                            RowLayout {
-                                                anchors.centerIn: parent
-                                                spacing: 4
-                                                Text {
-                                                    text: "🕵️ Invisible Ink · Click to reveal"
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    font.bold: true
-                                                    color: "#ffffff"
-                                                }
-                                            }
-
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: {
-                                                    msgDelegate.invisibleInkRevealed = true;
-                                                }
-                                            }
-                                        }
-
+                                        // Message Text Container (Handles Sizing, Selection & Invisible Ink)
+                                        Item {
+                                            id: textContainer
                                             visible: (modelData.text || "").length > 0 && !(modelData.hasImageAttachment && (modelData.text === "📷 Photo" || /^📷 \d+ Photos$/.test(modelData.text)))
-                                            width: Math.min(implicitWidth, bubbleContent.maxTextW)
-                                            text: modelData.formattedText || root.linkifyText(modelData.text || "")
-                                            textFormat: TextEdit.RichText
-                                            readOnly: true
-                                            selectByMouse: true
-                                            selectByKeyboard: true
-                                            selectedTextColor: "#ffffff"
-                                            selectionColor: modelData.isFromMe ? "#004080" : theme.accent
-                                            font.pixelSize: theme.fontSize
-                                            color: modelData.isFromMe ? "#ffffff" : theme.brightForeground
-                                            wrapMode: TextEdit.Wrap
-                                            onLinkActivated: (link) => Qt.openUrlExternally(link)
+                                            width: Math.max(Math.min(msgText.implicitWidth, bubbleContent.maxTextW), (msgDelegate.isInvisibleInkMsg && !msgDelegate.invisibleInkRevealed) ? Math.min(220, bubbleContent.maxTextW) : 0)
+                                            height: Math.max(msgText.implicitHeight, (msgDelegate.isInvisibleInkMsg && !msgDelegate.invisibleInkRevealed) ? 34 : 0)
 
-                                            Keys.onPressed: (event) => {
-                                                if (root.showPhotoViewer && root.handlePhotoViewerKey(event)) {
-                                                    return
+                                            TextEdit {
+                                                id: msgText
+                                                anchors.fill: parent
+                                                opacity: (msgDelegate.isInvisibleInkMsg && !msgDelegate.invisibleInkRevealed) ? 0.0 : 1.0
+                                                Behavior on opacity { NumberAnimation { duration: 200 } }
+                                                text: modelData.formattedText || root.linkifyText(modelData.text || "")
+                                                textFormat: TextEdit.RichText
+                                                readOnly: true
+                                                selectByMouse: true
+                                                selectByKeyboard: true
+                                                selectedTextColor: "#ffffff"
+                                                selectionColor: modelData.isFromMe ? "#004080" : theme.accent
+                                                font.pixelSize: theme.fontSize
+                                                color: modelData.isFromMe ? "#ffffff" : theme.brightForeground
+                                                wrapMode: TextEdit.Wrap
+                                                onLinkActivated: (link) => Qt.openUrlExternally(link)
+
+                                                HoverHandler {
+                                                    id: msgTextHover
                                                 }
-                                                if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_C) {
-                                                    if (msgText.selectedText.length > 0) {
-                                                        backend.copyToClipboard(msgText.selectedText, "selection")
+
+                                                Keys.onPressed: (event) => {
+                                                    if (root.showPhotoViewer && root.handlePhotoViewerKey(event)) {
+                                                        return
+                                                    }
+                                                    if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_C) {
+                                                        if (msgText.selectedText.length > 0) {
+                                                            backend.copyToClipboard(msgText.selectedText, "selection")
+                                                            event.accepted = true
+                                                        }
+                                                    } else if (event.key === Qt.Key_PageUp) {
+                                                        root.scrollMessagesPageUp()
+                                                        event.accepted = true
+                                                    } else if (event.key === Qt.Key_PageDown) {
+                                                        root.scrollMessagesPageDown()
+                                                        event.accepted = true
+                                                    } else if (event.key === Qt.Key_Home && !(event.modifiers & Qt.ShiftModifier)) {
+                                                        root.scrollMessagesToTop()
+                                                        event.accepted = true
+                                                    } else if (event.key === Qt.Key_End && !(event.modifiers & Qt.ShiftModifier)) {
+                                                        root.scrollMessagesToBottom()
                                                         event.accepted = true
                                                     }
-                                                } else if (event.key === Qt.Key_PageUp) {
-                                                    root.scrollMessagesPageUp()
-                                                    event.accepted = true
-                                                } else if (event.key === Qt.Key_PageDown) {
-                                                    root.scrollMessagesPageDown()
-                                                    event.accepted = true
-                                                } else if (event.key === Qt.Key_Home && !(event.modifiers & Qt.ShiftModifier)) {
-                                                    root.scrollMessagesToTop()
-                                                    event.accepted = true
-                                                } else if (event.key === Qt.Key_End && !(event.modifiers & Qt.ShiftModifier)) {
-                                                    root.scrollMessagesToBottom()
-                                                    event.accepted = true
+                                                }
+                                            }
+
+                                            // Invisible Ink Click-To-Reveal Overlay (Sibling to msgText inside textContainer)
+                                            Rectangle {
+                                                id: invisibleInkOverlay
+                                                anchors.fill: parent
+                                                visible: textContainer.visible && msgDelegate.isInvisibleInkMsg && !msgDelegate.invisibleInkRevealed
+                                                clip: true
+                                                radius: 8
+                                                color: modelData.isFromMe ? "#0866c6" : "#252d3d"
+                                                border.width: 1
+                                                border.color: modelData.isFromMe ? "#5cb3ff" : theme.accent
+                                                z: 10
+
+                                                // Animated shimmering / twinkling dots
+                                                Repeater {
+                                                    model: 12
+                                                    delegate: Rectangle {
+                                                        required property int index
+                                                        width: (index % 3 === 0) ? 4 : ((index % 3 === 1) ? 3 : 2)
+                                                        height: width
+                                                        radius: width / 2
+                                                        color: "#ffffff"
+                                                        x: ((index * 19 + 7) % Math.max(20, Math.round(invisibleInkOverlay.width - 12))) + 6
+                                                        y: ((index * 13 + 5) % Math.max(12, Math.round(invisibleInkOverlay.height - 10))) + 5
+                                                        opacity: 0.25 + 0.65 * Math.abs(Math.sin((twinkleTimer.tick + index * 0.7)))
+                                                    }
+                                                }
+
+                                                Timer {
+                                                    id: twinkleTimer
+                                                    property real tick: 0
+                                                    interval: 80
+                                                    running: invisibleInkOverlay.visible
+                                                    repeat: true
+                                                    onTriggered: tick += 0.2
+                                                }
+
+                                                RowLayout {
+                                                    anchors.centerIn: parent
+                                                    spacing: 6
+                                                    Text {
+                                                        text: "🕵️ Invisible Ink · " + i18n.tr("Click to reveal")
+                                                        font.pixelSize: theme.fontSize - 2
+                                                        font.bold: true
+                                                        color: "#ffffff"
+                                                    }
+                                                }
+
+                                                MouseArea {
+                                                    id: invisibleInkMouse
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        msgDelegate.invisibleInkRevealed = true
+                                                    }
                                                 }
                                             }
                                         }
@@ -3985,19 +4103,45 @@ ApplicationWindow {
                                         }
 
                                         // Timestamp & Metadata (Edited / Send Effect / Delivery Error) inside bubble bottom-right
-                                        Text {
+                                        Item {
                                             anchors.right: parent ? parent.right : undefined
-                                            text: (modelData.metaBadgeText && modelData.metaBadgeText.length > 0)
-                                                  ? modelData.metaBadgeText
-                                                  : (modelData.timeText || "")
-                                            font.pixelSize: theme.fontSize - 3
-                                            font.bold: modelData.isFailed || false
-                                            color: (modelData.isFailed || false)
-                                                   ? theme.red
-                                                   : (modelData.isFromMe
-                                                      ? ((modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
-                                                         ? "#e0f8e9" : "#d0dff7")
-                                                      : theme.darkForeground)
+                                            implicitWidth: metaBadgeTextItem.implicitWidth
+                                            implicitHeight: metaBadgeTextItem.implicitHeight
+
+                                            Text {
+                                                id: metaBadgeTextItem
+                                                anchors.fill: parent
+                                                text: (modelData.metaBadgeText && modelData.metaBadgeText.length > 0)
+                                                      ? modelData.metaBadgeText
+                                                      : (modelData.timeText || "")
+                                                font.pixelSize: theme.fontSize - 3
+                                                font.bold: modelData.isFailed || false
+                                                font.underline: metaBadgeMouse.containsMouse && (msgDelegate.isInvisibleInkMsg || (modelData.sendEffectLabel || "").length > 0 || (modelData.expressiveEffect || "").length > 0)
+                                                color: (modelData.isFailed || false)
+                                                       ? theme.red
+                                                       : (modelData.isFromMe
+                                                          ? ((modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
+                                                             ? "#e0f8e9" : "#d0dff7")
+                                                          : theme.darkForeground)
+                                            }
+
+                                            MouseArea {
+                                                id: metaBadgeMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: (msgDelegate.isInvisibleInkMsg || (modelData.sendEffectLabel || "").length > 0 || (modelData.expressiveEffect || "").length > 0)
+                                                             ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                                onClicked: {
+                                                    if (msgDelegate.isInvisibleInkMsg) {
+                                                        msgDelegate.invisibleInkRevealed = !msgDelegate.invisibleInkRevealed
+                                                    }
+                                                    var eff = modelData.expressiveEffect || modelData.sendEffectLabel || ""
+                                                    if (eff.length > 0) {
+                                                        msgDelegate.playBubbleEffect(eff)
+                                                        root.triggerExpressiveEffect(eff)
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -6509,6 +6653,7 @@ ApplicationWindow {
                                 return;
                             }
                             backend.sendMessageWithEffect(txt, modelData.id);
+                            root.triggerExpressiveEffect(modelData.name);
                             composerInput.text = "";
                             messageListView.scrollToBottom();
                         }
@@ -6738,6 +6883,108 @@ ApplicationWindow {
                     }
                 }
             }
+        }
+    }
+
+    // Full-Viewport Expressive Screen Effect Overlay (Confetti, Fireworks, Lasers, Balloons, Hearts)
+    Item {
+        id: screenEffectOverlay
+        anchors.fill: parent
+        z: 900
+        visible: root.activeScreenEffect.length > 0
+        clip: true
+
+        Repeater {
+            model: 40
+            delegate: Item {
+                id: particleItem
+                required property int index
+                property real pProgress: effectAnim.progress
+                property real randSeedX: ((index * 7919 + 1013) % 1000) / 1000.0
+                property real randSeedY: ((index * 6271 + 2017) % 1000) / 1000.0
+                property real randSpeed: 0.6 + (((index * 3571) % 100) / 100.0) * 0.8
+                property string particleChar: {
+                    if (root.activeScreenEffect === "confetti") {
+                        var confChars = ["🎊", "🎉", "✨", "🔹", "🔸", "⭐", "▫️", "▪️"]
+                        return confChars[index % confChars.length]
+                    } else if (root.activeScreenEffect === "fireworks") {
+                        var fireChars = ["🎆", "🎇", "✨", "💥", "🌟", "✨"]
+                        return fireChars[index % fireChars.length]
+                    } else if (root.activeScreenEffect === "lasers") {
+                        return (index % 2 === 0) ? "⚡" : "✨"
+                    } else if (root.activeScreenEffect === "balloons") {
+                        var balChars = ["🎈", "🎈", "🎈", "🎈", "✨"]
+                        return balChars[index % balChars.length]
+                    } else if (root.activeScreenEffect === "hearts") {
+                        var heartChars = ["❤️", "💖", "💕", "💓", "✨"]
+                        return heartChars[index % heartChars.length]
+                    }
+                    return "✨"
+                }
+
+                x: {
+                    if (root.activeScreenEffect === "fireworks") {
+                        var cx = (index % 2 === 0) ? (screenEffectOverlay.width * 0.35) : (screenEffectOverlay.width * 0.65)
+                        var angle = (index * (360.0 / 20.0)) * (Math.PI / 180.0)
+                        var dist = pProgress * (180.0 + (index % 5) * 40.0)
+                        return cx + Math.cos(angle) * dist
+                    } else if (root.activeScreenEffect === "balloons" || root.activeScreenEffect === "hearts") {
+                        return randSeedX * (screenEffectOverlay.width - 60) + Math.sin(pProgress * 6.0 + index) * 30
+                    } else if (root.activeScreenEffect === "lasers") {
+                        return randSeedX * screenEffectOverlay.width + (pProgress * screenEffectOverlay.width * 0.5 * ((index % 2 === 0) ? 1 : -1))
+                    } else {
+                        return randSeedX * screenEffectOverlay.width + Math.sin(pProgress * 8.0 + index) * 40
+                    }
+                }
+
+                y: {
+                    if (root.activeScreenEffect === "fireworks") {
+                        var cy = (index % 2 === 0) ? (screenEffectOverlay.height * 0.35) : (screenEffectOverlay.height * 0.45)
+                        var angle = (index * (360.0 / 20.0)) * (Math.PI / 180.0)
+                        var dist = pProgress * (180.0 + (index % 5) * 40.0)
+                        return cy + Math.sin(angle) * dist + (pProgress * pProgress * 80)
+                    } else if (root.activeScreenEffect === "balloons" || root.activeScreenEffect === "hearts") {
+                        return (screenEffectOverlay.height + 40) - (pProgress * (screenEffectOverlay.height + 120)) * randSpeed
+                    } else if (root.activeScreenEffect === "lasers") {
+                        return (index * (screenEffectOverlay.height / 40.0)) + Math.sin(pProgress * 10.0 + index) * 60
+                    } else {
+                        return -30 + (pProgress * (screenEffectOverlay.height + 80)) * randSpeed
+                    }
+                }
+
+                rotation: (pProgress * 360 * ((index % 2 === 0) ? 1 : -1))
+                scale: {
+                    if (root.activeScreenEffect === "fireworks") {
+                        return (pProgress < 0.2) ? (pProgress * 5.0) : Math.max(0.2, (1.0 - (pProgress - 0.2) * 1.25))
+                    } else if (root.activeScreenEffect === "lasers") {
+                        return 1.4 + 0.6 * Math.sin(pProgress * 12.0 + index)
+                    } else {
+                        return 0.8 + ((index % 4) * 0.2)
+                    }
+                }
+                opacity: {
+                    if (pProgress < 0.1) return pProgress * 10.0
+                    if (pProgress > 0.75) return Math.max(0.0, (1.0 - pProgress) / 0.25)
+                    return 0.95
+                }
+
+                Text {
+                    anchors.centerIn: parent
+                    text: particleItem.particleChar
+                    font.pixelSize: (root.activeScreenEffect === "balloons" || root.activeScreenEffect === "hearts") ? 28 : ((root.activeScreenEffect === "fireworks") ? 22 : 18)
+                }
+            }
+        }
+
+        NumberAnimation {
+            id: effectAnim
+            target: effectAnim
+            property: "progress"
+            from: 0.0
+            to: 1.0
+            duration: 2500
+            running: root.activeScreenEffect.length > 0
+            property real progress: 0.0
         }
     }
 

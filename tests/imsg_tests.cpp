@@ -3216,6 +3216,29 @@ private slots:
         lastMsg = msgs.last().toMap();
         QCOMPARE(lastMsg.value(QStringLiteral("text")).toString(), QStringLiteral("Happy Birthday!"));
         QCOMPARE(lastMsg.value(QStringLiteral("expressiveEffect")).toString(), QStringLiteral("🎉 Confetti"));
+
+        // 3. Persistence across temp-* GUID replacement and server row ingestion
+        QJsonObject serverRow;
+        serverRow.insert(QStringLiteral("guid"), QStringLiteral("real-server-guid-777"));
+        serverRow.insert(QStringLiteral("chat_guid"), chatGuid);
+        serverRow.insert(QStringLiteral("text"), QStringLiteral("Happy Birthday!"));
+        serverRow.insert(QStringLiteral("isFromMe"), true);
+        serverRow.insert(QStringLiteral("is_from_me"), 1);
+        serverRow.insert(QStringLiteral("date"), QStringLiteral("2026-11-11T12:00:00Z"));
+        serverRow.insert(QStringLiteral("expressive_send_style_id"), QString()); // Server DB row missing style ID
+
+        QJsonArray rawMessages;
+        rawMessages.append(serverRow);
+
+        QHash<QString, QString> recentEffects;
+        recentEffects.insert(QStringLiteral("Happy Birthday!"), QStringLiteral("com.apple.messages.effect.CKConfettiEffect"));
+
+        QVariantList built = Backend::buildMessageListFromApi(rawMessages, {}, {}, nullptr, {}, nullptr, {}, recentEffects);
+        QCOMPARE(built.size(), 1);
+        QVariantMap restoredMsg = built.first().toMap();
+        QCOMPARE(restoredMsg.value(QStringLiteral("guid")).toString(), QStringLiteral("real-server-guid-777"));
+        QCOMPARE(restoredMsg.value(QStringLiteral("expressiveEffect")).toString(), QStringLiteral("🎉 Confetti"));
+        QVERIFY(restoredMsg.value(QStringLiteral("sendEffectLabel")).toString().contains(QStringLiteral("confetti")));
     }
 
     void testScheduledMessagesLifecycle() {
@@ -3271,6 +3294,39 @@ private slots:
 
         // Sync state to server
         backend.syncChatStateToServer();
+    }
+
+    void testQmlMainLayoutSmoke() {
+        QFile qmlFile(QStringLiteral(":/Main.qml"));
+        if (!qmlFile.exists()) qmlFile.setFileName(QStringLiteral("../../src/Main.qml"));
+        if (!qmlFile.exists()) qmlFile.setFileName(QStringLiteral("../src/Main.qml"));
+        QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QString qml = QString::fromUtf8(qmlFile.readAll());
+
+        // Verify Tapback reaction bar hover persistence & grace timer
+        QVERIFY(qml.contains(QStringLiteral("id: hoverClearTimer")));
+        QVERIFY(qml.contains(QStringLiteral("interval: 380")));
+        QVERIFY(qml.contains(QStringLiteral("readonly property bool isAnyPartHovered:")));
+        QVERIFY(qml.contains(QStringLiteral("id: msgTextHover")));
+        QVERIFY(qml.contains(QStringLiteral("id: actionHoverZone")));
+        QVERIFY(qml.contains(QStringLiteral("x: Math.min(-12, actionBar.x - 12)")));
+
+        // Verify Invisible Ink sizing and text protection
+        QVERIFY(qml.contains(QStringLiteral("id: textContainer")));
+        QVERIFY(qml.contains(QStringLiteral("readonly property bool isInvisibleInkMsg:")));
+        QVERIFY(qml.contains(QStringLiteral("Math.min(220, bubbleContent.maxTextW)")));
+        QVERIFY(qml.contains(QStringLiteral("id: invisibleInkOverlay")));
+        QVERIFY(qml.contains(QStringLiteral("opacity: (msgDelegate.isInvisibleInkMsg && !msgDelegate.invisibleInkRevealed) ? 0.0 : 1.0")));
+        QVERIFY(qml.contains(QStringLiteral("🕵️ Invisible Ink · ")));
+
+        // Verify animated expressive bubble & screen effects
+        QVERIFY(qml.contains(QStringLiteral("id: slamAnim")));
+        QVERIFY(qml.contains(QStringLiteral("id: loudAnim")));
+        QVERIFY(qml.contains(QStringLiteral("id: gentleAnim")));
+        QVERIFY(qml.contains(QStringLiteral("id: screenEffectOverlay")));
+        QVERIFY(qml.contains(QStringLiteral("property string activeScreenEffect:")));
+        QVERIFY(qml.contains(QStringLiteral("function triggerExpressiveEffect(effectText)")));
+        QVERIFY(qml.contains(QStringLiteral("function playBubbleEffect(effectLabel)")));
     }
 
 };

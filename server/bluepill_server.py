@@ -385,6 +385,9 @@ class BluePillEngine:
         self.chat_display_names_override: Dict[str, str] = {}
         self.group_participants_override: Dict[str, List[str]] = {}
         self.scheduled_messages: List[Dict[str, Any]] = []
+        self.chat_state: Dict[str, Any] = {"messageEffects": {}}
+        self.message_effects: Dict[str, str] = {}
+        self._recent_effects: Dict[Tuple[str, str], Tuple[float, str]] = {}
         self._scheduled_lock = threading.Lock()
         self._sent_history: List[Dict[str, Any]] = []
         self._load_deleted_state()
@@ -494,6 +497,12 @@ class BluePillEngine:
                     for k, v in parts.items():
                         if isinstance(k, str) and isinstance(v, list):
                             self.group_participants_override[k] = [str(x) for x in v if str(x).strip()]
+                meffs = data.get("messageEffects")
+                if isinstance(meffs, dict):
+                    for k, v in meffs.items():
+                        if isinstance(k, str) and isinstance(v, str):
+                            self.message_effects[k] = v
+                self.chat_state["messageEffects"] = self.message_effects
             except Exception:
                 pass
 
@@ -502,12 +511,14 @@ class BluePillEngine:
             return
         try:
             os.makedirs(os.path.dirname(self.chat_state_path), exist_ok=True)
+            self.chat_state["messageEffects"] = self.message_effects
             payload = {
                 "pinnedChatGuids": list(self.pinned_chat_guids),
                 "mutedChatGuids": sorted(self.muted_chat_guids),
                 "archivedChatGuids": sorted(self.archived_chat_guids),
                 "displayNames": dict(self.chat_display_names_override),
                 "participants": dict(self.group_participants_override),
+                "messageEffects": dict(self.message_effects),
                 "updatedAt": int(time.time() * 1000),
             }
             tmp_path = self.chat_state_path + ".tmp"
@@ -1297,7 +1308,14 @@ class BluePillEngine:
                 "associatedMessageGuid": r["associated_message_guid"] or "",
                 "associatedMessageType": int(assoc_type) if assoc_type is not None else 0,
                 "associatedMessageEmoji": r["associated_message_emoji"] or "",
-                "expressiveSendStyleId": r["expressive_send_style_id"] or "",
+                "expressiveSendStyleId": (
+                    r["expressive_send_style_id"]
+                    or self.message_effects.get(row_guid, "")
+                    or self.message_effects.get(norm_guid_chk, "")
+                    or self.chat_state.get("messageEffects", {}).get(row_guid, "")
+                    or self.chat_state.get("messageEffects", {}).get(norm_guid_chk, "")
+                    or (next((rec[1] for c in chats_by_msg.get(mid, []) for rec in [self._recent_effects.get((c.get("guid", ""), text))] if rec and (time.time() - rec[0] < 60.0)), ""))
+                ),
                 "replyToGuid": r["reply_to_guid"] or "",
                 "threadOriginatorGuid": r["thread_originator_guid"] or "",
                 "threadOriginatorPart": r["thread_originator_part"] or "",
@@ -1768,6 +1786,13 @@ class BluePillEngine:
         helper_guid = ""
         used_method = "none"
 
+        if effect_id:
+            self.chat_state.setdefault("messageEffects", {})[temp_guid] = effect_id
+            self.message_effects[temp_guid] = effect_id
+            if chat_guid:
+                self._recent_effects[(chat_guid, message.strip())] = (time.time(), effect_id)
+            self._save_chat_state()
+
         if method_req != "apple-script":
             sent, helper_guid = self._send_helper_payload_with_tx(
                 "send-message",
@@ -1786,6 +1811,9 @@ class BluePillEngine:
                 used_method = "private-api"
                 if helper_guid and temp_guid:
                     self.temp_guid_by_guid[helper_guid] = temp_guid
+                    if effect_id:
+                        self.chat_state.setdefault("messageEffects", {})[helper_guid] = effect_id
+                        self.message_effects[helper_guid] = effect_id
 
         if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
             sent = self._send_via_applescript(chat_guid, message)
@@ -1804,6 +1832,14 @@ class BluePillEngine:
         elapsed_ms = int((time.time() - t0) * 1000)
         if db_msg is not None:
             db_msg["tempGuid"] = temp_guid
+            if effect_id:
+                mguid = db_msg.get("guid") or ""
+                if mguid:
+                    self.chat_state.setdefault("messageEffects", {})[mguid] = effect_id
+                    self.message_effects[mguid] = effect_id
+                if not db_msg.get("expressiveSendStyleId"):
+                    db_msg["expressiveSendStyleId"] = effect_id
+                self._save_chat_state()
             self.logger.info(
                 "[send_text] chat=%s tempGuid=%s method=%s guid=%s rowid=%s elapsed_ms=%d",
                 chat_guid,
@@ -1818,6 +1854,10 @@ class BluePillEngine:
 
         now_ms = int(time.time() * 1000)
         resolved_guid = helper_guid or temp_guid
+        if effect_id and resolved_guid:
+            self.chat_state.setdefault("messageEffects", {})[resolved_guid] = effect_id
+            self.message_effects[resolved_guid] = effect_id
+            self._save_chat_state()
         if helper_guid and temp_guid:
             self.temp_guid_by_guid[helper_guid] = temp_guid
         msg_obj: Dict[str, Any] = {
@@ -2231,6 +2271,7 @@ class BluePillEngine:
             "archivedChatGuids": sorted(self.archived_chat_guids),
             "displayNames": dict(self.chat_display_names_override),
             "participants": dict(self.group_participants_override),
+            "messageEffects": dict(self.message_effects),
         }
 
     def update_chat_state(self, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -2246,6 +2287,11 @@ class BluePillEngine:
             self.archived_chat_guids = {
                 str(x).strip() for x in body["archivedChatGuids"] if str(x).strip()
             }
+        if isinstance(body.get("messageEffects"), dict):
+            for k, v in body["messageEffects"].items():
+                if isinstance(k, str) and isinstance(v, str):
+                    self.message_effects[k] = v
+            self.chat_state["messageEffects"] = self.message_effects
         cg = str(body.get("chatGuid") or "").strip()
         if cg:
             if "pin" in body:
@@ -2770,6 +2816,16 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       </div>
       <div id="messagesPane" class="messages"></div>
       <div class="composer">
+        <select id="effectSelect" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px;font-size:12px;">
+          <option value="">✨ Normal</option>
+          <option value="com.apple.messages.effect.CKConfettiEffect">🎉 Confetti</option>
+          <option value="com.apple.messages.effect.CKFireworksEffect">🎆 Fireworks</option>
+          <option value="com.apple.messages.effect.CKLasersEffect">✨ Lasers</option>
+          <option value="com.apple.MobileSMS.expressivesend.impact">💥 Slam</option>
+          <option value="com.apple.MobileSMS.expressivesend.loud">📢 Loud</option>
+          <option value="com.apple.MobileSMS.expressivesend.gentle">🪶 Gentle</option>
+          <option value="com.apple.MobileSMS.expressivesend.invisibleink">🕵️ Invisible Ink</option>
+        </select>
         <input id="msgInput" type="text" placeholder="iMessage…" onkeydown="if(event.key==='Enter')sendMsg()" />
         <button onclick="sendMsg()">Send</button>
       </div>
@@ -2930,6 +2986,15 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           btn.onclick = () => navigator.clipboard.writeText(otp);
           d.appendChild(btn);
         }
+        if (m.expressiveSendStyleId) {
+          const effBadge = document.createElement('button');
+          effBadge.className = 'otp-btn';
+          effBadge.style.background = 'rgba(10, 132, 255, 0.28)';
+          effBadge.style.border = '1px solid rgba(10, 132, 255, 0.5)';
+          effBadge.textContent = '✨ ' + formatEffectName(m.expressiveSendStyleId);
+          effBadge.onclick = (e) => { e.stopPropagation(); playWebEffect(m.expressiveSendStyleId); };
+          d.appendChild(effBadge);
+        }
         const meta = document.createElement('div');
         meta.className = 'msg-meta';
         const dt = m.dateCreated ? new Date(m.dateCreated).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
@@ -2943,15 +3008,52 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       pane.scrollTop = pane.scrollHeight;
     }
 
+    function formatEffectName(id) {
+      if (!id) return '';
+      if (id.indexOf('invisibleink') !== -1) return 'Invisible Ink';
+      if (id.indexOf('impact') !== -1) return 'Slam';
+      if (id.indexOf('loud') !== -1) return 'Loud';
+      if (id.indexOf('gentle') !== -1) return 'Gentle';
+      if (id.indexOf('CKConfettiEffect') !== -1) return 'Confetti';
+      if (id.indexOf('CKLasersEffect') !== -1) return 'Lasers';
+      if (id.indexOf('CKFireworksEffect') !== -1) return 'Fireworks';
+      return id.split('.').pop() || id;
+    }
+
+    function playWebEffect(effectId) {
+      const container = document.createElement('div');
+      container.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:9999;overflow:hidden;';
+      document.body.appendChild(container);
+      const isFireworks = effectId.indexOf('Fireworks') !== -1;
+      const isLasers = effectId.indexOf('Lasers') !== -1;
+      const emojis = isFireworks ? ['🎆', '🎇', '✨', '💥'] : (isLasers ? ['⚡', '🔦', '✨'] : ['🎊', '🎉', '✨', '🎈', '❤️']);
+      for (let i = 0; i < 35; i++) {
+        const p = document.createElement('div');
+        p.textContent = emojis[i % emojis.length];
+        p.style.cssText = 'position:absolute;left:' + ((i * 19) % 96) + 'vw;top:-30px;font-size:' + (18 + (i % 16)) + 'px;transition:all ' + (1.4 + (i%5)*0.2) + 's cubic-bezier(0.25,1,0.5,1);opacity:1;';
+        container.appendChild(p);
+        setTimeout(() => {
+          p.style.top = (isFireworks ? '40vh' : '105vh');
+          p.style.transform = 'rotate(' + ((i % 2 === 0 ? 360 : -360) * 1.5) + 'deg) scale(1.2)';
+          p.style.opacity = '0';
+        }, 30);
+      }
+      setTimeout(() => container.remove(), 2400);
+    }
+
     async function sendMsg() {
       const input = document.getElementById('msgInput');
       const text = input.value.trim();
       if (!text || !activeChatGuid) return;
       input.value = '';
+      const effSel = document.getElementById('effectSelect');
+      const effectId = effSel ? effSel.value : '';
+      if (effSel) effSel.value = '';
+      if (effectId) playWebEffect(effectId);
       await fetch(apiUrl('/api/v1/message/text'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({chatGuid: activeChatGuid, message: text, tempGuid: 'web-' + Date.now()})
+        body: JSON.stringify({chatGuid: activeChatGuid, message: text, tempGuid: 'web-' + Date.now(), effectId: effectId})
       });
       await selectChat(activeChatGuid, document.getElementById('chatHeaderTitle').textContent);
     }
