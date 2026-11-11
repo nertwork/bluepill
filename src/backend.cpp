@@ -2677,7 +2677,7 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
         // Notification for brand new incoming message
         if (!isInitialLoad && !alreadySeen) {
             newIncomingMessages.append(m);
-            const bool isFromMe = m.value(QStringLiteral("isFromMe")).toBool();
+            const bool isFromMe = m.value(QStringLiteral("isFromMe")).toBool() || m.value(QStringLiteral("is_from_me")).toBool() || (m.value(QStringLiteral("is_from_me")).toInt(0) == 1);
             if (!isFromMe && !msgIsRead && isMessageUnread(m, m_readWatermarks.value(chatGuid, 0), m_unreadOverrides.value(chatGuid, 0)) && dateCreated >= m_startupTimestamp - 3600000LL) {
                 if (m_notificationsEnabled && !m_mutedChats.contains(chatGuid)) {
                     const QString senderAddr = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("address")).toString();
@@ -3390,7 +3390,8 @@ QVariantList Backend::buildMessageListFromApi(
     QStringList *missingAttachmentsOut,
     const QHash<QString, QVariantMap> &previewCache,
     QStringList *missingPreviewsOut,
-    const QSet<QString> &deletedMessageGuids) {
+    const QSet<QString> &deletedMessageGuids,
+    const QHash<QString, QString> &recentOutboundEffects) {
 
     // Collect chronological (oldest -> newest), skipping deleted/retracted messages
     QList<QJsonObject> chronological;
@@ -3431,7 +3432,7 @@ QVariantList Backend::buildMessageListFromApi(
     };
 
     auto resolveSenderForMessage = [&](const QJsonObject &m) -> QString {
-        if (m.value(QStringLiteral("isFromMe")).toBool()) {
+        if (m.value(QStringLiteral("isFromMe")).toBool() || m.value(QStringLiteral("is_from_me")).toBool() || (m.value(QStringLiteral("is_from_me")).toInt(0) == 1)) {
             return QStringLiteral("You");
         }
         QString handleAddr = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("address")).toString().trimmed();
@@ -3782,6 +3783,12 @@ QVariantList Backend::buildMessageListFromApi(
         if (rawEffect.isEmpty()) {
             rawEffect = m.value(QStringLiteral("expressive_send_style_id")).toString().trimmed();
         }
+        if (rawEffect.isEmpty() && isFromMe && !recentOutboundEffects.isEmpty()) {
+            const QString normTxt = text.trimmed();
+            if (recentOutboundEffects.contains(normTxt)) {
+                rawEffect = recentOutboundEffects.value(normTxt);
+            }
+        }
         const QString sendEffectLabel = formatExpressiveEffectLabel(rawEffect);
         QString expressiveEffectName;
         if (rawEffect.endsWith(QStringLiteral(".invisibleink"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🕵️ Invisible Ink");
@@ -3939,6 +3946,11 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ms
                           (incomingHasAtt && (vm.value(QStringLiteral("hasImageAttachment")).toBool() || vm.value(QStringLiteral("hasFileAttachment")).toBool()))))) {
                         vm.insert(QStringLiteral("guid"), msgGuid);
                         vm.insert(QStringLiteral("receiptText"), QStringLiteral("Delivered"));
+                        if (vm.value(QStringLiteral("expressiveSendStyleId")).toString().isEmpty() && m_recentOutboundEffects.contains(incomingText)) {
+                            const QString effId = m_recentOutboundEffects.value(incomingText);
+                            vm.insert(QStringLiteral("expressiveSendStyleId"), effId);
+                            vm.insert(QStringLiteral("sendEffectLabel"), formatExpressiveEffectLabel(effId));
+                        }
                         m_messages[i] = vm;
                     }
                 }
@@ -4029,7 +4041,7 @@ void Backend::rebuildSelectedChatMessages() {
 
     QStringList missingAtts;
     QStringList missingPreviews;
-    QVariantList nextMessages = buildMessageListFromApi(rawDesc, m_contactNames, m_attachmentPaths, &missingAtts, m_linkPreviewCache, &missingPreviews, m_deletedMessageGuids);
+    QVariantList nextMessages = buildMessageListFromApi(rawDesc, m_contactNames, m_attachmentPaths, &missingAtts, m_linkPreviewCache, &missingPreviews, m_deletedMessageGuids, m_recentOutboundEffects);
 
     // Retain any pending optimistic messages (temp-*) from m_messages if their text/attachment is not yet in nextMessages
     const qint64 nowRebuildMs = QDateTime::currentMSecsSinceEpoch();
@@ -7312,6 +7324,8 @@ void Backend::stopAndSendVoiceRecording() {
 void Backend::sendMessageWithEffect(const QString &text, const QString &effectId) {
     const QString trimmed = replaceEmojiShortcodes(text.trimmed());
     if (m_selectedChatGuid.isEmpty() || trimmed.isEmpty()) return;
+
+    m_recentOutboundEffects.insert(trimmed, effectId);
 
     const QString tempGuid = QStringLiteral("temp-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
 

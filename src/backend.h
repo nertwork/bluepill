@@ -267,7 +267,8 @@ public:
         QStringList *missingAttachmentsOut = nullptr,
         const QHash<QString, QVariantMap> &previewCache = {},
         QStringList *missingPreviewsOut = nullptr,
-        const QSet<QString> &deletedMessageGuids = {});
+        const QSet<QString> &deletedMessageGuids = {},
+        const QHash<QString, QString> &recentOutboundEffects = {});
 
     // Contact resolution & state
     void loadCredentials();
@@ -416,6 +417,7 @@ private:
     QHash<QString, QString> m_chatDisplayNames;
     QHash<QString, int> m_chatStyles;
     QHash<QString, QString> m_attachmentPaths;
+    QHash<QString, QString> m_recentOutboundEffects;
     QHash<QString, QHash<QString, QJsonObject>> m_chatMessagesCache;
     QSet<QString> m_mutedChats;
     QStringList m_pinnedChats;
