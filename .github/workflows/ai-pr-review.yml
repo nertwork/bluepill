@@ -55,8 +55,21 @@ jobs:
           base_sha = os.environ["BASE_SHA"]
           head_sha = os.environ["HEAD_SHA"]
 
-          diff = subprocess.check_output(["git", "diff", f"{base_sha}...{head_sha}"], text=True, errors="ignore")
-          changed_files = subprocess.check_output(["git", "diff", "--name-only", f"{base_sha}...{head_sha}"], text=True, errors="ignore").strip().splitlines()
+          req_diff = urllib.request.Request(f"https://api.github.com/repos/{repo}/pulls/{pr_num}", headers={
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github.v3.diff",
+              "User-Agent": "imsg-ai-pr-reviewer"
+          })
+          with urllib.request.urlopen(req_diff, timeout=15) as rd:
+              diff = rd.read().decode(errors="ignore")
+
+          req_files = urllib.request.Request(f"https://api.github.com/repos/{repo}/pulls/{pr_num}/files", headers={
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "imsg-ai-pr-reviewer"
+          })
+          with urllib.request.urlopen(req_files, timeout=15) as rf:
+              changed_files = [x["filename"] for x in json.loads(rf.read().decode())]
           cppcheck_out = open("/tmp/cppcheck.txt", errors="ignore").read().strip() if os.path.exists("/tmp/cppcheck.txt") else ""
 
           # 1. Deterministic Security, PII & Architecture Rubric Checks
