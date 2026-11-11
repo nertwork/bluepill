@@ -4,6 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/nertwork/imsg?color=7aa2f7)](https://github.com/nertwork/imsg/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-9ece6a.svg)](LICENSE)
 [![Arch Linux / AUR](https://img.shields.io/badge/Arch_Linux-AUR_Package-1793d1?logo=arch-linux&logoColor=white)](https://aur.archlinux.org/packages/imsg)
+[![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/nertwork/imsg?utm_source=oss&utm_medium=github&utm_campaign=nertwork%2Fimsg&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)](https://coderabbit.ai)
 
 **`imsg`** is a fast, keyboard-centric, native **C++20 and Qt6/QML** desktop and CLI client for **iMessage**, **RCS**, and **SMS** on Linux (Wayland / Hyprland / Omarchy / X11), backed by a macOS [BlueBubbles](https://bluebubbles.app/) relay server.
 
