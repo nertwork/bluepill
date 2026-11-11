@@ -8,6 +8,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QObject>
+#include <QProcess>
 #include <QPointer>
 #include <QSet>
 #include <QString>
@@ -38,6 +39,24 @@ struct EmojiSpec {
     QString emoji;
     QString category;
     QString keywords;
+};
+
+
+struct AttachmentInfo {
+    QString guid;
+    QString transferName;
+    QString mimeType;
+    QString localUrl;
+    bool isImage = false;
+    bool isAudio = false;
+    int durationSeconds = 0;
+    QVariantList waveformBars;
+};
+
+struct MessageModel {
+    enum Roles {
+        AttachmentsRole = Qt::UserRole + 100
+    };
 };
 
 class Backend : public QObject {
@@ -76,6 +95,16 @@ class Backend : public QObject {
     Q_PROPERTY(int loadedMessageCount READ loadedMessageCount NOTIFY messagesChanged)
     Q_PROPERTY(int historySyncDays READ historySyncDays WRITE setHistorySyncDays NOTIFY historySyncDaysChanged)
     Q_PROPERTY(bool syncingHistory READ syncingHistory NOTIFY syncingHistoryChanged)
+    Q_PROPERTY(QString playingAudioGuid READ playingAudioGuid NOTIFY audioPlaybackChanged)
+    Q_PROPERTY(bool audioPlaying READ audioPlaying NOTIFY audioPlaybackChanged)
+    Q_PROPERTY(double audioProgress READ audioProgress NOTIFY audioPlaybackChanged)
+    Q_PROPERTY(QString audioDurationText READ audioDurationText NOTIFY audioPlaybackChanged)
+    Q_PROPERTY(bool recordingVoice READ recordingVoice NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(int voiceRecordingSeconds READ voiceRecordingSeconds NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(QVariantList voiceRecordingWaveform READ voiceRecordingWaveform NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(QVariantList scheduledMessages READ scheduledMessages NOTIFY scheduledMessagesChanged)
+    Q_PROPERTY(QStringList selectedChatParticipants READ selectedChatParticipants NOTIFY selectedChatChanged)
+
 
 public:
     explicit Backend(bool autoStart = true, QObject *parent = nullptr);
@@ -116,6 +145,16 @@ public:
     int loadedMessageCount() const { return m_messages.size(); }
     int historySyncDays() const { return m_historySyncDays; }
     bool syncingHistory() const { return m_syncingHistory; }
+    QString playingAudioGuid() const { return m_playingAudioGuid; }
+    bool audioPlaying() const { return m_audioPlaying; }
+    double audioProgress() const { return m_audioProgress; }
+    QString audioDurationText() const { return m_audioDurationText; }
+    bool recordingVoice() const { return m_recordingVoice; }
+    int voiceRecordingSeconds() const { return m_voiceRecordingSeconds; }
+    QVariantList voiceRecordingWaveform() const { return m_voiceRecordingWaveform; }
+    QVariantList scheduledMessages() const { return m_scheduledMessages; }
+    QStringList selectedChatParticipants() const;
+
 
     void setWindowActive(bool active);
     void setNotificationsEnabled(bool enabled);
@@ -176,6 +215,21 @@ public:
     Q_INVOKABLE static QString extractOtpCode(const QString &text) { return extractVerificationCode(text); }
     Q_INVOKABLE QString pasteClipboardImageToTempFile();
     Q_INVOKABLE void sendAttachment(const QString &chatGuid, const QString &filePath, const QString &caption = QString());
+    // Audio, Voice, Effects & Scheduling
+    Q_INVOKABLE static bool isAudioAttachment(const QString &mimeType, const QString &fileName);
+    Q_INVOKABLE static QVariantList computeWaveformBars(const QString &seed, int count = 28);
+    Q_INVOKABLE void toggleAudioPlayback(const QString &attachmentGuid, const QString &sourceUrl = QString());
+    Q_INVOKABLE void seekAudioPlayback(const QString &attachmentGuid, double ratio);
+    Q_INVOKABLE void startVoiceRecording();
+    Q_INVOKABLE void stopAndSendVoiceRecording();
+    Q_INVOKABLE void cancelVoiceRecording();
+    Q_INVOKABLE void sendMessageWithEffect(const QString &text, const QString &effectId);
+    Q_INVOKABLE void scheduleMessage(const QString &text, qint64 sendAtMs);
+    Q_INVOKABLE void cancelScheduledMessage(const QString &scheduleId);
+    Q_INVOKABLE void addParticipantToActiveChat(const QString &address);
+    Q_INVOKABLE void removeParticipantFromActiveChat(const QString &address);
+    Q_INVOKABLE void syncChatStateToServer();
+
 
     // Contact & recipient autocomplete
     Q_INVOKABLE QVariantList searchContacts(const QString &query = QString(), int limit = 15) const;
@@ -260,6 +314,10 @@ signals:
     void windowActiveChanged();
     void historySyncDaysChanged();
     void syncingHistoryChanged();
+    void audioPlaybackChanged();
+    void voiceRecordingChanged();
+    void scheduledMessagesChanged();
+
     void toastMessage(const QString &text);
     void attachmentReady(const QString &attachmentGuid, const QString &localUrl);
     void linkPreviewUpdated(const QString &messageGuid, const QVariantMap &previewData);
@@ -389,4 +447,21 @@ private:
     qint64 m_highestMessageRowId = 0;
     qint64 m_startupTimestamp = 0;
     qint64 m_lastContactsFetchMs = 0;
+    QString m_playingAudioGuid;
+    bool m_audioPlaying = false;
+    double m_audioProgress = 0.0;
+    QString m_audioDurationText = QStringLiteral("0:00");
+    QTimer m_audioPlaybackTimer;
+    int m_audioPlaybackElapsedMs = 0;
+    int m_audioPlaybackDurationMs = 15000;
+    QPointer<QProcess> m_audioProcess;
+
+    bool m_recordingVoice = false;
+    int m_voiceRecordingSeconds = 0;
+    QVariantList m_voiceRecordingWaveform;
+    QTimer m_voiceRecordingTimer;
+    QString m_currentVoiceRecordingPath;
+
+    QVariantList m_scheduledMessages;
+
 };

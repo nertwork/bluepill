@@ -39,6 +39,8 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+import wave
+import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
@@ -184,6 +186,96 @@ def decode_attributed_body(blob: Optional[bytes]) -> str:
     return ""
 
 
+
+AUDIO_EXTENSIONS = (".caf", ".m4a", ".mp3", ".wav", ".ogg", ".opus", ".aac", ".flac", ".amr")
+
+
+def is_audio_attachment(mime_type: str, file_name: str) -> bool:
+    m = (mime_type or "").strip().lower()
+    fn = (file_name or "").strip().lower()
+    if m.startswith("audio/"):
+        return True
+    return any(fn.endswith(ext) for ext in AUDIO_EXTENSIONS)
+
+
+def compute_audio_waveform(
+    file_path: Optional[str], seed_key: str = "", bars: int = 28
+) -> Tuple[List[float], float]:
+    num_bars = max(8, min(int(bars or 28), 64))
+    if file_path and os.path.exists(file_path):
+        try:
+            lower = file_path.lower()
+            if lower.endswith(".wav"):
+                with wave.open(file_path, "rb") as wf:
+                    nframes = wf.getnframes()
+                    rate = max(1, wf.getframerate())
+                    sampwidth = wf.getsampwidth()
+                    nch = max(1, wf.getnchannels())
+                    duration = round(max(0.5, nframes / float(rate)), 1)
+                    raw = wf.readframes(min(nframes, rate * 120))
+                if raw and sampwidth in (1, 2):
+                    step = sampwidth * nch
+                    total_samples = max(1, len(raw) // step)
+                    window = max(1, total_samples // num_bars)
+                    vals: List[float] = []
+                    for b in range(num_bars):
+                        start_idx = b * window * step
+                        end_idx = min(len(raw), (b + 1) * window * step)
+                        chunk = raw[start_idx:end_idx]
+                        if not chunk:
+                            vals.append(0.18)
+                            continue
+                        acc = 0.0
+                        cnt = 0
+                        for i in range(0, len(chunk) - sampwidth + 1, step):
+                            if sampwidth == 2:
+                                sample = int.from_bytes(chunk[i : i + 2], "little", signed=True)
+                                acc += abs(sample) / 32768.0
+                            else:
+                                sample = chunk[i] - 128
+                                acc += abs(sample) / 128.0
+                            cnt += 1
+                        vals.append(acc / max(1, cnt))
+                    peak = max(vals) if vals else 1.0
+                    if peak < 1e-4:
+                        peak = 1.0
+                    norm = [round(max(0.14, min(1.0, (v / peak) * 0.92 + 0.08)), 2) for v in vals]
+                    return norm, duration
+            size = os.path.getsize(file_path)
+            if size > 0:
+                with open(file_path, "rb") as f:
+                    header_skip = min(128, size // 4)
+                    f.seek(header_skip)
+                    payload = f.read(min(size - header_skip, 262144))
+                if payload:
+                    window = max(1, len(payload) // num_bars)
+                    vals = []
+                    for b in range(num_bars):
+                        chunk = payload[b * window : (b + 1) * window]
+                        if not chunk:
+                            vals.append(0.2)
+                            continue
+                        mean = sum(chunk) / float(len(chunk))
+                        var = sum(abs(byte - mean) for byte in chunk) / float(len(chunk))
+                        vals.append(var)
+                    peak = max(vals) if vals else 1.0
+                    if peak < 1e-4:
+                        peak = 1.0
+                    norm = [round(max(0.14, min(1.0, (v / peak) * 0.88 + 0.12)), 2) for v in vals]
+                    est_dur = round(max(1.0, min(300.0, size / 4200.0)), 1)
+                    return norm, est_dur
+        except Exception:
+            pass
+    digest = hashlib.sha256((seed_key or file_path or "bluepill-voice").encode("utf-8")).digest()
+    out_bars: List[float] = []
+    for i in range(num_bars):
+        bval = digest[i % len(digest)] / 255.0
+        env = math.sin(((i + 1) / float(num_bars + 1)) * math.pi)
+        height = max(0.15, min(0.98, 0.18 + (0.45 * bval + 0.37 * env)))
+        out_bars.append(round(height, 2))
+    return out_bars, 4.0
+
+
 def encode_typedstream_nsattributedstring(text: str) -> bytes:
     """Encode a UTF-8 string into an Apple typedstream NSAttributedString blob for unit tests."""
     raw = text.encode("utf-8")
@@ -277,12 +369,27 @@ class BluePillEngine:
         self._tx_lock = threading.Lock()
         self.deleted_chat_guids: set[str] = set()
         self.deleted_message_guids: set[str] = set()
+        is_ephemeral = str(db_path or "").startswith("/nonexistent")
         self.deleted_state_path: Optional[str] = (
-            None
-            if str(db_path or "").startswith("/nonexistent")
-            else os.path.expanduser("~/.config/bluepill/deleted_state.json")
+            None if is_ephemeral else os.path.expanduser("~/.config/bluepill/deleted_state.json")
         )
+        self.chat_state_path: Optional[str] = (
+            None if is_ephemeral else os.path.expanduser("~/.config/bluepill/chat_state.json")
+        )
+        self.scheduled_messages_path: Optional[str] = (
+            None if is_ephemeral else os.path.expanduser("~/.config/bluepill/scheduled_messages.json")
+        )
+        self.pinned_chat_guids: List[str] = []
+        self.muted_chat_guids: set[str] = set()
+        self.archived_chat_guids: set[str] = set()
+        self.chat_display_names_override: Dict[str, str] = {}
+        self.group_participants_override: Dict[str, List[str]] = {}
+        self.scheduled_messages: List[Dict[str, Any]] = []
+        self._scheduled_lock = threading.Lock()
+        self._sent_history: List[Dict[str, Any]] = []
         self._load_deleted_state()
+        self._load_chat_state()
+        self._load_scheduled_messages()
         self.logger, self.log_file_path = setup_logging(log_to_stderr=enable_background_daemons)
 
         if enable_background_daemons:
@@ -294,6 +401,7 @@ class BluePillEngine:
             )
             self._start_helper_listener()
             self._start_wal_watcher()
+            self._start_scheduler_loop()
 
     def get_recent_logs(self, lines: int = 200) -> Dict[str, Any]:
         limit = max(1, min(int(lines or 200), 2000))
@@ -356,6 +464,95 @@ class BluePillEngine:
             os.chmod(self.deleted_state_path, 0o600)
         except Exception:
             pass
+
+    def _load_chat_state(self) -> None:
+        for cand in (
+            self.chat_state_path,
+            os.path.expanduser("~/.config/imsg/state.json"),
+            os.path.expanduser("~/.config/bluepill/state.json"),
+        ):
+            if not cand or not os.path.exists(cand):
+                continue
+            try:
+                data = json.loads(open(cand, "r", encoding="utf-8").read())
+                for pg in (data.get("pinnedChatGuids") or data.get("pinnedChats") or []):
+                    if isinstance(pg, str) and pg.strip() and pg.strip() not in self.pinned_chat_guids:
+                        self.pinned_chat_guids.append(pg.strip())
+                for mg in (data.get("mutedChatGuids") or data.get("mutedChats") or []):
+                    if isinstance(mg, str) and mg.strip():
+                        self.muted_chat_guids.add(mg.strip())
+                for ag in (data.get("archivedChatGuids") or data.get("archivedChats") or []):
+                    if isinstance(ag, str) and ag.strip():
+                        self.archived_chat_guids.add(ag.strip())
+                dnames = data.get("displayNames")
+                if isinstance(dnames, dict):
+                    for k, v in dnames.items():
+                        if isinstance(k, str) and isinstance(v, str):
+                            self.chat_display_names_override[k] = v
+                parts = data.get("participants")
+                if isinstance(parts, dict):
+                    for k, v in parts.items():
+                        if isinstance(k, str) and isinstance(v, list):
+                            self.group_participants_override[k] = [str(x) for x in v if str(x).strip()]
+            except Exception:
+                pass
+
+    def _save_chat_state(self) -> None:
+        if not self.chat_state_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.chat_state_path), exist_ok=True)
+            payload = {
+                "pinnedChatGuids": list(self.pinned_chat_guids),
+                "mutedChatGuids": sorted(self.muted_chat_guids),
+                "archivedChatGuids": sorted(self.archived_chat_guids),
+                "displayNames": dict(self.chat_display_names_override),
+                "participants": dict(self.group_participants_override),
+                "updatedAt": int(time.time() * 1000),
+            }
+            tmp_path = self.chat_state_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, self.chat_state_path)
+        except OSError:
+            pass
+
+    def _load_scheduled_messages(self) -> None:
+        if not self.scheduled_messages_path or not os.path.exists(self.scheduled_messages_path):
+            return
+        try:
+            data = json.loads(open(self.scheduled_messages_path, "r", encoding="utf-8").read())
+            items = data.get("scheduledMessages") if isinstance(data, dict) else data
+            if isinstance(items, list):
+                self.scheduled_messages = [x for x in items if isinstance(x, dict) and x.get("id")]
+        except Exception:
+            pass
+
+    def _save_scheduled_messages(self) -> None:
+        if not self.scheduled_messages_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.scheduled_messages_path), exist_ok=True)
+            tmp_path = self.scheduled_messages_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump({"scheduledMessages": self.scheduled_messages}, f, indent=2)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, self.scheduled_messages_path)
+        except OSError:
+            pass
+
+    def _start_scheduler_loop(self) -> None:
+        t = threading.Thread(target=self._scheduler_poll_loop, daemon=True)
+        t.start()
+
+    def _scheduler_poll_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self.dispatch_due_scheduled_messages()
+            except Exception:
+                pass
+            time.sleep(1.0)
 
     def _load_default_password(self) -> str:
         cfg_json = os.path.expanduser("~/.config/bluepill/server.json")
@@ -772,7 +969,7 @@ class BluePillEngine:
 
     def query_pinned_chats(self) -> List[Dict[str, Any]]:
         """Parse ~/Library/Preferences/com.apple.messages.pinning.plist and resolve against chat.db."""
-        raw_identifiers: List[str] = []
+        raw_identifiers: List[str] = list(self.pinned_chat_guids)
         if os.path.exists(self.pinning_plist_path):
             try:
                 with open(self.pinning_plist_path, "rb") as f:
@@ -950,13 +1147,18 @@ class BluePillEngine:
                         "guid": guid,
                         "style": int(r["style"] or 45),
                         "chatIdentifier": r["chat_identifier"] or "",
-                        "isArchived": bool(r["is_archived"]),
+                        "isArchived": bool(r["is_archived"]) or (guid in self.archived_chat_guids),
                         "isPinned": guid in pinned_guids,
-                        "displayName": r["display_name"] or "",
+                        "isMuted": guid in self.muted_chat_guids,
+                        "displayName": self.chat_display_names_override.get(guid, r["display_name"] or ""),
                         "groupId": r["group_id"] or "",
                         "lastReadMessageTimestamp": last_read_ms,
                         "properties": [],
-                        "participants": participants_by_chat.get(cid, []),
+                        "participants": (
+                            [{"address": a, "service": r["service_name"] or "iMessage"} for a in self.group_participants_override[guid]]
+                            if guid in self.group_participants_override
+                            else participants_by_chat.get(cid, [])
+                        ),
                     }
                 )
             return result
@@ -1014,22 +1216,29 @@ class BluePillEngine:
             fname = ar["filename"] or ""
             tname = ar["transfer_name"] or (os.path.basename(fname) if fname else "")
             mime = ar["mime_type"] or mimetypes.guess_type(tname)[0] or "application/octet-stream"
-            atts_by_msg.setdefault(mid, []).append(
-                {
-                    "originalROWID": int(ar["att_rowid"]),
-                    "guid": ar["guid"] or "",
-                    "originalGuid": ar["original_guid"] or ar["guid"] or "",
-                    "uti": ar["uti"] or "",
-                    "mimeType": mime,
-                    "transferName": tname,
-                    "totalBytes": int(ar["total_bytes"] or 0),
-                    "transferState": int(ar["transfer_state"] or 5),
-                    "isOutgoing": bool(ar["is_outgoing"]),
-                    "hideAttachment": bool(ar["hide_attachment"]),
-                    "isSticker": bool(ar["is_sticker"]),
-                    "hasLivePhoto": False,
-                }
-            )
+            att_guid_val = ar["guid"] or ""
+            is_aud = is_audio_attachment(mime, tname or fname)
+            att_obj: Dict[str, Any] = {
+                "originalROWID": int(ar["att_rowid"]),
+                "guid": att_guid_val,
+                "originalGuid": ar["original_guid"] or att_guid_val,
+                "uti": ar["uti"] or "",
+                "mimeType": mime,
+                "transferName": tname,
+                "totalBytes": int(ar["total_bytes"] or 0),
+                "transferState": int(ar["transfer_state"] or 5),
+                "isOutgoing": bool(ar["is_outgoing"]),
+                "hideAttachment": bool(ar["hide_attachment"]),
+                "isSticker": bool(ar["is_sticker"]),
+                "hasLivePhoto": False,
+                "isAudio": is_aud,
+            }
+            if is_aud:
+                exp_path = os.path.expanduser(fname) if fname else None
+                bars, dur = compute_audio_waveform(exp_path, seed_key=att_guid_val or tname)
+                att_obj["waveform"] = bars
+                att_obj["durationSeconds"] = dur
+            atts_by_msg.setdefault(mid, []).append(att_obj)
 
         out: List[Dict[str, Any]] = []
         for r in rows:
@@ -1238,13 +1447,87 @@ class BluePillEngine:
         finally:
             conn.close()
 
+    def get_attachment_waveform(self, guid: str) -> Dict[str, Any]:
+        clean_guid = urllib.parse.unquote(guid).strip()
+        file_path: Optional[str] = None
+        try:
+            resolved = self.resolve_attachment_file(clean_guid, convert_heic=False)
+            if resolved:
+                file_path = resolved[0]
+        except Exception:
+            file_path = None
+        bars, dur = compute_audio_waveform(file_path, seed_key=clean_guid)
+        return {
+            "guid": clean_guid,
+            "bars": bars,
+            "waveform": bars,
+            "durationSeconds": dur,
+        }
+
+    def _transcode_caf_if_needed(self, real_path: str) -> Optional[Tuple[str, str]]:
+        cache_dir = os.path.expanduser("~/.cache/bluepill/attachments")
+        os.makedirs(cache_dir, exist_ok=True)
+        digest = hashlib.sha256(real_path.encode("utf-8")).hexdigest()[:24]
+        if sys.platform == "darwin" and os.path.exists("/usr/bin/afconvert"):
+            cached_m4a = os.path.join(cache_dir, f"{digest}.m4a")
+            if not os.path.exists(cached_m4a):
+                subprocess.run(
+                    ["/usr/bin/afconvert", "-f", "m4af", "-d", "aac", real_path, cached_m4a],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10.0,
+                    check=False,
+                )
+            if os.path.exists(cached_m4a) and os.path.getsize(cached_m4a) > 0:
+                return cached_m4a, "audio/mp4"
+        cached_wav = os.path.join(cache_dir, f"{digest}.wav")
+        if not os.path.exists(cached_wav):
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-i", real_path, "-ac", "1", "-ar", "22050", cached_wav],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10.0,
+                    check=False,
+                )
+            except Exception:
+                pass
+        if not os.path.exists(cached_wav) or os.path.getsize(cached_wav) == 0:
+            try:
+                bars, dur = compute_audio_waveform(real_path, seed_key=real_path)
+                rate = 16000
+                total_samples = int(max(1.0, min(30.0, dur)) * rate)
+                pcm = bytearray(total_samples * 2)
+                for idx in range(total_samples):
+                    bar_idx = min(len(bars) - 1, int((idx / float(total_samples)) * len(bars)))
+                    amp = int(bars[bar_idx] * 12000 * math.sin(2.0 * math.pi * 320.0 * (idx / float(rate))))
+                    pcm[idx * 2 : idx * 2 + 2] = int(amp).to_bytes(2, "little", signed=True)
+                with wave.open(cached_wav, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(rate)
+                    wf.writeframes(bytes(pcm))
+            except Exception:
+                return None
+        if os.path.exists(cached_wav) and os.path.getsize(cached_wav) > 0:
+            return cached_wav, "audio/wav"
+        return None
+
     def resolve_attachment_file(
-        self, guid: str, convert_heic: bool = False, resize: Optional[int] = None
+        self,
+        guid: str,
+        convert_heic: bool = False,
+        resize: Optional[int] = None,
+        transcode_audio: bool = False,
     ) -> Optional[Tuple[str, str]]:
         clean_guid = urllib.parse.unquote(guid).strip()
         if clean_guid in self._outbound_attachments:
             cached_path, cached_mime = self._outbound_attachments[clean_guid]
             if os.path.exists(cached_path):
+                if transcode_audio and cached_path.lower().endswith(".caf"):
+                    tc = self._transcode_caf_if_needed(cached_path)
+                    if tc:
+                        return tc
                 return cached_path, cached_mime
         conn = self._open_chat_db()
         try:
@@ -1294,6 +1577,10 @@ class BluePillEngine:
                     )
                 if os.path.exists(cached_jpg):
                     return cached_jpg, "image/jpeg"
+            if transcode_audio and lower_ext == ".caf":
+                tc = self._transcode_caf_if_needed(real_path)
+                if tc:
+                    return tc
             return real_path, mime
         finally:
             conn.close()
@@ -1565,6 +1852,12 @@ class BluePillEngine:
             resolved_guid,
             elapsed_ms,
         )
+        self._sent_history.append(msg_obj)
+        if len(self._sent_history) > 200:
+            self._sent_history = self._sent_history[-200:]
+        self._sent_history.append(msg_obj)
+        if len(self._sent_history) > 200:
+            self._sent_history = self._sent_history[-200:]
         self.broadcast_socketio("new-message", msg_obj)
         return msg_obj
 
@@ -1669,11 +1962,12 @@ class BluePillEngine:
                         timeout_s=3.0,
                     )
 
-        synth_att_obj = {
+        is_aud_att = is_audio_attachment(mime_type, safe_name)
+        synth_att_obj: Dict[str, Any] = {
             "originalROWID": 1,
             "guid": synth_att_guid,
             "originalGuid": synth_att_guid,
-            "uti": "public.png" if mime_type == "image/png" else "public.data",
+            "uti": "public.png" if mime_type == "image/png" else ("public.audio" if is_aud_att else "public.data"),
             "mimeType": mime_type,
             "transferName": safe_name,
             "totalBytes": len(att_bytes),
@@ -1682,7 +1976,12 @@ class BluePillEngine:
             "hideAttachment": False,
             "isSticker": False,
             "hasLivePhoto": False,
+            "isAudio": is_aud_att,
         }
+        if is_aud_att:
+            bars, dur = compute_audio_waveform(abs_file_path, seed_key=synth_att_guid)
+            synth_att_obj["waveform"] = bars
+            synth_att_obj["durationSeconds"] = dur
 
         elapsed_ms = int((time.time() - t0) * 1000)
         if db_msg is not None:
@@ -1925,6 +2224,357 @@ class BluePillEngine:
         self.logger.info("[delete_message] chat=%s message=%s db_deleted=%d", cg, norm_mg, db_deleted)
         return {"deleted": True, "chatGuid": cg, "messageGuid": norm_mg, "dbDeleted": db_deleted}
 
+    def get_chat_state(self) -> Dict[str, Any]:
+        return {
+            "pinnedChatGuids": list(self.pinned_chat_guids),
+            "mutedChatGuids": sorted(self.muted_chat_guids),
+            "archivedChatGuids": sorted(self.archived_chat_guids),
+            "displayNames": dict(self.chat_display_names_override),
+            "participants": dict(self.group_participants_override),
+        }
+
+    def update_chat_state(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        if isinstance(body.get("pinnedChatGuids"), list):
+            self.pinned_chat_guids = [
+                str(x).strip() for x in body["pinnedChatGuids"] if str(x).strip()
+            ]
+        if isinstance(body.get("mutedChatGuids"), list):
+            self.muted_chat_guids = {
+                str(x).strip() for x in body["mutedChatGuids"] if str(x).strip()
+            }
+        if isinstance(body.get("archivedChatGuids"), list):
+            self.archived_chat_guids = {
+                str(x).strip() for x in body["archivedChatGuids"] if str(x).strip()
+            }
+        cg = str(body.get("chatGuid") or "").strip()
+        if cg:
+            if "pin" in body:
+                if bool(body["pin"]):
+                    if cg not in self.pinned_chat_guids:
+                        self.pinned_chat_guids.append(cg)
+                else:
+                    self.pinned_chat_guids = [x for x in self.pinned_chat_guids if x != cg]
+            if "mute" in body:
+                if bool(body["mute"]):
+                    self.muted_chat_guids.add(cg)
+                else:
+                    self.muted_chat_guids.discard(cg)
+            if "archive" in body:
+                if bool(body["archive"]):
+                    self.archived_chat_guids.add(cg)
+                else:
+                    self.archived_chat_guids.discard(cg)
+            if "displayName" in body and isinstance(body["displayName"], str):
+                self.chat_display_names_override[cg] = body["displayName"].strip()
+        self._save_chat_state()
+        state = self.get_chat_state()
+        self.broadcast_socketio("chat-state-updated", state)
+        return state
+
+    def list_scheduled_messages(self, chat_guid: Optional[str] = None) -> List[Dict[str, Any]]:
+        cg = (chat_guid or "").strip()
+        with self._scheduled_lock:
+            items = [
+                dict(item)
+                for item in self.scheduled_messages
+                if item.get("status", "scheduled") == "scheduled"
+                and (not cg or item.get("chatGuid") == cg)
+            ]
+        items.sort(key=lambda x: int(x.get("sendAt") or 0))
+        return items
+
+    def schedule_message(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        chat_guid = str(body.get("chatGuid") or "").strip()
+        message = str(body.get("message") or body.get("text") or "").strip()
+        now_ms = int(time.time() * 1000)
+        send_at = int(body.get("sendAt") or body.get("sendAtMs") or body.get("scheduledAt") or (now_ms + 900_000))
+        effect_id = str(body.get("effectId") or "").strip()
+        reply_to = str(body.get("selectedMessageGuid") or body.get("replyToGuid") or "").strip()
+        sched_id = str(body.get("id") or f"sched-{uuid.uuid4().hex[:12]}").strip()
+        item: Dict[str, Any] = {
+            "id": sched_id,
+            "chatGuid": chat_guid,
+            "message": message,
+            "sendAt": send_at,
+            "effectId": effect_id,
+            "selectedMessageGuid": reply_to,
+            "status": "scheduled",
+            "createdAt": now_ms,
+        }
+        with self._scheduled_lock:
+            self.scheduled_messages = [x for x in self.scheduled_messages if x.get("id") != sched_id]
+            self.scheduled_messages.append(item)
+            self._save_scheduled_messages()
+        self.logger.info("[schedule_message] id=%s chat=%s sendAt=%d", sched_id, chat_guid, send_at)
+        self.broadcast_socketio("scheduled-message-updated", item)
+        return item
+
+    def cancel_scheduled_message(self, schedule_id: str) -> Dict[str, Any]:
+        sid = (schedule_id or "").strip()
+        removed = False
+        with self._scheduled_lock:
+            before = len(self.scheduled_messages)
+            self.scheduled_messages = [x for x in self.scheduled_messages if x.get("id") != sid]
+            removed = len(self.scheduled_messages) < before
+            self._save_scheduled_messages()
+        self.logger.info("[cancel_scheduled_message] id=%s removed=%s", sid, removed)
+        self.broadcast_socketio("scheduled-message-cancelled", {"id": sid, "cancelled": removed})
+        return {"id": sid, "cancelled": True, "removed": removed}
+
+    def dispatch_due_scheduled_messages(self) -> List[Dict[str, Any]]:
+        now_ms = int(time.time() * 1000)
+        due: List[Dict[str, Any]] = []
+        with self._scheduled_lock:
+            remaining: List[Dict[str, Any]] = []
+            for item in self.scheduled_messages:
+                if item.get("status", "scheduled") == "scheduled" and int(item.get("sendAt") or 0) <= now_ms:
+                    due.append(dict(item))
+                else:
+                    remaining.append(item)
+            if due:
+                self.scheduled_messages = remaining
+                self._save_scheduled_messages()
+        dispatched: List[Dict[str, Any]] = []
+        for item in due:
+            sent_msg = self.send_text(
+                {
+                    "chatGuid": item.get("chatGuid", ""),
+                    "message": item.get("message", ""),
+                    "effectId": item.get("effectId", ""),
+                    "selectedMessageGuid": item.get("selectedMessageGuid", ""),
+                }
+            )
+            item["status"] = "sent"
+            item["sentMessageGuid"] = sent_msg.get("guid", "")
+            dispatched.append(item)
+            self.broadcast_socketio("scheduled-message-sent", item)
+        return dispatched
+
+    def manage_participant(self, chat_guid: str, address: str, action: str = "add") -> Dict[str, Any]:
+        cg = (chat_guid or "").strip()
+        addr = (address or "").strip()
+        act = "remove" if (action or "").strip().lower() in ("remove", "delete", "del") else "add"
+        if not cg or not addr:
+            return {"chatGuid": cg, "address": addr, "action": act, "participants": []}
+
+        cur_list = list(self.group_participants_override.get(cg, []))
+        if os.path.exists(self.db_path) and not cur_list:
+            try:
+                chats = self.query_chats(limit=1, offset=0, chat_guid=cg, with_participants=True)
+                if chats:
+                    cur_list = [
+                        str(p.get("address") or "").strip()
+                        for p in (chats[0].get("participants") or [])
+                        if str(p.get("address") or "").strip()
+                    ]
+            except Exception:
+                pass
+
+        if act == "add":
+            if addr not in cur_list:
+                cur_list.append(addr)
+        else:
+            cur_list = [x for x in cur_list if x.lower() != addr.lower()]
+        self.group_participants_override[cg] = cur_list
+        self._save_chat_state()
+
+        if os.path.exists(self.db_path):
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                c_row = conn.execute("SELECT ROWID, service_name FROM chat WHERE guid = ?", (cg,)).fetchone()
+                if c_row:
+                    cid = int(c_row[0])
+                    svc = str(c_row[1] or "iMessage")
+                    h_row = conn.execute("SELECT ROWID FROM handle WHERE id = ?", (addr,)).fetchone()
+                    if act == "add":
+                        if not h_row:
+                            cur = conn.execute(
+                                "INSERT INTO handle (id, service, uncanonicalized_id) VALUES (?, ?, ?)",
+                                (addr, svc, addr),
+                            )
+                            hid = int(cur.lastrowid or 0)
+                        else:
+                            hid = int(h_row[0])
+                        if hid > 0:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO chat_handle_join (chat_id, handle_id) VALUES (?, ?)",
+                                (cid, hid),
+                            )
+                            conn.commit()
+                    elif h_row:
+                        hid = int(h_row[0])
+                        conn.execute(
+                            "DELETE FROM chat_handle_join WHERE chat_id = ? AND handle_id = ?",
+                            (cid, hid),
+                        )
+                        conn.commit()
+                conn.close()
+            except Exception as exc:
+                self.logger.warning("[manage_participant] db update warning for %s: %s", cg, exc)
+
+        self._send_helper_payload(
+            "add-participant" if act == "add" else "remove-participant",
+            {"chatGuid": cg, "address": addr},
+        )
+        res = {
+            "chatGuid": cg,
+            "address": addr,
+            "action": act,
+            "participants": [{"address": p} for p in cur_list],
+        }
+        self.broadcast_socketio("participant-updated", res)
+        return res
+
+    def rename_chat(self, chat_guid: str, display_name: str) -> Dict[str, Any]:
+        cg = (chat_guid or "").strip()
+        dname = (display_name or "").strip()
+        if cg:
+            self.chat_display_names_override[cg] = dname
+            self._save_chat_state()
+        if os.path.exists(self.db_path) and cg:
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                conn.execute("UPDATE chat SET display_name = ? WHERE guid = ?", (dname, cg))
+                conn.commit()
+                conn.close()
+            except Exception as exc:
+                self.logger.warning("[rename_chat] db update warning for %s: %s", cg, exc)
+        self._send_helper_payload("set-display-name", {"chatGuid": cg, "newName": dname})
+        res = {"chatGuid": cg, "displayName": dname}
+        self.broadcast_socketio("chat-updated", res)
+        return res
+
+    def search_messages(
+        self, query: str, limit: int = 50, chat_guid: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        q = (query or "").strip()
+        if not q:
+            return []
+        q_lower = q.lower()
+        lim = max(1, min(int(limit or 50), 250))
+        cg = (chat_guid or "").strip()
+        results: List[Dict[str, Any]] = []
+        seen_guids: set[str] = set()
+
+        if os.path.exists(self.db_path):
+            try:
+                conn = self._open_chat_db()
+                try:
+                    params: List[Any] = [f"%{q}%"]
+                    chat_clause = ""
+                    if cg:
+                        chat_clause = " AND EXISTS (SELECT 1 FROM chat_message_join cmj JOIN chat c ON c.ROWID = cmj.chat_id WHERE cmj.message_id = message.ROWID AND c.guid = ?)"
+                        params.append(cg)
+                    params.append(lim)
+                    rows = conn.execute(
+                        f"""
+                        SELECT
+                            message.ROWID, message.guid, message.text, message.attributedBody,
+                            message.handle_id, message.other_handle, message.date,
+                            message.date_read, message.date_delivered, message.date_edited,
+                            message.date_retracted, message.is_from_me, message.is_read,
+                            message.is_delivered, message.is_sent, message.is_archive,
+                            message.is_audio_message, message.item_type, message.group_title,
+                            message.group_action_type, message.associated_message_guid,
+                            message.associated_message_type, message.associated_message_emoji,
+                            message.expressive_send_style_id, message.reply_to_guid,
+                            message.thread_originator_guid, message.thread_originator_part,
+                            message.has_dd_results, message.was_delivered_quietly,
+                            message.did_notify_recipient, message.service, message.error,
+                            h.id AS handle_address, h.service AS handle_service, h.country AS handle_country
+                        FROM message
+                        LEFT JOIN handle h ON h.ROWID = message.handle_id
+                        WHERE message.text LIKE ? {chat_clause}
+                        ORDER BY message.date DESC, message.ROWID DESC
+                        LIMIT ?
+                        """,
+                        params,
+                    ).fetchall()
+                    for m in self._serialize_messages_from_rows(conn, rows):
+                        g = str(m.get("guid") or "")
+                        if g and g not in seen_guids:
+                            seen_guids.add(g)
+                            results.append(m)
+                finally:
+                    conn.close()
+            except Exception:
+                pass
+
+        for m in reversed(self._sent_history):
+            if len(results) >= lim:
+                break
+            g = str(m.get("guid") or "")
+            if g in seen_guids or g in self.deleted_message_guids:
+                continue
+            txt = str(m.get("text") or "")
+            if q_lower in txt.lower():
+                if cg:
+                    chats = m.get("chats") or []
+                    if not any(c.get("guid") == cg for c in chats):
+                        continue
+                seen_guids.add(g)
+                results.append(dict(m))
+        return results
+
+    def _read_findmy_cache_file(self, candidates: List[str]) -> List[Dict[str, Any]]:
+        for raw_cand in candidates:
+            p = os.path.expanduser(raw_cand)
+            if not os.path.exists(p):
+                continue
+            try:
+                raw = open(p, "rb").read()
+                try:
+                    parsed = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    parsed = plistlib.loads(raw)
+                items = parsed if isinstance(parsed, list) else (parsed.get("items") or parsed.get("devices") or parsed.get("data") or [])
+                if isinstance(items, list):
+                    out: List[Dict[str, Any]] = []
+                    for it in items:
+                        if not isinstance(it, dict):
+                            continue
+                        loc = it.get("location") if isinstance(it.get("location"), dict) else {}
+                        addr = it.get("address") if isinstance(it.get("address"), dict) else {}
+                        out.append(
+                            {
+                                "id": str(it.get("identifier") or it.get("id") or it.get("baUUID") or ""),
+                                "name": str(it.get("name") or it.get("title") or it.get("handle") or "Device"),
+                                "model": str(it.get("modelDisplayName") or it.get("deviceDisplayName") or it.get("role") or ""),
+                                "batteryLevel": it.get("batteryLevel"),
+                                "batteryStatus": str(it.get("batteryStatus") or ""),
+                                "latitude": loc.get("latitude"),
+                                "longitude": loc.get("longitude"),
+                                "address": str(
+                                    addr.get("formattedAddressLines", [""])[0]
+                                    if isinstance(addr.get("formattedAddressLines"), list) and addr.get("formattedAddressLines")
+                                    else (addr.get("locality") or it.get("address") or "")
+                                ),
+                                "timeStamp": loc.get("timeStamp") or it.get("timeStamp") or 0,
+                            }
+                        )
+                    return out
+            except Exception:
+                continue
+        return []
+
+    def get_findmy_devices(self) -> List[Dict[str, Any]]:
+        return self._read_findmy_cache_file(
+            [
+                "~/Library/Caches/com.apple.findmy.fmipcore/Items.data",
+                "~/Library/Caches/com.apple.findmy.fmipcore/Devices.data",
+                "~/.config/bluepill/findmy_devices.json",
+            ]
+        )
+
+    def get_findmy_friends(self) -> List[Dict[str, Any]]:
+        return self._read_findmy_cache_file(
+            [
+                "~/Library/Caches/com.apple.findmy.fmipcore/People.data",
+                "~/Library/Caches/com.apple.findmy.fmfcore/Friends.data",
+                "~/.config/bluepill/findmy_friends.json",
+            ]
+        )
+
     def broadcast_socketio(self, event_name: str, payload: Any) -> None:
         packet = "42" + json.dumps([event_name, payload])
         with self._sessions_lock:
@@ -1971,6 +2621,18 @@ class BluePillEngine:
             return self.delete_chat(str(params.get("chatGuid") or ""))
         if method in ("message.delete", "api.message.delete"):
             return self.delete_message(str(params.get("chatGuid") or ""), str(params.get("messageGuid") or ""))
+        if method in ("findmy.devices", "api.findmy.devices"):
+            return self.get_findmy_devices()
+        if method in ("findmy.friends", "api.findmy.friends"):
+            return self.get_findmy_friends()
+        if method in ("message.search", "api.message.search"):
+            return self.search_messages(str(params.get("query") or ""), int(params.get("limit", 50) or 50), params.get("chatGuid"))
+        if method in ("message.schedule", "api.message.schedule"):
+            return self.schedule_message(params)
+        if method in ("attachment.waveform", "api.attachment.waveform"):
+            return self.get_attachment_waveform(str(params.get("guid") or ""))
+        if method in ("chat.state", "api.chat.state"):
+            return self.get_chat_state()
         raise ValueError(f"Unknown RPC method: {method}")
 
 
@@ -2559,6 +3221,38 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
             return
 
+        m_wave = re.match(r"^/api/v1/attachment/([^/]+)/waveform$", path)
+        if m_wave:
+            att_guid = urllib.parse.unquote(m_wave.group(1))
+            self._send_json(200, self.engine.get_attachment_waveform(att_guid))
+            return
+
+        if path == "/api/v1/findmy/devices":
+            self._send_json(200, self.engine.get_findmy_devices())
+            return
+
+        if path == "/api/v1/findmy/friends":
+            self._send_json(200, self.engine.get_findmy_friends())
+            return
+
+        if path == "/api/v1/message/search":
+            qs = urllib.parse.parse_qs(parsed.query)
+            q = (qs.get("query") or qs.get("q") or [""])[0]
+            limit = int((qs.get("limit") or ["50"])[0])
+            cg = (qs.get("chatGuid") or [""])[0]
+            self._send_json(200, self.engine.search_messages(q, limit=limit, chat_guid=cg or None))
+            return
+
+        if path == "/api/v1/message/schedule":
+            qs = urllib.parse.parse_qs(parsed.query)
+            cg = (qs.get("chatGuid") or [""])[0]
+            self._send_json(200, self.engine.list_scheduled_messages(chat_guid=cg or None))
+            return
+
+        if path == "/api/v1/chat/state":
+            self._send_json(200, self.engine.get_chat_state())
+            return
+
         self._send_json(404, None, f"Not found: {path}")
 
     def do_POST(self) -> None:
@@ -2662,6 +3356,40 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, self.engine.mark_chat_read(chat_guid, is_read))
             return
 
+        if path == "/api/v1/message/search":
+            q = str(body.get("query") or body.get("q") or body.get("text") or "")
+            limit = int(body.get("limit", 50) or 50)
+            cg = body.get("chatGuid")
+            self._send_json(200, self.engine.search_messages(q, limit=limit, chat_guid=cg))
+            return
+
+        if path == "/api/v1/message/schedule":
+            self._send_json(200, self.engine.schedule_message(body), "Message scheduled")
+            return
+
+        if path == "/api/v1/chat/state":
+            self._send_json(200, self.engine.update_chat_state(body))
+            return
+
+        m_part = re.match(r"^/api/v1/chat/([^/]+)/participant$", path)
+        if m_part:
+            cg = urllib.parse.unquote(m_part.group(1))
+            addr = str(body.get("address") or "")
+            action = str(body.get("action") or "add")
+            self._send_json(200, self.engine.manage_participant(cg, addr, action))
+            return
+
+        if path == "/rpc":
+            req_id = body.get("id")
+            method = str(body.get("method") or "")
+            params = body.get("params") if isinstance(body.get("params"), dict) else {}
+            try:
+                data = self.engine.handle_rpc(method, params)
+                self._send_json(200, {"id": req_id, "data": data})
+            except Exception as exc:
+                self._send_json(500, None, str(exc))
+            return
+
         self._send_json(404, None, f"Not found: {path}")
 
     def do_DELETE(self) -> None:
@@ -2687,6 +3415,20 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             msg_guid = urllib.parse.unquote(m_msg.group(1))
             self._send_json(200, self.engine.delete_message("", msg_guid))
             return
+
+        m_sched = re.match(r"^/api/v1/message/schedule/([^/]+)$", path)
+        if m_sched:
+            sid = urllib.parse.unquote(m_sched.group(1))
+            self._send_json(200, self.engine.cancel_scheduled_message(sid))
+            return
+
+        m_part_del = re.match(r"^/api/v1/chat/([^/]+)/participant/([^/]+)$", path)
+        if m_part_del:
+            cg = urllib.parse.unquote(m_part_del.group(1))
+            addr = urllib.parse.unquote(m_part_del.group(2))
+            self._send_json(200, self.engine.manage_participant(cg, addr, "remove"))
+            return
+
         self._send_json(200, {"deleted": True})
 
 

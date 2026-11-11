@@ -3092,6 +3092,187 @@ private slots:
         QVERIFY(!replyToText.contains(QLatin1Char('\n')));
         QVERIFY(replyToText.startsWith(QStringLiteral("Hello everyone We need to move our upcoming meeting")));
     }
+
+    void testAudioAttachmentWaveformAndPlaybackState() {
+        // 1. isAudioAttachment mime and extension check
+        QVERIFY(Backend::isAudioAttachment(QStringLiteral("audio/m4a"), QStringLiteral("memo.m4a")));
+        QVERIFY(Backend::isAudioAttachment(QStringLiteral("audio/x-m4a"), QStringLiteral("voice.m4a")));
+        QVERIFY(Backend::isAudioAttachment(QStringLiteral("audio/wav"), QStringLiteral("sound.wav")));
+        QVERIFY(Backend::isAudioAttachment(QStringLiteral("audio/aac"), QStringLiteral("clip.aac")));
+        QVERIFY(Backend::isAudioAttachment(QStringLiteral("application/octet-stream"), QStringLiteral("voice.caf")));
+        QVERIFY(!Backend::isAudioAttachment(QStringLiteral("image/png"), QStringLiteral("photo.png")));
+        QVERIFY(!Backend::isAudioAttachment(QStringLiteral("video/mp4"), QStringLiteral("video.mp4")));
+        QVERIFY(!Backend::isAudioAttachment(QStringLiteral("text/plain"), QStringLiteral("doc.txt")));
+
+        // 2. computeWaveformBars
+        const QVariantList bars = Backend::computeWaveformBars(QStringLiteral("audio-guid-123"), 28);
+        QCOMPARE(bars.size(), 28);
+        for (const QVariant &bar : bars) {
+            const double val = bar.toDouble();
+            QVERIFY(val >= 0.15 && val <= 1.0);
+        }
+        // Deterministic check
+        QCOMPARE(bars, Backend::computeWaveformBars(QStringLiteral("audio-guid-123"), 28));
+
+        // 3. buildMessageListFromApi with audio attachment
+        QJsonObject mAudio;
+        mAudio.insert(QStringLiteral("guid"), QStringLiteral("msg-audio-test-1"));
+        mAudio.insert(QStringLiteral("text"), QStringLiteral("Voice Memo"));
+        mAudio.insert(QStringLiteral("isFromMe"), false);
+        mAudio.insert(QStringLiteral("dateCreated"), 1775860000000LL);
+
+        QJsonObject att;
+        att.insert(QStringLiteral("guid"), QStringLiteral("att-audio-test-1"));
+        att.insert(QStringLiteral("mimeType"), QStringLiteral("audio/m4a"));
+        att.insert(QStringLiteral("transferName"), QStringLiteral("Voice Memo.m4a"));
+        att.insert(QStringLiteral("total_bytes"), 48000);
+        QJsonArray atts;
+        atts.append(att);
+        mAudio.insert(QStringLiteral("attachments"), atts);
+
+        QJsonArray rawList;
+        rawList.append(mAudio);
+        const QVariantList built = Backend::buildMessageListFromApi(rawList, {}, {});
+        QCOMPARE(built.size(), 1);
+        const QVariantMap builtMsg = built.first().toMap();
+        const QVariantList builtAtts = builtMsg.value(QStringLiteral("attachments")).toList();
+        QCOMPARE(builtAtts.size(), 1);
+        const QVariantMap builtAtt = builtAtts.first().toMap();
+        QCOMPARE(builtAtt.value(QStringLiteral("isAudio")).toBool(), true);
+        const QVariantList builtWaveform = builtAtt.value(QStringLiteral("waveformBars")).toList();
+        QCOMPARE(builtWaveform.size(), 28);
+
+        // 4. Backend audio playback state
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend backend(false);
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_audio.json")));
+
+        QCOMPARE(backend.audioPlaying(), false);
+        QCOMPARE(backend.playingAudioGuid(), QString());
+        QCOMPARE(backend.audioProgress(), 0.0);
+
+        backend.toggleAudioPlayback(QStringLiteral("att-audio-test-1"), QString());
+        QCOMPARE(backend.playingAudioGuid(), QStringLiteral("att-audio-test-1"));
+        QCOMPARE(backend.audioPlaying(), true);
+
+        backend.seekAudioPlayback(QStringLiteral("att-audio-test-1"), 0.45);
+        QCOMPARE(backend.audioProgress(), 0.45);
+
+        backend.toggleAudioPlayback(QStringLiteral("att-audio-test-1"), QString());
+        QCOMPARE(backend.audioPlaying(), false);
+    }
+
+    void testVoiceRecordingLifecycle() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend backend(false);
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_rec.json")));
+        backend.loadDemoData();
+
+        QCOMPARE(backend.recordingVoice(), false);
+        QCOMPARE(backend.voiceRecordingSeconds(), 0);
+
+        // Start recording
+        backend.startVoiceRecording();
+        QCOMPARE(backend.recordingVoice(), true);
+
+        // Cancel recording
+        backend.cancelVoiceRecording();
+        QCOMPARE(backend.recordingVoice(), false);
+        QCOMPARE(backend.voiceRecordingSeconds(), 0);
+
+        // Start again and stop/send
+        backend.startVoiceRecording();
+        QCOMPARE(backend.recordingVoice(), true);
+
+        backend.stopAndSendVoiceRecording();
+        QCOMPARE(backend.recordingVoice(), false);
+    }
+
+    void testExpressiveSendWithEffect() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend backend(false);
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_expr.json")));
+        backend.loadDemoData();
+
+        const QVariantList chats = backend.chats();
+        QVERIFY(!chats.isEmpty());
+        const QString chatGuid = chats.first().toMap().value(QStringLiteral("guid")).toString();
+        backend.selectChat(chatGuid);
+
+        // 1. Invisible Ink
+        backend.sendMessageWithEffect(QStringLiteral("Secret code 4096"), QStringLiteral("com.apple.MobileSMS.expressivesend.invisibleink"));
+        QVariantList msgs = backend.messages();
+        QVERIFY(!msgs.isEmpty());
+        QVariantMap lastMsg = msgs.last().toMap();
+        QCOMPARE(lastMsg.value(QStringLiteral("text")).toString(), QStringLiteral("Secret code 4096"));
+        QCOMPARE(lastMsg.value(QStringLiteral("expressiveEffect")).toString(), QStringLiteral("🕵️ Invisible Ink"));
+
+        // 2. Confetti Effect
+        backend.sendMessageWithEffect(QStringLiteral("Happy Birthday!"), QStringLiteral("com.apple.messages.effect.CKConfettiEffect"));
+        msgs = backend.messages();
+        lastMsg = msgs.last().toMap();
+        QCOMPARE(lastMsg.value(QStringLiteral("text")).toString(), QStringLiteral("Happy Birthday!"));
+        QCOMPARE(lastMsg.value(QStringLiteral("expressiveEffect")).toString(), QStringLiteral("🎉 Confetti"));
+    }
+
+    void testScheduledMessagesLifecycle() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend backend(false);
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_sched.json")));
+        backend.loadDemoData();
+
+        const QVariantList chats = backend.chats();
+        QVERIFY(!chats.isEmpty());
+        const QString chatGuid = chats.first().toMap().value(QStringLiteral("guid")).toString();
+        backend.selectChat(chatGuid);
+
+        QVERIFY(backend.scheduledMessages().isEmpty());
+
+        const qint64 sendTime = QDateTime::currentMSecsSinceEpoch() + 3600000;
+        backend.scheduleMessage(QStringLiteral("Meeting reminder"), sendTime);
+
+        const QVariantList scheds = backend.scheduledMessages();
+        QCOMPARE(scheds.size(), 1);
+        const QVariantMap schedItem = scheds.first().toMap();
+        QCOMPARE(schedItem.value(QStringLiteral("text")).toString(), QStringLiteral("Meeting reminder"));
+        const QString scheduleId = schedItem.value(QStringLiteral("id")).toString();
+        QVERIFY(!scheduleId.isEmpty());
+
+        backend.cancelScheduledMessage(scheduleId);
+        QVERIFY(backend.scheduledMessages().isEmpty());
+    }
+
+    void testGroupParticipantManagement() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend backend(false);
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_parts.json")));
+        backend.loadDemoData();
+
+        const QVariantList chats = backend.chats();
+        QVERIFY(!chats.isEmpty());
+        const QString chatGuid = chats.first().toMap().value(QStringLiteral("guid")).toString();
+        backend.selectChat(chatGuid);
+
+        const QString newParticipant = QStringLiteral("+15559876543");
+        QVERIFY(!backend.selectedChatParticipants().contains(newParticipant));
+
+        // Add participant
+        backend.addParticipantToActiveChat(newParticipant);
+        QVERIFY(backend.selectedChatParticipants().contains(newParticipant));
+
+        // Remove participant
+        backend.removeParticipantFromActiveChat(newParticipant);
+        QVERIFY(!backend.selectedChatParticipants().contains(newParticipant));
+
+        // Sync state to server
+        backend.syncChatStateToServer();
+    }
+
 };
 
 QTEST_MAIN(ImsgTests)

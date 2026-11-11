@@ -2983,6 +2983,7 @@ ApplicationWindow {
                     delegate: ColumnLayout {
                         id: msgDelegate
                         required property var modelData
+                        property bool invisibleInkRevealed: false
                         width: messageListView.width
                         spacing: 4
                         property string hoveredReactionEmoji: ""
@@ -3591,6 +3592,122 @@ ApplicationWindow {
                                             }
                                         }
 
+
+                                        // Inline Voice Memo Waveform Player
+                                        Repeater {
+                                            model: (msgDelegate.modelData.attachments && msgDelegate.modelData.attachments.length > 0)
+                                                   ? msgDelegate.modelData.attachments.filter(function(a) { return a.isAudio === true; })
+                                                   : []
+                                            delegate: Rectangle {
+                                                id: voiceMemoPlayerCard
+                                                required property var modelData
+                                                width: Math.min(280, bubbleContent.maxTextW + 28)
+                                                height: 52
+                                                radius: 10
+                                                color: msgDelegate.isFromMe ? Qt.rgba(0, 0, 0, 0.22) : theme.darkerBackground
+                                                border.color: msgDelegate.isFromMe ? Qt.rgba(255, 255, 255, 0.25) : theme.muted
+                                                border.width: 1
+
+                                                readonly property bool isThisPlaying: backend.playingAudioGuid === modelData.guid && backend.audioPlaying
+                                                readonly property real currentProgress: backend.playingAudioGuid === modelData.guid ? backend.audioProgress : 0.0
+
+                                                RowLayout {
+                                                    anchors.fill: parent
+                                                    anchors.margins: 8
+                                                    spacing: 8
+
+                                                    // Play / Pause Button
+                                                    Rectangle {
+                                                        width: 34
+                                                        height: 34
+                                                        radius: 17
+                                                        color: voiceMemoPlayerCard.isThisPlaying ? theme.accent : (msgDelegate.isFromMe ? "#ffffff" : theme.accent)
+                                                        Text {
+                                                            anchors.centerIn: parent
+                                                            text: voiceMemoPlayerCard.isThisPlaying ? "⏸" : "▶"
+                                                            font.pixelSize: 14
+                                                            color: voiceMemoPlayerCard.isThisPlaying ? "#ffffff" : (msgDelegate.isFromMe ? theme.accent : "#ffffff")
+                                                        }
+                                                        MouseArea {
+                                                            anchors.fill: parent
+                                                            cursorShape: Qt.PointingHandCursor
+                                                            onClicked: {
+                                                                backend.toggleAudioPlayback(modelData.guid || "", modelData.sourceUrl || modelData.localUrl || "");
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // Waveform & Info Column
+                                                    ColumnLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 4
+
+                                                        // 28 Waveform Bars with click-to-seek
+                                                        Item {
+                                                            Layout.fillWidth: true
+                                                            height: 20
+
+                                                            Row {
+                                                                id: waveRow
+                                                                anchors.fill: parent
+                                                                spacing: 2
+
+                                                                Repeater {
+                                                                    model: modelData.waveformBars && modelData.waveformBars.length > 0
+                                                                           ? modelData.waveformBars
+                                                                           : backend.computeWaveformBars(modelData.guid || modelData.name || "audio", 28)
+                                                                    delegate: Rectangle {
+                                                                        required property var modelData
+                                                                        required property int index
+                                                                        width: Math.max(2, Math.floor((waveRow.width - (27 * 2)) / 28))
+                                                                        height: Math.max(4, Math.round(20 * Number(modelData)))
+                                                                        anchors.verticalCenter: parent.verticalCenter
+                                                                        radius: 1
+                                                                        readonly property real barProgressRatio: index / 28.0
+                                                                        color: barProgressRatio <= voiceMemoPlayerCard.currentProgress
+                                                                               ? (msgDelegate.isFromMe ? "#ffffff" : theme.accent)
+                                                                               : (msgDelegate.isFromMe ? Qt.rgba(255, 255, 255, 0.4) : theme.muted)
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            MouseArea {
+                                                                anchors.fill: parent
+                                                                cursorShape: Qt.PointingHandCursor
+                                                                onClicked: {
+                                                                    if (width > 0) {
+                                                                        var ratio = Math.max(0.0, Math.min(1.0, mouseX / width));
+                                                                        backend.seekAudioPlayback(modelData.guid || "", ratio);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        // Label & Duration
+                                                        RowLayout {
+                                                            Layout.fillWidth: true
+                                                            Text {
+                                                                text: "🎙 Voice Memo"
+                                                                font.pixelSize: theme.fontSize - 3
+                                                                font.bold: true
+                                                                color: msgDelegate.isFromMe ? Qt.rgba(255, 255, 255, 0.9) : theme.brightForeground
+                                                            }
+                                                            Item { Layout.fillWidth: true }
+                                                            Text {
+                                                                text: backend.playingAudioGuid === modelData.guid
+                                                                      ? backend.audioDurationText
+                                                                      : (modelData.durationSeconds > 0
+                                                                         ? (Math.floor(modelData.durationSeconds / 60) + ":" + (modelData.durationSeconds % 60 < 10 ? "0" : "") + (modelData.durationSeconds % 60))
+                                                                         : "0:15")
+                                                                font.pixelSize: theme.fontSize - 3
+                                                                color: msgDelegate.isFromMe ? Qt.rgba(255, 255, 255, 0.75) : theme.darkForeground
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         // Non-image file attachment pills
                                         Repeater {
                                             model: (msgDelegate.modelData.fileAttachments && msgDelegate.modelData.fileAttachments.length > 0)
@@ -3600,7 +3717,8 @@ ApplicationWindow {
                                                       : [])
                                             delegate: Rectangle {
                                                 required property var modelData
-                                                height: 34
+                                                visible: !modelData.isAudio
+                                                height: visible ? 34 : 0
                                                 radius: 6
                                                 color: theme.darkBackground
                                                 width: attFileTxt.implicitWidth + 20
@@ -3743,6 +3861,38 @@ ApplicationWindow {
                                         // Message Text (Selectable & Copyable)
                                         TextEdit {
                                             id: msgText
+                                        // Invisible Ink Click-To-Reveal Overlay
+                                        Rectangle {
+                                            id: invisibleInkOverlay
+                                            visible: msgText.visible && (modelData.expressiveEffect === "🕵️ Invisible Ink" || (modelData.sendEffectLabel || "").indexOf("invisible ink") !== -1) && !msgDelegate.invisibleInkRevealed
+                                            width: msgText.width
+                                            height: msgText.height
+                                            color: modelData.isFromMe ? Qt.rgba(0, 0, 0, 0.45) : theme.darkerBackground
+                                            radius: 6
+                                            border.color: theme.accent
+                                            border.width: 1
+                                            z: 10
+
+                                            RowLayout {
+                                                anchors.centerIn: parent
+                                                spacing: 4
+                                                Text {
+                                                    text: "🕵️ Invisible Ink · Click to reveal"
+                                                    font.pixelSize: theme.fontSize - 2
+                                                    font.bold: true
+                                                    color: "#ffffff"
+                                                }
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    msgDelegate.invisibleInkRevealed = true;
+                                                }
+                                            }
+                                        }
+
                                             visible: (modelData.text || "").length > 0 && !(modelData.hasImageAttachment && (modelData.text === "📷 Photo" || /^📷 \d+ Photos$/.test(modelData.text)))
                                             width: Math.min(implicitWidth, bubbleContent.maxTextW)
                                             text: modelData.formattedText || root.linkifyText(modelData.text || "")
@@ -4489,6 +4639,110 @@ ApplicationWindow {
                                     }
                                 }
                             }
+                        }
+
+
+                        // Voice Memo Record/Stop Button (🎙)
+                        Rectangle {
+                            Layout.preferredWidth: 42
+                            Layout.preferredHeight: 42
+                            Layout.alignment: Qt.AlignVCenter
+                            radius: theme.radius
+                            color: backend.recordingVoice ? "#e63946" : (voiceBtnMouse.containsMouse ? theme.lighterBackground : theme.background)
+                            border.width: 1
+                            border.color: backend.recordingVoice ? "#ff4d6d" : theme.muted
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: backend.recordingVoice ? "⏹" : "🎙"
+                                font.pixelSize: theme.fontSize + 3
+                                color: backend.recordingVoice ? "#ffffff" : theme.brightForeground
+                            }
+
+                            MouseArea {
+                                id: voiceBtnMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (backend.recordingVoice) {
+                                        backend.stopAndSendVoiceRecording();
+                                        root.showToast("✓ Sent voice memo");
+                                    } else {
+                                        backend.startVoiceRecording();
+                                    }
+                                }
+                            }
+
+                            ToolTip.visible: voiceBtnMouse.containsMouse
+                            ToolTip.text: backend.recordingVoice ? i18n.tr("Stop & Send Voice Memo") : i18n.tr("Record Voice Memo")
+                            ToolTip.delay: 400
+                        }
+
+                        // Expressive Send Effect Menu Button (✨)
+                        Rectangle {
+                            id: effectBtn
+                            Layout.preferredWidth: 42
+                            Layout.preferredHeight: 42
+                            Layout.alignment: Qt.AlignVCenter
+                            radius: theme.radius
+                            color: effectMenuPopup.visible ? theme.selection : (effectBtnMouse.containsMouse ? theme.lighterBackground : theme.background)
+                            border.width: 1
+                            border.color: effectMenuPopup.visible ? theme.accent : theme.muted
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✨"
+                                font.pixelSize: theme.fontSize + 3
+                            }
+
+                            MouseArea {
+                                id: effectBtnMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    effectMenuPopup.visible = !effectMenuPopup.visible;
+                                    scheduleMenuPopup.visible = false;
+                                }
+                            }
+
+                            ToolTip.visible: effectBtnMouse.containsMouse
+                            ToolTip.text: i18n.tr("Send with Effect")
+                            ToolTip.delay: 400
+                        }
+
+                        // Send Later Schedule Button (🕒)
+                        Rectangle {
+                            id: scheduleBtn
+                            Layout.preferredWidth: 42
+                            Layout.preferredHeight: 42
+                            Layout.alignment: Qt.AlignVCenter
+                            radius: theme.radius
+                            color: scheduleMenuPopup.visible ? theme.selection : (scheduleBtnMouse.containsMouse ? theme.lighterBackground : theme.background)
+                            border.width: 1
+                            border.color: scheduleMenuPopup.visible ? theme.accent : theme.muted
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "🕒"
+                                font.pixelSize: theme.fontSize + 3
+                            }
+
+                            MouseArea {
+                                id: scheduleBtnMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    scheduleMenuPopup.visible = !scheduleMenuPopup.visible;
+                                    effectMenuPopup.visible = false;
+                                }
+                            }
+
+                            ToolTip.visible: scheduleBtnMouse.containsMouse
+                            ToolTip.text: i18n.tr("Send Later (+15m, +1h, Tomorrow 9 AM)")
+                            ToolTip.delay: 400
                         }
 
                         // Send Button
@@ -6186,4 +6440,305 @@ ApplicationWindow {
             color: theme.brightForeground
         }
     }
+
+    // Expressive Effect Menu Popup
+    Rectangle {
+        id: effectMenuPopup
+        visible: false
+        z: 995
+        width: 240
+        height: effectCol.implicitHeight + 16
+        radius: 10
+        color: theme.darkerBackground
+        border.color: theme.muted
+        border.width: 1
+        x: Math.max(12, Math.min(root.width - width - 12, root.width - 320))
+        y: Math.max(12, root.height - height - 80)
+
+        ColumnLayout {
+            id: effectCol
+            anchors.fill: parent
+            anchors.margins: 8
+            spacing: 2
+
+            Text {
+                text: i18n.tr("Send with Effect")
+                font.pixelSize: theme.fontSize - 1
+                font.bold: true
+                color: theme.brightForeground
+                Layout.leftMargin: 6
+                Layout.topMargin: 2
+            }
+
+            Repeater {
+                model: [
+                    { name: "💥 " + i18n.tr("Slam"), id: "com.apple.MobileSMS.expressivesend.impact" },
+                    { name: "📢 " + i18n.tr("Loud"), id: "com.apple.MobileSMS.expressivesend.loud" },
+                    { name: "🪶 " + i18n.tr("Gentle"), id: "com.apple.MobileSMS.expressivesend.gentle" },
+                    { name: "🕵️ " + i18n.tr("Invisible Ink"), id: "com.apple.MobileSMS.expressivesend.invisibleink" },
+                    { name: "🎉 " + i18n.tr("Confetti"), id: "com.apple.messages.effect.CKConfettiEffect" },
+                    { name: "✨ " + i18n.tr("Lasers"), id: "com.apple.messages.effect.CKLasersEffect" },
+                    { name: "🎆 " + i18n.tr("Fireworks"), id: "com.apple.messages.effect.CKFireworksEffect" }
+                ]
+                delegate: Rectangle {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    height: 28
+                    radius: 6
+                    color: effMouse.containsMouse ? theme.selection : "transparent"
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.leftMargin: 8
+                        text: modelData.name
+                        font.pixelSize: theme.fontSize - 1
+                        color: theme.brightForeground
+                    }
+
+                    MouseArea {
+                        id: effMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            effectMenuPopup.visible = false;
+                            var txt = composerInput.text.trim();
+                            if (txt.length === 0) {
+                                root.showToast("Type a message to send with effect");
+                                return;
+                            }
+                            backend.sendMessageWithEffect(txt, modelData.id);
+                            composerInput.text = "";
+                            messageListView.scrollToBottom();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Schedule Message Menu Popup
+    Rectangle {
+        id: scheduleMenuPopup
+        visible: false
+        z: 995
+        width: 220
+        height: schedCol.implicitHeight + 16
+        radius: 10
+        color: theme.darkerBackground
+        border.color: theme.muted
+        border.width: 1
+        x: Math.max(12, Math.min(root.width - width - 12, root.width - 240))
+        y: Math.max(12, root.height - height - 80)
+
+        ColumnLayout {
+            id: schedCol
+            anchors.fill: parent
+            anchors.margins: 8
+            spacing: 2
+
+            Text {
+                text: i18n.tr("Send Later")
+                font.pixelSize: theme.fontSize - 1
+                font.bold: true
+                color: theme.brightForeground
+                Layout.leftMargin: 6
+                Layout.topMargin: 2
+            }
+
+            Repeater {
+                model: [
+                    { label: "⏱ +15m", offsetMs: 15 * 60 * 1000 },
+                    { label: "⏳ +1h", offsetMs: 60 * 60 * 1000 },
+                    { label: "🌅 " + i18n.tr("Tomorrow 9 AM"), special: "tomorrow9am" }
+                ]
+                delegate: Rectangle {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    height: 28
+                    radius: 6
+                    color: schedMouse.containsMouse ? theme.selection : "transparent"
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.leftMargin: 8
+                        text: modelData.label
+                        font.pixelSize: theme.fontSize - 1
+                        color: theme.brightForeground
+                    }
+
+                    MouseArea {
+                        id: schedMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            scheduleMenuPopup.visible = false;
+                            var txt = composerInput.text.trim();
+                            if (txt.length === 0) {
+                                root.showToast("Type a message to schedule");
+                                return;
+                            }
+                            var sendTime = Date.now() + (modelData.offsetMs || 0);
+                            if (modelData.special === "tomorrow9am") {
+                                var d = new Date();
+                                d.setDate(d.getDate() + 1);
+                                d.setHours(9, 0, 0, 0);
+                                sendTime = d.getTime();
+                            }
+                            backend.scheduleMessage(txt, sendTime);
+                            composerInput.text = "";
+                            root.showToast("✓ Scheduled message");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Group Rename & Participant Management Modal (renameChatPopup)
+    Rectangle {
+        id: renameChatPopup
+        visible: false
+        anchors.fill: parent
+        color: "#aa0e0e14"
+        z: 998
+
+        MouseArea {
+            anchors.fill: parent
+            onClicked: renameChatPopup.visible = false
+        }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: 420
+            height: renameCol.implicitHeight + 36
+            radius: 12
+            color: theme.darkerBackground
+            border.color: theme.muted
+            border.width: 1
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: {} // prevent backdrop dismissal
+            }
+
+            ColumnLayout {
+                id: renameCol
+                anchors.fill: parent
+                anchors.margins: 18
+                spacing: 12
+
+                Text {
+                    text: i18n.tr("Manage Group Participants")
+                    font.pixelSize: theme.fontSize + 2
+                    font.bold: true
+                    color: theme.brightForeground
+                }
+
+                Text {
+                    text: backend.selectedChatTitle
+                    font.pixelSize: theme.fontSize - 1
+                    color: theme.foreground
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+
+                // Add participant row
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 38
+                        radius: 8
+                        color: theme.background
+                        border.color: addPartInput.activeFocus ? theme.accent : theme.muted
+                        border.width: 1
+
+                        TextInput {
+                            id: addPartInput
+                            anchors.fill: parent
+                            anchors.margins: 8
+                            color: theme.brightForeground
+                            font.pixelSize: theme.fontSize
+                            clip: true
+                            selectByMouse: true
+
+                            Text {
+                                text: i18n.tr("Phone number or email address...")
+                                color: theme.darkForeground
+                                font.pixelSize: theme.fontSize
+                                visible: !addPartInput.text && !addPartInput.activeFocus
+                            }
+
+                            Keys.onReturnPressed: {
+                                if (addPartInput.text.trim().length > 0) {
+                                    backend.addParticipantToActiveChat(addPartInput.text.trim());
+                                    addPartInput.text = "";
+                                    root.showToast("✓ " + i18n.tr("Added participant"));
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 80
+                        height: 38
+                        radius: 8
+                        color: theme.accent
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "+ " + i18n.tr("Add")
+                            font.bold: true
+                            color: "#ffffff"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (addPartInput.text.trim().length > 0) {
+                                    backend.addParticipantToActiveChat(addPartInput.text.trim());
+                                    addPartInput.text = "";
+                                    root.showToast("✓ " + i18n.tr("Added participant"));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Close button
+                RowLayout {
+                    Layout.fillWidth: true
+                    Item { Layout.fillWidth: true }
+                    Rectangle {
+                        width: 80
+                        height: 32
+                        radius: 6
+                        color: theme.lighterBackground
+                        border.color: theme.muted
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: i18n.tr("Done")
+                            color: theme.brightForeground
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: renameChatPopup.visible = false
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 }
