@@ -157,15 +157,17 @@ class SocketIOSession:
 
 
 class BluePillEngine:
-    """Core database & macOS integration engine for BluePill Server."""
+    """Core database, Private API (:45670), & macOS integration engine for BluePill Server."""
 
     def __init__(
         self,
         db_path: Optional[str] = None,
         addressbook_glob: Optional[str] = None,
         pinning_plist_path: Optional[str] = None,
+        bb_config_db_path: Optional[str] = None,
         password: str = "",
         helper_port: int = 45670,
+        enable_background_daemons: bool = True,
     ) -> None:
         self.db_path = os.path.expanduser(db_path or "~/Library/Messages/chat.db")
         self.addressbook_glob = os.path.expanduser(
@@ -175,8 +177,11 @@ class BluePillEngine:
         self.pinning_plist_path = os.path.expanduser(
             pinning_plist_path or "~/Library/Preferences/com.apple.messages.pinning.plist"
         )
-        self.password = password
+        self.bb_config_db_path = os.path.expanduser(
+            bb_config_db_path or "~/Library/Application Support/bluebubbles-server/config.db"
+        )
         self.helper_port = helper_port
+        self.password = password or self._load_default_password()
 
         self._contacts_cache: Optional[List[Dict[str, Any]]] = None
         self._contacts_cache_ts: float = 0.0
@@ -185,10 +190,150 @@ class BluePillEngine:
         self._sessions: Dict[str, SocketIOSession] = {}
         self._sessions_lock = threading.Lock()
 
-        self._helper_conn: Optional[socket.socket] = None
+        self._helper_clients: List[socket.socket] = []
         self._helper_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._last_max_rowid: int = 0
+        self._detected_account: str = ""
+
+        if enable_background_daemons:
+            self._start_helper_listener()
+            self._start_wal_watcher()
+
+    def _load_default_password(self) -> str:
+        cfg_json = os.path.expanduser("~/.config/bluepill/server.json")
+        if os.path.exists(cfg_json):
+            try:
+                data = json.loads(open(cfg_json, "r", encoding="utf-8").read())
+                pw = str(data.get("password") or "").strip()
+                if pw:
+                    return pw
+            except Exception:
+                pass
+        if os.path.exists(self.bb_config_db_path):
+            try:
+                uri = f"file:{urllib.parse.quote(os.path.abspath(self.bb_config_db_path))}?mode=ro"
+                conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+                row = conn.execute(
+                    "SELECT value FROM config WHERE name = 'password' LIMIT 1;"
+                ).fetchone()
+                conn.close()
+                if row and row[0]:
+                    return str(row[0]).strip()
+            except Exception:
+                pass
+        return ""
+
+    def _start_helper_listener(self) -> None:
+        if sys.platform != "darwin":
+            return
+        for family, bind_addr in ((socket.AF_INET6, "::1"), (socket.AF_INET, "127.0.0.1")):
+            t = threading.Thread(
+                target=self._helper_accept_loop,
+                args=(family, bind_addr, self.helper_port),
+                daemon=True,
+            )
+            t.start()
+
+    def _helper_accept_loop(self, family: int, bind_addr: str, port: int) -> None:
+        try:
+            srv = socket.socket(family, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                try:
+                    srv.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                except OSError:
+                    pass
+            srv.bind((bind_addr, port))
+            srv.listen(8)
+        except OSError:
+            return
+
+        while not self._stop_event.is_set():
+            try:
+                client, _ = srv.accept()
+                client.settimeout(None)
+                with self._helper_lock:
+                    self._helper_clients.append(client)
+                threading.Thread(
+                    target=self._helper_client_reader,
+                    args=(client,),
+                    daemon=True,
+                ).start()
+            except OSError:
+                time.sleep(0.5)
+
+    def _helper_client_reader(self, client: socket.socket) -> None:
+        buf = b""
+        try:
+            while not self._stop_event.is_set():
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    text = line.decode("utf-8", errors="replace").strip()
+                    if not text:
+                        continue
+                    try:
+                        evt = json.loads(text)
+                        event_type = str(evt.get("event") or "")
+                        if event_type in ("started-typing", "stopped-typing"):
+                            self.broadcast_socketio(
+                                "typing-indicator",
+                                {
+                                    "display": event_type == "started-typing",
+                                    "guid": evt.get("guid") or "",
+                                },
+                            )
+                    except Exception:
+                        pass
+        except OSError:
+            pass
+        finally:
+            with self._helper_lock:
+                if client in self._helper_clients:
+                    self._helper_clients.remove(client)
+            try:
+                client.close()
+            except OSError:
+                pass
+
+    def _start_wal_watcher(self) -> None:
+        if not os.path.exists(self.db_path):
+            return
+        try:
+            conn = self._open_chat_db()
+            row = conn.execute("SELECT COALESCE(MAX(ROWID), 0) FROM message;").fetchone()
+            self._last_max_rowid = int(row[0] or 0) if row else 0
+            conn.close()
+        except Exception:
+            self._last_max_rowid = 0
+
+        t = threading.Thread(target=self._wal_poll_loop, daemon=True)
+        t.start()
+
+    def _wal_poll_loop(self) -> None:
+        while not self._stop_event.is_set():
+            time.sleep(1.0)
+            if not os.path.exists(self.db_path):
+                continue
+            try:
+                conn = self._open_chat_db()
+                row = conn.execute("SELECT COALESCE(MAX(ROWID), 0) FROM message;").fetchone()
+                cur_max = int(row[0] or 0) if row else 0
+                conn.close()
+                if self._last_max_rowid == 0:
+                    self._last_max_rowid = cur_max
+                    continue
+                if cur_max > self._last_max_rowid:
+                    new_msgs = self.query_messages({"limit": min(25, cur_max - self._last_max_rowid), "sort": "DESC"})
+                    self._last_max_rowid = cur_max
+                    for m in reversed(new_msgs):
+                        self.broadcast_socketio("new-message", m)
+            except Exception:
+                pass
 
     def _open_chat_db(self) -> sqlite3.Connection:
         if not os.path.exists(self.db_path):
@@ -215,8 +360,19 @@ class BluePillEngine:
 
     def is_private_api_active(self) -> bool:
         with self._helper_lock:
-            if self._helper_conn is not None:
+            if self._helper_clients:
                 return True
+        if sys.platform == "darwin":
+            try:
+                out = subprocess.check_output(
+                    ["/usr/bin/pgrep", "-x", "Messages"],
+                    timeout=1.0,
+                    stderr=subprocess.DEVNULL,
+                )
+                if out.strip():
+                    return True
+            except Exception:
+                pass
         for port in (self.helper_port, 45670):
             for host in ("127.0.0.1", "::1"):
                 try:
@@ -226,8 +382,29 @@ class BluePillEngine:
                     pass
         return False
 
+    def get_detected_imessage_account(self) -> str:
+        if self._detected_account:
+            return self._detected_account
+        if os.path.exists(self.db_path):
+            try:
+                conn = self._open_chat_db()
+                row = conn.execute(
+                    "SELECT account_login FROM chat WHERE account_login LIKE 'E:%' ORDER BY ROWID DESC LIMIT 1;"
+                ).fetchone()
+                conn.close()
+                if row and row[0]:
+                    acct = str(row[0])
+                    if acct.startswith("E:"):
+                        acct = acct[2:]
+                    self._detected_account = acct.strip()
+                    return self._detected_account
+            except Exception:
+                pass
+        return ""
+
     def get_server_info(self) -> Dict[str, Any]:
         priv = self.is_private_api_active()
+        acct = self.get_detected_imessage_account()
         return {
             "computer_id": "bluepill-macos-relay",
             "os_version": self.get_macos_version(),
@@ -235,8 +412,8 @@ class BluePillEngine:
             "private_api": priv,
             "helper_connected": priv,
             "proxy_service": "bluepill-server",
-            "detected_icloud": "",
-            "detected_imessage": "",
+            "detected_icloud": acct,
+            "detected_imessage": acct,
             "macos_time_sync": int(time.time() * 1000),
             "capabilities": [
                 "chat-db-wal-direct",
@@ -245,6 +422,7 @@ class BluePillEngine:
                 "pinning-plist",
                 "socketio-v4",
                 "stdio-jsonrpc",
+                "web-ui",
             ],
         }
 
@@ -254,10 +432,73 @@ class BluePillEngine:
             if not force_refresh and self._contacts_cache is not None and (now - self._contacts_cache_ts) < 30.0:
                 return self._contacts_cache
 
-        db_files = sorted(glob.glob(self.addressbook_glob))
         contacts: List[Dict[str, Any]] = []
         seen_keys = set()
 
+        # 1. Load from BlueBubbles config.db contact + contact_address tables (if present)
+        if os.path.exists(self.bb_config_db_path):
+            try:
+                uri = f"file:{urllib.parse.quote(os.path.abspath(self.bb_config_db_path))}?mode=ro"
+                conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+                conn.row_factory = sqlite3.Row
+                c_rows = conn.execute(
+                    "SELECT id, first_name, last_name, display_name, avatar FROM contact;"
+                ).fetchall()
+                a_rows = conn.execute(
+                    "SELECT contactId, address, type FROM contact_address WHERE address IS NOT NULL;"
+                ).fetchall()
+                conn.close()
+
+                phones_by_cid: Dict[int, List[Dict[str, str]]] = {}
+                emails_by_cid: Dict[int, List[Dict[str, str]]] = {}
+                for ar in a_rows:
+                    cid = int(ar["contactId"] or 0)
+                    addr = str(ar["address"] or "").strip()
+                    if not cid or not addr:
+                        continue
+                    if "@" in addr:
+                        emails_by_cid.setdefault(cid, []).append({"address": addr})
+                    else:
+                        phones_by_cid.setdefault(cid, []).append({"address": addr})
+
+                for r in c_rows:
+                    cid = int(r["id"])
+                    phones = phones_by_cid.get(cid, [])
+                    emails = emails_by_cid.get(cid, [])
+                    if not phones and not emails:
+                        continue
+                    first = str(r["first_name"] or "").strip()
+                    last = str(r["last_name"] or "").strip()
+                    display = str(r["display_name"] or "").strip() or f"{first} {last}".strip()
+                    if not display:
+                        continue
+                    dedup_key = (
+                        display.lower(),
+                        tuple(sorted(p["address"] for p in phones)),
+                        tuple(sorted(e["address"] for e in emails)),
+                    )
+                    if dedup_key in seen_keys:
+                        continue
+                    seen_keys.add(dedup_key)
+                    contacts.append(
+                        {
+                            "id": f"bb-{cid}",
+                            "firstName": first,
+                            "lastName": last,
+                            "displayName": display,
+                            "nickname": "",
+                            "organization": "",
+                            "phoneNumbers": phones,
+                            "emails": emails,
+                            "birthday": "",
+                            "avatar": str(r["avatar"] or ""),
+                        }
+                    )
+            except Exception:
+                pass
+
+        # 2. Load from macOS AddressBook-v22.abcddb sources
+        db_files = sorted(glob.glob(self.addressbook_glob))
         for db_file in db_files:
             if not os.path.exists(db_file):
                 continue
@@ -912,14 +1153,18 @@ class BluePillEngine:
             return False
 
     def _send_helper_payload(self, action: str, data: Dict[str, Any]) -> bool:
-        payload = json.dumps({"action": action, "data": data}) + "\n"
-        for port in (self.helper_port, 45670):
+        tx_id = str(uuid.uuid4())
+        payload = (json.dumps({"transactionId": tx_id, "action": action, "data": data}) + "\n").encode("utf-8")
+        with self._helper_lock:
+            clients = list(self._helper_clients)
+        for sock in reversed(clients):
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=1.5) as sock:
-                    sock.sendall(payload.encode("utf-8"))
-                    return True
+                sock.sendall(payload)
+                return True
             except OSError:
-                continue
+                with self._helper_lock:
+                    if sock in self._helper_clients:
+                        self._helper_clients.remove(sock)
         return False
 
     def send_text(self, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -927,20 +1172,22 @@ class BluePillEngine:
         message = (body.get("message") or "").strip()
         temp_guid = (body.get("tempGuid") or f"temp-{uuid.uuid4()}").strip()
         effect_id = (body.get("effectId") or "").strip()
+        subject = (body.get("subject") or "").strip()
         selected_guid = (body.get("selectedMessageGuid") or "").strip()
+        part_index = int(body.get("partIndex", 0) or 0)
 
-        sent = False
-        if self.is_private_api_active():
-            sent = self._send_helper_payload(
-                "send-message",
-                {
-                    "chatGuid": chat_guid,
-                    "message": message,
-                    "tempGuid": temp_guid,
-                    "effectId": effect_id,
-                    "selectedMessageGuid": selected_guid,
-                },
-            )
+        sent = self._send_helper_payload(
+            "send-message",
+            {
+                "chatGuid": chat_guid,
+                "message": message,
+                "subject": subject,
+                "effectId": effect_id,
+                "selectedMessageGuid": selected_guid,
+                "partIndex": part_index,
+                "ddScan": 1,
+            },
+        )
         if not sent:
             sent = self._send_via_applescript(chat_guid, message)
 
@@ -991,16 +1238,15 @@ class BluePillEngine:
             "-emphasize": 3004,
             "-question": 3005,
         }
-        if self.is_private_api_active():
-            self._send_helper_payload(
-                "send-reaction",
-                {
-                    "chatGuid": chat_guid,
-                    "selectedMessageGuid": selected_guid,
-                    "reactionType": reaction,
-                    "partIndex": part_index,
-                },
-            )
+        self._send_helper_payload(
+            "send-reaction",
+            {
+                "chatGuid": chat_guid,
+                "selectedMessageGuid": selected_guid,
+                "reactionType": reaction,
+                "partIndex": part_index,
+            },
+        )
         now_ms = int(time.time() * 1000)
         return {
             "guid": f"react-{uuid.uuid4()}",
@@ -1013,36 +1259,36 @@ class BluePillEngine:
 
     def edit_message(self, msg_guid: str, body: Dict[str, Any]) -> Dict[str, Any]:
         edited = (body.get("editedMessage") or body.get("message") or "").strip()
+        chat_guid = (body.get("chatGuid") or "").strip()
         part_index = int(body.get("partIndex", 0) or 0)
-        if self.is_private_api_active():
-            self._send_helper_payload(
-                "edit-message",
-                {
-                    "messageGuid": msg_guid,
-                    "editedMessage": edited,
-                    " backwardsCompatibilityMessage": edited,
-                    "partIndex": part_index,
-                },
-            )
+        self._send_helper_payload(
+            "edit-message",
+            {
+                "chatGuid": chat_guid,
+                "messageGuid": msg_guid,
+                "editedMessage": edited,
+                "backwardsCompatibilityMessage": edited,
+                "partIndex": part_index,
+            },
+        )
         now_ms = int(time.time() * 1000)
         return {"guid": msg_guid, "text": edited, "dateEdited": now_ms}
 
     def unsend_message(self, msg_guid: str, body: Dict[str, Any]) -> Dict[str, Any]:
         part_index = int(body.get("partIndex", 0) or 0)
-        if self.is_private_api_active():
-            self._send_helper_payload(
-                "unsend-message",
-                {"messageGuid": msg_guid, "partIndex": part_index},
-            )
+        chat_guid = (body.get("chatGuid") or "").strip()
+        self._send_helper_payload(
+            "unsend-message",
+            {"chatGuid": chat_guid, "messageGuid": msg_guid, "partIndex": part_index},
+        )
         now_ms = int(time.time() * 1000)
         return {"guid": msg_guid, "text": "", "dateRetracted": now_ms}
 
     def mark_chat_read(self, chat_guid: str, read: bool = True) -> Dict[str, Any]:
-        if self.is_private_api_active():
-            self._send_helper_payload(
-                "mark-chat-read" if read else "mark-chat-unread",
-                {"chatGuid": chat_guid},
-            )
+        self._send_helper_payload(
+            "mark-chat-read" if read else "mark-chat-unread",
+            {"chatGuid": chat_guid},
+        )
         return {"chatGuid": chat_guid, "read": read}
 
     def broadcast_socketio(self, event_name: str, payload: Any) -> None:
@@ -1086,7 +1332,7 @@ class BluePillEngine:
         raise ValueError(f"Unknown RPC method: {method}")
 
 
-WEB_UI_HTML = """<!DOCTYPE html>
+WEB_UI_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -1136,7 +1382,7 @@ WEB_UI_HTML = """<!DOCTYPE html>
     }
     .layout { flex: 1; display: flex; min-height: 0; }
     .sidebar {
-      width: 320px; background: var(--panel); border-right: 1px solid var(--border);
+      width: 340px; background: var(--panel); border-right: 1px solid var(--border);
       display: flex; flex-direction: column; min-height: 0;
     }
     .auth-bar { padding: 10px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; }
@@ -1153,7 +1399,7 @@ WEB_UI_HTML = """<!DOCTYPE html>
       border-bottom: 1px solid var(--border); min-height: 62px; align-items: center;
     }
     .pin-avatar {
-      width: 38px; height: 38px; border-radius: 50%; background: var(--accent);
+      width: 40px; height: 40px; border-radius: 50%; background: var(--accent);
       display: flex; align-items: center; justify-content: center; font-size: 12px;
       font-weight: 700; cursor: pointer; flex-shrink: 0;
     }
@@ -1168,17 +1414,23 @@ WEB_UI_HTML = """<!DOCTYPE html>
     .main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
     .chat-header {
       height: 50px; border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; padding: 0 18px; font-weight: 600;
+      display: flex; align-items: center; justify-content: space-between; padding: 0 18px; font-weight: 600;
     }
     .messages {
-      flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 8px;
+      flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px;
     }
     .msg {
-      max-width: 68%; padding: 9px 13px; border-radius: 16px; font-size: 14px; line-height: 1.4;
+      max-width: 68%; padding: 9px 13px; border-radius: 16px; font-size: 14px; line-height: 1.45;
       background: var(--bubble-in); align-self: flex-start; word-break: break-word;
     }
     .msg.me { background: var(--accent); color: #fff; align-self: flex-end; }
-    .msg-meta { font-size: 10px; opacity: 0.72; margin-top: 4px; }
+    .msg.sms.me { background: var(--green); color: #fff; }
+    .msg img { max-width: 280px; border-radius: 10px; display: block; margin-top: 6px; }
+    .msg-meta { font-size: 11px; opacity: 0.78; margin-top: 4px; display: flex; gap: 8px; align-items: center; }
+    .otp-btn {
+      background: rgba(255,255,255,0.18); color: #fff; border: none; border-radius: 999px;
+      padding: 3px 9px; font-size: 11px; font-weight: 700; cursor: pointer; margin-top: 5px;
+    }
     .composer {
       padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel);
       display: flex; gap: 8px;
@@ -1196,7 +1448,7 @@ WEB_UI_HTML = """<!DOCTYPE html>
       <span>BluePill Web UI</span>
       <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.1.0 · Zero-Electron macOS Relay</span>
     </div>
-    <span id="serverBadge" class="status-pill">Connecting…</span>
+    <span id="serverBadge" class="status-pill">Enter API Key to Connect</span>
   </header>
   <div class="layout">
     <aside class="sidebar">
@@ -1217,9 +1469,33 @@ WEB_UI_HTML = """<!DOCTYPE html>
     </main>
   </div>
   <script>
-    let apiKey = localStorage.getItem('bluepill_key') || new URLSearchParams(location.search).get('password') || '';
+    let apiKey = new URLSearchParams(location.search).get('password') || localStorage.getItem('bluepill_key') || '';
     document.getElementById('apiKeyInput').value = apiKey;
     let activeChatGuid = '';
+    let contactMap = {};
+
+    function normAddr(a) {
+      if (!a) return '';
+      if (a.includes('@')) return a.trim().toLowerCase();
+      const d = a.replace(/\D+/g, '');
+      return d.length >= 10 ? d.slice(-10) : d;
+    }
+
+    function resolveName(c) {
+      if (c.displayName) return c.displayName;
+      if (c.participants && c.participants.length) {
+        const names = c.participants.map(p => contactMap[normAddr(p.address)] || p.address);
+        return names.join(', ');
+      }
+      const id = c.chatIdentifier || (c.guid ? c.guid.split(';-;').pop() : '');
+      return contactMap[normAddr(id)] || id || c.guid;
+    }
+
+    function extractOtp(text) {
+      if (!text) return '';
+      const m = text.match(/(?:code|otp|passcode|pin|verification)[^0-9]{0,20}\b([0-9]{4,8})\b/i);
+      return m ? m[1] : '';
+    }
 
     function apiUrl(path) {
       const sep = path.includes('?') ? '&' : '?';
@@ -1234,13 +1510,29 @@ WEB_UI_HTML = """<!DOCTYPE html>
         const j = await res.json();
         if (j && j.data) {
           document.getElementById('serverBadge').textContent =
-            `Connected · macOS ${j.data.os_version} · v${j.data.server_version}`;
+            `Connected · macOS ${j.data.os_version} · BluePill v${j.data.server_version} · Private API: ${j.data.private_api ? 'Active' : 'Fallback'}`;
+          await loadContacts();
           await loadPinned();
           await loadChats();
+        } else {
+          document.getElementById('serverBadge').textContent = 'Auth Required';
         }
       } catch (e) {
         document.getElementById('serverBadge').textContent = 'Connection Error';
       }
+    }
+
+    async function loadContacts() {
+      try {
+        const res = await fetch(apiUrl('/api/v1/contact'));
+        const j = await res.json();
+        (j.data || []).forEach(ct => {
+          const name = ct.displayName || `${ct.firstName || ''} ${ct.lastName || ''}`.trim();
+          if (!name) return;
+          (ct.phoneNumbers || []).forEach(p => { contactMap[normAddr(p.address)] = name; });
+          (ct.emails || []).forEach(e => { contactMap[normAddr(e.address)] = name; });
+        });
+      } catch (e) {}
     }
 
     async function loadPinned() {
@@ -1251,7 +1543,7 @@ WEB_UI_HTML = """<!DOCTYPE html>
       (j.data || []).forEach(p => {
         const el = document.createElement('div');
         el.className = 'pin-avatar';
-        const label = p.displayName || p.chatIdentifier || p.guid;
+        const label = resolveName(p);
         el.textContent = label.slice(0, 2).toUpperCase();
         el.title = label;
         el.onclick = () => selectChat(p.guid, label);
@@ -1265,17 +1557,21 @@ WEB_UI_HTML = """<!DOCTYPE html>
       const res = await fetch(apiUrl('/api/v1/chat/query'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({limit: 100, offset: 0})
+        body: JSON.stringify({limit: 120, offset: 0})
       });
       const j = await res.json();
-      (j.data || []).forEach(c => {
+      const chats = j.data || [];
+      chats.forEach(c => {
         const row = document.createElement('div');
         row.className = 'chat-row' + (c.guid === activeChatGuid ? ' active' : '');
-        const title = c.displayName || c.chatIdentifier || c.guid;
+        const title = resolveName(c);
         row.innerHTML = `<div class="chat-title">${title}</div><div class="chat-sub">${c.guid}</div>`;
         row.onclick = () => selectChat(c.guid, title);
         list.appendChild(row);
       });
+      if (!activeChatGuid && chats.length > 0) {
+        selectChat(chats[0].guid, resolveName(chats[0]));
+      }
     }
 
     async function selectChat(guid, title) {
@@ -1283,13 +1579,46 @@ WEB_UI_HTML = """<!DOCTYPE html>
       document.getElementById('chatHeader').textContent = title || guid;
       const pane = document.getElementById('messagesPane');
       pane.innerHTML = '';
-      const res = await fetch(apiUrl(`/api/v1/chat/${encodeURIComponent(guid)}/message?limit=100&sort=ASC`));
+      const res = await fetch(apiUrl(`/api/v1/chat/${encodeURIComponent(guid)}/message?limit=100&sort=DESC`));
       const j = await res.json();
-      (j.data || []).forEach(m => {
-        if (!m.text) return;
+      const msgs = (j.data || []).slice().reverse();
+      msgs.forEach(m => {
+        if (m.associatedMessageType && m.associatedMessageType >= 2000) return;
+        const hasAtt = m.attachments && m.attachments.length > 0;
+        if (!m.text && !hasAtt) return;
         const d = document.createElement('div');
-        d.className = 'msg' + (m.isFromMe ? ' me' : '');
-        d.textContent = m.text;
+        const isSms = (m.service || '').toUpperCase() === 'SMS' || guid.startsWith('SMS;');
+        d.className = 'msg' + (m.isFromMe ? ' me' : '') + (isSms ? ' sms' : '');
+        if (m.text) {
+          const t = document.createElement('div');
+          t.textContent = m.text;
+          d.appendChild(t);
+        }
+        if (hasAtt) {
+          m.attachments.forEach(a => {
+            if ((a.mimeType || '').startsWith('image/') || /\.(heic|heif|jpg|jpeg|png|gif|webp)$/i.test(a.transferName || '')) {
+              const img = document.createElement('img');
+              img.src = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/download?height=600`);
+              d.appendChild(img);
+            }
+          });
+        }
+        const otp = extractOtp(m.text || '');
+        if (otp) {
+          const btn = document.createElement('button');
+          btn.className = 'otp-btn';
+          btn.textContent = `🔑 Copy ${otp}`;
+          btn.onclick = () => navigator.clipboard.writeText(otp);
+          d.appendChild(btn);
+        }
+        const meta = document.createElement('div');
+        meta.className = 'msg-meta';
+        const dt = m.dateCreated ? new Date(m.dateCreated).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+        let badge = dt;
+        if (m.dateEdited > 0) badge += ' · Edited';
+        if (m.error > 0) badge += ' · ⚠ Not Delivered';
+        meta.textContent = badge;
+        d.appendChild(meta);
         pane.appendChild(d);
       });
       pane.scrollTop = pane.scrollHeight;
@@ -1327,16 +1656,19 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-BlueBubbles-Auth, X-Password")
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_html(self, html_str: str) -> None:
+    def _send_html(self, html_str: str, head_only: bool = False) -> None:
         body = html_str.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not head_only:
+            self.wfile.write(body)
 
     def _check_auth(self, parsed_url: urllib.parse.ParseResult) -> bool:
         expected = self.engine.password
@@ -1353,16 +1685,27 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                 return True
         return False
 
-    def _read_json_body(self) -> Dict[str, Any]:
+    def _read_json_body(self) -> Any:
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length <= 0:
             return {}
         raw = self.rfile.read(length)
         try:
-            obj = json.loads(raw.decode("utf-8", errors="replace"))
-            return obj if isinstance(obj, dict) else {}
+            return json.loads(raw.decode("utf-8", errors="replace"))
         except Exception:
             return {}
+
+    def do_OPTIONS(self) -> None:
+        self._send_json(200, None)
+
+    def do_HEAD(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        if path in ("/", "/web", "/ui"):
+            self._send_html(WEB_UI_HTML, head_only=True)
+            return
+        self.send_response(200)
+        self.end_headers()
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -1424,7 +1767,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, self.engine.get_server_info())
             return
 
-        if path in ("/api/v1/pinned", "/api/v1/chat/pinned"):
+        if path in ("/api/v1/pinned", "/api/v1/chat/pinned", "/api/v1/chat/pins"):
             self._send_json(200, self.engine.query_pinned_chats())
             return
 
@@ -1448,14 +1791,30 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, msgs)
             return
 
+        m_single_chat = re.match(r"^/api/v1/chat/([^/]+)$", path)
+        if m_single_chat:
+            chat_guid = urllib.parse.unquote(m_single_chat.group(1))
+            try:
+                chats = self.engine.query_chats(limit=1, offset=0, chat_guid=chat_guid, with_participants=True)
+            except FileNotFoundError:
+                chats = []
+            if not chats:
+                self._send_json(404, None, "Chat not found")
+                return
+            self._send_json(200, chats[0])
+            return
+
         m_att = re.match(r"^/api/v1/attachment/([^/]+)(?:/download|/live)?$", path)
         if m_att:
             att_guid = urllib.parse.unquote(m_att.group(1))
             qs = urllib.parse.parse_qs(parsed.query)
+            original_flag = str((qs.get("original") or ["false"])[0]).lower() == "true"
             resize_val = int((qs.get("height") or qs.get("width") or ["0"])[0] or 0) or None
             try:
                 resolved = self.engine.resolve_attachment_file(
-                    att_guid, convert_heic=True, resize=resize_val
+                    att_guid,
+                    convert_heic=not original_flag,
+                    resize=resize_val,
                 )
             except FileNotFoundError:
                 resolved = None
@@ -1468,6 +1827,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", mime)
             self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(raw)
             return
@@ -1503,9 +1863,10 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(401, None, "Unauthorized")
             return
 
-        body = self._read_json_body()
+        raw_body = self._read_json_body()
+        body = raw_body if isinstance(raw_body, dict) else {}
 
-        if path == "/api/v1/contact/query":
+        if path in ("/api/v1/contact/query", "/api/v1/contact"):
             self._send_json(200, self.engine.query_contacts())
             return
 
@@ -1522,6 +1883,17 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, chats)
             return
 
+        if path == "/api/v1/chat/new":
+            addrs = body.get("addresses") or []
+            first_addr = str(addrs[0]).strip() if addrs else ""
+            service = str(body.get("service") or "iMessage")
+            chat_guid = f"{service};-;{first_addr}" if first_addr else ""
+            msg_text = str(body.get("message") or "").strip()
+            if chat_guid and msg_text:
+                self.engine.send_text({"chatGuid": chat_guid, "message": msg_text})
+            self._send_json(200, {"guid": chat_guid, "chatIdentifier": first_addr, "participants": [{"address": first_addr}]})
+            return
+
         if path == "/api/v1/message/query":
             try:
                 msgs = self.engine.query_messages(body)
@@ -1530,7 +1902,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, msgs)
             return
 
-        if path == "/api/v1/message/text":
+        if path in ("/api/v1/message/text", "/api/v1/message/multipart"):
             self._send_json(200, self.engine.send_text(body))
             return
 
@@ -1558,6 +1930,13 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             return
 
         self._send_json(404, None, f"Not found: {path}")
+
+    def do_DELETE(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if not self._check_auth(parsed):
+            self._send_json(401, None, "Unauthorized")
+            return
+        self._send_json(200, {"deleted": True})
 
 
 def run_stdio_loop(engine: BluePillEngine) -> int:
@@ -1646,7 +2025,7 @@ def main() -> int:
     )
     parser.add_argument("command", nargs="?", default="serve", help="serve | status | doctor | stdio | selftest")
     parser.add_argument("--host", default=os.environ.get("BLUEPILL_HOST", "0.0.0.0"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("BLUEPILL_PORT", "1235")))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("BLUEPILL_PORT", "1234")))
     parser.add_argument("--password", default=os.environ.get("BLUEPILL_PASSWORD", ""))
     parser.add_argument("--db-path", default=os.environ.get("BLUEPILL_DB_PATH", ""))
     parser.add_argument("--stdio", action="store_true", help="Run JSON-RPC over stdin/stdout (Direct SSH mode)")
@@ -1659,9 +2038,11 @@ def main() -> int:
         print(f"bluepill-server {VERSION}")
         return 0
 
+    is_serve = not (args.selftest or args.stdio or args.command in ("selftest", "status", "doctor", "stdio"))
     engine = BluePillEngine(
         db_path=args.db_path or None,
         password=args.password,
+        enable_background_daemons=is_serve,
     )
 
     if args.selftest or args.command == "selftest":
@@ -1674,8 +2055,12 @@ def main() -> int:
         return run_stdio_loop(engine)
 
     BluePillHTTPHandler.engine = engine
+    ThreadingHTTPServer.allow_reuse_address = True
     httpd = ThreadingHTTPServer((args.host, args.port), BluePillHTTPHandler)
-    print(f"BluePill Server v{VERSION} listening on http://{args.host}:{args.port} (Web UI: http://{args.host}:{args.port}/web)", flush=True)
+    print(
+        f"BluePill Server v{VERSION} listening on http://{args.host}:{args.port} (Web UI: http://{args.host}:{args.port}/web)",
+        flush=True,
+    )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
