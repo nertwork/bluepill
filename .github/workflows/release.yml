@@ -17,7 +17,7 @@ jobs:
     steps:
       - name: Install Arch Linux Dependencies
         run: |
-          pacman -Syu --noconfirm base-devel git qt6-base qt6-declarative qt6-svg qt6-wayland libnotify libheif imagemagick
+          pacman -Syu --noconfirm base-devel git qt6-base qt6-declarative qt6-svg qt6-wayland libnotify libheif imagemagick ttf-dejavu
 
       - name: Checkout Tag
         uses: actions/checkout@v4

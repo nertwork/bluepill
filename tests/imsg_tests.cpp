@@ -2361,8 +2361,8 @@ private slots:
         win->setWidth(1400);
         win->setHeight(820);
         QCoreApplication::processEvents();
-        QTRY_VERIFY_WITH_TIMEOUT(activeChatHeader->width() > 900, 1000);
-        QCOMPARE(activeChatHeader->property("stackChatHeaderRows").toBool(), false);
+        QTRY_VERIFY_WITH_TIMEOUT(activeChatHeader->width() > 1000, 1000);
+        QTRY_COMPARE_WITH_TIMEOUT(activeChatHeader->property("stackChatHeaderRows").toBool(), false, 1000);
         QCOMPARE(qRound(activeChatHeader->height()), 68);
         QVERIFY2(contactIdentityCard->x() + contactIdentityCard->width() <= headerActionsRow->x(),
                  "In 1-row wide mode, contactIdentityCard must not overlap headerActionsRow");

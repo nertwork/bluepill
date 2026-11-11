@@ -2088,7 +2088,7 @@ ApplicationWindow {
                     readonly property int actionBtnPad: compactActionButtons ? 14 : 20
                     readonly property real naturalIdentityWidth: 16 + 44 + 12 + Math.max(contactTitleText.implicitWidth + 8 + hdrSrvPill.implicitWidth, contactSubtitleText.visible ? contactSubtitleText.implicitWidth : 0) + 16
                     readonly property real naturalActionsWidth: headerActionsRow.implicitWidth
-                    readonly property bool stackChatHeaderRows: (activeChatHeader.width > 0) && ((naturalIdentityWidth + naturalActionsWidth + 44) > activeChatHeader.width)
+                    readonly property bool stackChatHeaderRows: (activeChatHeader.width > 0) && (activeChatHeader.width < 900) && ((naturalIdentityWidth + naturalActionsWidth + 44) > activeChatHeader.width || activeChatHeader.width < 700)
                     implicitHeight: stackChatHeaderRows ? 104 : 68
                     Layout.preferredHeight: implicitHeight
                     color: theme.darkBackground
