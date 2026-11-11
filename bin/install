@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/../pkgbuild"
+rm -rf pkg src ./*.pkg.tar*
+PKGEXT='.pkg.tar' makepkg -fs --noconfirm </dev/null
+sudo -n pacman -U --noconfirm ./*.pkg.tar* </dev/null

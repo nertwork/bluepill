@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/../tests"
+ARCH="$(uname -m)"
+if [[ "$(cat obj/.arch 2>/dev/null || true)" != "$ARCH" ]]; then
+    rm -rf obj moc rcc Makefile imsg_tests
+fi
+mkdir -p obj
+echo "$ARCH" > obj/.arch
+qmake6 imsg_tests.pro
+make -j"$(nproc)"
+QT_QPA_PLATFORM=offscreen ./imsg_tests

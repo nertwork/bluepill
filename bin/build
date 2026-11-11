@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+ARCH="$(uname -m)"
+if [[ "$(cat build/.arch 2>/dev/null || true)" != "$ARCH" ]]; then
+    rm -rf build
+fi
+mkdir -p build
+echo "$ARCH" > build/.arch
+qmake6 imsg.pro -o build/Makefile
+make -C build -j"$(nproc)"
+echo "Built build/imsg ($ARCH) successfully."

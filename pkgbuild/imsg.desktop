@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=iMessage (Omarchy)
+GenericName=iMessage Client
+Comment=Native Omarchy Qt6/QML iMessage & RCS desktop client
+Exec=imsg
+Icon=imsg
+Terminal=false
+Categories=Network;InstantMessaging;Qt;
+Keywords=iMessage;BlueBubbles;SMS;RCS;Chat;Messages;
+StartupWMClass=imsg

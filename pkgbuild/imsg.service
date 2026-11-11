@@ -1,0 +1,15 @@
+[Unit]
+Description=imsg Native Qt6/QML iMessage, RCS & SMS Desktop Client
+Documentation=https://github.com/nertwork/imsg
+After=graphical-session.target network-online.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/imsg
+Restart=on-failure
+RestartSec=3
+Environment=QT_QPA_PLATFORM=wayland;xcb
+
+[Install]
+WantedBy=graphical-session.target

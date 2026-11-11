@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-and-test:
+    name: Arch Linux Build, 49 Unit Tests & Package
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install Arch Linux Dependencies
+        run: |
+          pacman -Syu --noconfirm base-devel git qt6-base qt6-declarative qt6-svg qt6-wayland libnotify libheif imagemagick python
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Zero-PII & Secret Sanitization Audit
+        run: |
+          python3 -c '
+          import os, re, sys
+          forbidden = [
+              r"bluebubbles\.ilb", r"bluebubbles\.home", r"home\.nertwork",
+              r"172\.28\.", r"jfarr", r"Sponsee", r"Amberwood"
+          ]
+          rx = re.compile("|".join(forbidden), re.IGNORECASE)
+          hits = []
+          for dp, dn, fn in os.walk("."):
+              for skip in [".git", "build", "obj", "moc", "rcc"]:
+                  if skip in dn: dn.remove(skip)
+              for f in fn:
+                  if f.endswith((".png", ".wav", ".svg")): continue
+                  p = os.path.join(dp, f)
+                  if "ci.yml" in p: continue
+                  with open(p, errors="ignore") as fh:
+                      for i, line in enumerate(fh, 1):
+                          if rx.search(line):
+                              hits.append(f"{p}:{i}: {line.strip()}")
+          if hits:
+              print("Forbidden PII/internal strings found:\n" + "\n".join(hits))
+              sys.exit(1)
+          print("Zero-PII audit passed across all repository files.")
+          '
+
+      - name: Compile imsg (C++20 / Qt6)
+        run: ./bin/build
+
+      - name: Run Full 49-Test Suite (Offscreen QPA)
+        run: QT_QPA_PLATFORM=offscreen ./bin/test
+
+      - name: Verify Demo Mode Offscreen Screenshot Rendering
+        run: |
+          QT_QPA_PLATFORM=offscreen ./build/imsg --demo-screenshot /tmp/ci-demo.png
+          test -s /tmp/ci-demo.png
+
+      - name: Build Arch Linux Package (makepkg)
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          su builder -c "cd pkgbuild && makepkg -fs --noconfirm"
+          ls -lh pkgbuild/*.pkg.tar*
