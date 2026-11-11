@@ -23,7 +23,7 @@ jobs:
           pacman -Syu --noconfirm base-devel git qt6-base qt6-declarative qt6-svg cppcheck python curl
 
       - name: Checkout Pull Request
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

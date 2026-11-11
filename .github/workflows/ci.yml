@@ -18,7 +18,7 @@ jobs:
           pacman -Syu --noconfirm base-devel git qt6-base qt6-declarative qt6-svg qt6-wayland libnotify libheif imagemagick ttf-dejavu python
 
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Zero-PII & Secret Sanitization Audit
         run: |
