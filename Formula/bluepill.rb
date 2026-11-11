@@ -2,7 +2,7 @@ class Bluepill < Formula
   desc "Headless zero-Electron macOS iMessage, SMS & RCS relay daemon + Web UI for BluePill"
   homepage "https://github.com/nertwork/bluepill"
   url "https://github.com/nertwork/bluepill/archive/refs/tags/v1.1.0.tar.gz"
-  sha256 "a00294902cf4b3a8c0637a8ace3dd836010aeec2dc38681b4a9e3c0a0a35dff4"
+  sha256 "7e5e7246b579feb23f1e88281e445299005c02284fc2fa11094e856ad3744da0"
   version "1.1.0"
   license "MIT"
   head "https://github.com/nertwork/bluepill.git", branch: "main"
