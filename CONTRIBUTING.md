@@ -1,6 +1,6 @@
-# Contributing to `imsg`
+# Contributing to `bluepill`
 
-Thank you for contributing to **`imsg`** — the native C++20 and Qt6/QML desktop and CLI client for Apple iMessage, RCS, and SMS on Linux (Arch Linux, Omarchy, Wayland/Hyprland, KDE Plasma, GNOME)!
+Thank you for contributing to **`bluepill`** — the native C++20 and Qt6/QML desktop and CLI client for Apple iMessage, RCS, and SMS on Linux (Arch Linux, Omarchy, Wayland/Hyprland, KDE Plasma, GNOME)!
 
 ---
 
@@ -93,7 +93,7 @@ QT_QPA_PLATFORM=offscreen ./build/imsg --generate-release-screenshots /tmp/scree
 All bug fixes, UI improvements, and features follow a 4-step workflow:
 
 1. **Open a GitHub Issue:**
-   - File a [Bug Report](https://github.com/nertwork/imsg/issues/new?template=bug_report.yml) or [Feature Request](https://github.com/nertwork/imsg/issues/new?template=feature_request.yml).
+   - File a [Bug Report](https://github.com/nertwork/bluepill/issues/new?template=bug_report.yml) or [Feature Request](https://github.com/nertwork/bluepill/issues/new?template=feature_request.yml).
    - **`.github/workflows/issue-triage.yml`** automatically classifies and labels the issue.
 2. **Create a Topic Branch & Add a Unit Test:**
    ```bash

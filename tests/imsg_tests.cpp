@@ -2885,6 +2885,100 @@ private slots:
         if (!prevImsgSec.isEmpty()) qputenv("IMSG_SECONDARY_URL", prevImsgSec);
         if (!prevImsgPass.isEmpty()) qputenv("IMSG_PASSWORD", prevImsgPass);
     }
+
+    void testBluePillOtpExtractionAndYearFiltering() {
+        // Standard 2FA & Google G-codes
+        QCOMPARE(Backend::extractOtpCode(QStringLiteral("Your GitHub verification code is: 849201")), QStringLiteral("849201"));
+        QCOMPARE(Backend::extractOtpCode(QStringLiteral("G-482910 is your Google verification code.")), QStringLiteral("482910"));
+        QCOMPARE(Backend::extractOtpCode(QStringLiteral("194-820 is your login code.")), QStringLiteral("194820"));
+        // Year filtering when keyword appears without explicit 'code is YYYY'
+        QCOMPARE(Backend::extractOtpCode(QStringLiteral("Copyright 2026 security notice for your account.")), QString());
+    }
+
+    void testBluePillPinnedChatsAndTogglePin() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_pins.json")));
+        b.loadDemoData();
+
+        // By default, pinnedChats returns top 4 demo conversations
+        const QVariantList defaultPins = b.pinnedChats();
+        QCOMPARE(defaultPins.size(), 4);
+        QCOMPARE(defaultPins.first().toMap().value(QStringLiteral("shortTitle")).toString(), QStringLiteral("Alex"));
+
+        // Explicitly pin Elena Vance -> pinnedChats now contains only explicitly pinned chats
+        const QString elenaGuid = QStringLiteral("iMessage;-;elena.vance@example.com");
+        QCOMPARE(b.isChatPinned(elenaGuid), false);
+        b.togglePinChat(elenaGuid);
+        QCOMPARE(b.isChatPinned(elenaGuid), true);
+        QCOMPARE(b.pinnedChats().size(), 1);
+        QCOMPARE(b.pinnedChats().first().toMap().value(QStringLiteral("guid")).toString(), elenaGuid);
+
+        // Unpin Elena Vance -> falls back to top 4
+        b.togglePinChat(elenaGuid);
+        QCOMPARE(b.isChatPinned(elenaGuid), false);
+        QCOMPARE(b.pinnedChats().size(), 4);
+    }
+
+    void testBluePillEditedExpressiveAndFailureBadges() {
+        QJsonArray rawDesc;
+
+        // 1. Outgoing failed message (error = 4)
+        QJsonObject mFail;
+        mFail.insert(QStringLiteral("guid"), QStringLiteral("msg-fail-1"));
+        mFail.insert(QStringLiteral("text"), QStringLiteral("Failed outbound message"));
+        mFail.insert(QStringLiteral("isFromMe"), true);
+        mFail.insert(QStringLiteral("dateCreated"), 1775860005000LL);
+        mFail.insert(QStringLiteral("error"), 4);
+
+        // 2. Incoming edited message with confetti effect & OTP code
+        QJsonObject mRich;
+        mRich.insert(QStringLiteral("guid"), QStringLiteral("msg-rich-1"));
+        mRich.insert(QStringLiteral("text"), QStringLiteral("Your verification code is 739104"));
+        mRich.insert(QStringLiteral("isFromMe"), false);
+        mRich.insert(QStringLiteral("dateCreated"), 1775860001000LL);
+        mRich.insert(QStringLiteral("dateEdited"), 1775860002000LL);
+        mRich.insert(QStringLiteral("expressiveSendStyleId"), QStringLiteral("com.apple.messages.effect.CKConfettiEffect"));
+
+        rawDesc.append(mFail);
+        rawDesc.append(mRich);
+
+        const QVariantList built = Backend::buildMessageListFromApi(rawDesc, {}, {});
+        QCOMPARE(built.size(), 2);
+
+        const QVariantMap richItem = built.at(0).toMap();
+        QCOMPARE(richItem.value(QStringLiteral("isEdited")).toBool(), true);
+        QCOMPARE(richItem.value(QStringLiteral("sendEffectLabel")).toString(), QStringLiteral("sent with confetti"));
+        QCOMPARE(richItem.value(QStringLiteral("otpCode")).toString(), QStringLiteral("739104"));
+        QVERIFY(richItem.value(QStringLiteral("metaBadgeText")).toString().contains(QStringLiteral("Edited · sent with confetti")));
+
+        const QVariantMap failItem = built.at(1).toMap();
+        QCOMPARE(failItem.value(QStringLiteral("isFailed")).toBool(), true);
+        QCOMPARE(failItem.value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
+        QVERIFY(failItem.value(QStringLiteral("metaBadgeText")).toString().contains(QStringLiteral("⚠ Not Delivered")));
+    }
+
+    void testBluePillSshUrlAndConfigMigration() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString cfgPath = tempDir.filePath(QStringLiteral("bluepill_cfg.json"));
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_ssh.json")));
+        b.setConfigFilePath(cfgPath);
+
+        // Save user@mac-gateway -> normalized to ssh://user@mac-gateway, needsSetup() is false even with empty password
+        b.saveServerConfig(QStringLiteral("user@mac-gateway.local"), QString(), QString());
+        QCOMPARE(b.serverUrl(), QStringLiteral("ssh://user@mac-gateway.local"));
+        QCOMPARE(b.needsSetup(), false);
+        QCOMPARE(b.webUiUrl(), QStringLiteral("http://127.0.0.1:1235/web"));
+
+        // Save HTTPS BluePill / BlueBubbles URL -> webUiUrl points to server/web
+        b.saveServerConfig(QStringLiteral("https://bluepill.example.com"), QString(), QStringLiteral("api-key-123"));
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://bluepill.example.com"));
+        QCOMPARE(b.webUiUrl(), QStringLiteral("https://bluepill.example.com/web"));
+    }
 };
 
 QTEST_MAIN(ImsgTests)

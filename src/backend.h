@@ -66,6 +66,7 @@ class Backend : public QObject {
     Q_PROPERTY(bool notificationsEnabled READ notificationsEnabled WRITE setNotificationsEnabled NOTIFY notificationsChanged)
     Q_PROPERTY(bool omarchyDnd READ omarchyDnd NOTIFY omarchyDndChanged)
     Q_PROPERTY(QVariantList chats READ chats NOTIFY chatsChanged)
+    Q_PROPERTY(QVariantList pinnedChats READ pinnedChats NOTIFY chatsChanged)
     Q_PROPERTY(QVariantList messages READ messages NOTIFY messagesChanged)
     Q_PROPERTY(int totalUnread READ totalUnread NOTIFY chatsChanged)
     Q_PROPERTY(bool windowActive READ windowActive WRITE setWindowActive NOTIFY windowActiveChanged)
@@ -85,7 +86,7 @@ public:
     QString serverUrl() const { return m_serverUrl; }
     QString secondaryServerUrl() const { return m_secondaryServerUrl; }
     bool hasPasswordConfigured() const { return !m_password.isEmpty(); }
-    bool needsSetup() const { return !m_demoMode && (m_serverUrl.isEmpty() || m_password.isEmpty()); }
+    bool needsSetup() const { return !m_demoMode && (m_serverUrl.isEmpty() || (!m_serverUrl.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive) && m_password.isEmpty())); }
     QString searchQuery() const { return m_searchQuery; }
     QString filterMode() const { return m_filterMode; }
     QString selectedChatGuid() const { return m_selectedChatGuid; }
@@ -104,6 +105,7 @@ public:
     bool omarchyDnd() const;
     bool areOmarchyNotificationsEnabled() const;
     QVariantList chats() const;
+    QVariantList pinnedChats() const;
     QVariantList messages() const { return m_messages; }
     int totalUnread() const;
     bool windowActive() const { return m_windowActive; }
@@ -120,6 +122,8 @@ public:
     QString configFilePath() const;
     void checkServerAndLoad();
     Q_INVOKABLE void saveServerConfig(const QString &serverUrl, const QString &secondaryUrl, const QString &password);
+    Q_INVOKABLE QString webUiUrl() const;
+    Q_INVOKABLE void openWebUi();
     Q_INVOKABLE void setHistorySyncDays(int days);
     Q_INVOKABLE void cycleHistorySyncDays();
     Q_INVOKABLE void clearSelectedChat();
@@ -128,6 +132,8 @@ public:
     Q_INVOKABLE void toggleNotifications();
     Q_INVOKABLE void toggleChatMute(const QString &chatGuid);
     Q_INVOKABLE bool isChatMuted(const QString &chatGuid) const;
+    Q_INVOKABLE void togglePinChat(const QString &chatGuid);
+    Q_INVOKABLE bool isChatPinned(const QString &chatGuid) const;
 
     Q_INVOKABLE void setSearchQuery(const QString &query);
     Q_INVOKABLE void setFilterMode(const QString &mode);
@@ -163,7 +169,11 @@ public:
 
     // Clipboard & Verification/OTP code extraction
     Q_INVOKABLE void copyToClipboard(const QString &text, const QString &label = QString());
+    Q_INVOKABLE void copyTextToClipboard(const QString &text) { copyToClipboard(text); }
     Q_INVOKABLE static QString extractVerificationCode(const QString &text);
+    Q_INVOKABLE static QString extractOtpCode(const QString &text) { return extractVerificationCode(text); }
+    Q_INVOKABLE QString pasteClipboardImageToTempFile();
+    Q_INVOKABLE void sendAttachment(const QString &chatGuid, const QString &filePath, const QString &caption = QString());
 
     // Contact & recipient autocomplete
     Q_INVOKABLE QVariantList searchContacts(const QString &query = QString(), int limit = 15) const;
@@ -187,6 +197,7 @@ public:
     static QString computeInitials(const QString &title);
     static QString computeAvatarColor(const QString &seed);
     static int computeTextPartIndex(const QJsonObject &msgObj);
+    static QString formatExpressiveEffectLabel(const QString &styleId);
     static QString extractFirstUrl(const QString &text);
     static bool isYouTubeUrl(const QString &url);
     static QString formatMessageTextWithLinks(const QString &raw);
@@ -347,6 +358,7 @@ private:
     QHash<QString, QString> m_attachmentPaths;
     QHash<QString, QHash<QString, QJsonObject>> m_chatMessagesCache;
     QSet<QString> m_mutedChats;
+    QStringList m_pinnedChats;
     QHash<QString, qint64> m_readWatermarks;
     QHash<QString, qint64> m_unreadOverrides;
     QHash<QString, qint64> m_localReadMutationTimeMs;

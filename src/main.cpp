@@ -34,7 +34,14 @@ int main(int argc, char *argv[]) {
     }
 
     if (rawArgs.contains(QStringLiteral("--version")) || rawArgs.contains(QStringLiteral("-v"))) {
-        std::cout << "imsg 1.0.0" << std::endl;
+        std::cout << "bluepill 1.1.0 (imsg compatible)" << std::endl;
+        return 0;
+    }
+    if (rawArgs.contains(QStringLiteral("--webui")) || (!rawArgs.isEmpty() && rawArgs.first() == QStringLiteral("webui"))) {
+        QGuiApplication app(argc, argv);
+        Backend backend(false);
+        std::cout << backend.webUiUrl().toStdString() << std::endl;
+        backend.openWebUi();
         return 0;
     }
 
@@ -47,7 +54,7 @@ int main(int argc, char *argv[]) {
     if (isCliCommand) {
         QCoreApplication app(argc, argv);
         app.setApplicationName(QStringLiteral("imsg"));
-        app.setApplicationVersion(QStringLiteral("1.0.0"));
+        app.setApplicationVersion(QStringLiteral("1.1.0"));
         Backend backend(false);
         const bool asJson = rawArgs.contains(QStringLiteral("--json"));
         const QString cmd = rawArgs.first();
@@ -72,8 +79,9 @@ int main(int argc, char *argv[]) {
     QQuickStyle::setStyle(QStringLiteral("Basic"));
     QGuiApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("imsg"));
-    app.setApplicationVersion(QStringLiteral("1.0.0"));
-    app.setDesktopFileName(QStringLiteral("imsg"));
+    app.setApplicationVersion(QStringLiteral("1.1.0"));
+    app.setDesktopFileName(QStringLiteral("bluepill"));
+    app.setWindowIcon(QIcon(QStringLiteral(":/bluepill.svg")));
     app.setOrganizationName(QStringLiteral("Omarchy"));
 
     QString releaseScreenshotsDir;

@@ -1,8 +1,8 @@
 QT += core gui qml quick quickcontrols2 network svg concurrent
 CONFIG += c++20
 
-TARGET = imsg
-VERSION = 1.0.0
+TARGET = bluepill
+VERSION = 1.1.0
 TEMPLATE = app
 
 DESTDIR = .

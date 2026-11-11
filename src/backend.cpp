@@ -1,3 +1,5 @@
+#include <QHttpMultiPart>
+#include <QMimeData>
 #include <QKeyEvent>
 #include "backend.h"
 
@@ -174,6 +176,13 @@ void Backend::loadAppState() {
         if (!g.isEmpty()) m_mutedChats.insert(g);
     }
 
+    m_pinnedChats.clear();
+    const QJsonArray pinnedArr = obj.value(QStringLiteral("pinnedChats")).toArray();
+    for (const QJsonValue &v : pinnedArr) {
+        const QString g = v.toString().trimmed();
+        if (!g.isEmpty() && !m_pinnedChats.contains(g)) m_pinnedChats.append(g);
+    }
+
     m_readWatermarks.clear();
     const QJsonObject wmObj = obj.value(QStringLiteral("readWatermarks")).toObject();
     for (auto it = wmObj.begin(); it != wmObj.end(); ++it) {
@@ -241,7 +250,12 @@ void Backend::saveAppState() const {
     root.insert(QStringLiteral("notificationsEnabled"), m_notificationsEnabled);
     root.insert(QStringLiteral("historySyncDays"), m_historySyncDays);
     root.insert(QStringLiteral("lastKnownServerStatus"), m_lastKnownServerStatus);
+    QJsonArray pinnedArr;
+    for (const QString &g : m_pinnedChats) {
+        if (!g.isEmpty()) pinnedArr.append(g);
+    }
     root.insert(QStringLiteral("mutedChats"), mutedArr);
+    root.insert(QStringLiteral("pinnedChats"), pinnedArr);
     root.insert(QStringLiteral("readWatermarks"), wmObj);
     root.insert(QStringLiteral("unreadOverrides"), uoObj);
     root.insert(QStringLiteral("deletedMessageGuids"), delMsgsArr);
@@ -600,6 +614,24 @@ bool Backend::isChatMuted(const QString &chatGuid) const {
     return !chatGuid.isEmpty() && m_mutedChats.contains(chatGuid);
 }
 
+void Backend::togglePinChat(const QString &chatGuid) {
+    const QString target = chatGuid.isEmpty() ? m_selectedChatGuid : chatGuid;
+    if (target.isEmpty()) return;
+    if (m_pinnedChats.contains(target)) {
+        m_pinnedChats.removeAll(target);
+        emit toastMessage(QStringLiteral("📌 Conversation unpinned"));
+    } else {
+        m_pinnedChats.append(target);
+        emit toastMessage(QStringLiteral("📌 Conversation pinned"));
+    }
+    saveAppState();
+    emit chatsChanged();
+}
+
+bool Backend::isChatPinned(const QString &chatGuid) const {
+    return !chatGuid.isEmpty() && m_pinnedChats.contains(chatGuid);
+}
+
 bool Backend::omarchyDnd() const {
     const QString path = QDir::homePath() + QStringLiteral("/.local/state/omarchy/notifications.json");
     QFile file(path);
@@ -639,11 +671,26 @@ QString Backend::configFilePath() const {
     if (!m_configFilePath.trimmed().isEmpty()) {
         return m_configFilePath.trimmed();
     }
+    const QString bpEnvPath = qEnvironmentVariable("BLUEPILL_CONFIG_PATH").trimmed();
+    if (!bpEnvPath.isEmpty()) {
+        return bpEnvPath;
+    }
     const QString envPath = qEnvironmentVariable("IMSG_CONFIG_PATH").trimmed();
     if (!envPath.isEmpty()) {
         return envPath;
     }
-    return QDir::homePath() + QStringLiteral("/.config/imsg/config.json");
+    const QString home = QDir::homePath();
+    const QString bpCfg = home + QStringLiteral("/.config/bluepill/config.json");
+    const QString legacyCfg = home + QStringLiteral("/.config/imsg/config.json");
+    if (!QFileInfo::exists(bpCfg) && QFileInfo::exists(legacyCfg)) {
+        QDir().mkpath(QFileInfo(bpCfg).absolutePath());
+        QFile::copy(legacyCfg, bpCfg);
+        QFile::setPermissions(bpCfg, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    }
+    if (QFileInfo::exists(bpCfg)) {
+        return bpCfg;
+    }
+    return legacyCfg;
 }
 
 void Backend::setConfigFilePath(const QString &path) {
@@ -665,11 +712,36 @@ static QString normalizeServerEndpointUrl(const QString &rawUrl) {
     while (url.endsWith(QLatin1Char('/'))) {
         url.chop(1);
     }
-    if (!url.isEmpty() && !url.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive) &&
+    if (url.isEmpty()) return url;
+    if (url.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive)) {
+        return QStringLiteral("ssh://") + url.mid(6);
+    }
+    if (!url.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive) &&
         !url.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)) {
-        url = QStringLiteral("https://") + url;
+        if (url.contains(QLatin1Char('@')) && !url.contains(QLatin1Char('/'))) {
+            url = QStringLiteral("ssh://") + url;
+        } else {
+            url = QStringLiteral("https://") + url;
+        }
     }
     return url;
+}
+
+QString Backend::webUiUrl() const {
+    QString base = m_serverUrl.trimmed();
+    if (base.isEmpty() || base.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive)) {
+        base = QStringLiteral("http://127.0.0.1:1235");
+    }
+    while (base.endsWith(QLatin1Char('/'))) {
+        base.chop(1);
+    }
+    return base + QStringLiteral("/web");
+}
+
+void Backend::openWebUi() {
+    const QString urlStr = webUiUrl();
+    QDesktopServices::openUrl(QUrl(urlStr));
+    emit toastMessage(QStringLiteral("🌐 Opening BluePill Web UI (%1)").arg(urlStr));
 }
 
 void Backend::saveServerConfig(const QString &serverUrl, const QString &secondaryUrl, const QString &password) {
@@ -720,7 +792,19 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
 
     emit configChanged();
     emit statusChanged();
-    emit toastMessage(QStringLiteral("✓ Saved BlueBubbles server configuration"));
+    if (m_configFilePath.trimmed().isEmpty()) {
+        const QString bpCfg = QDir::homePath() + QStringLiteral("/.config/bluepill/config.json");
+        if (cfgPath != bpCfg) {
+            QDir().mkpath(QFileInfo(bpCfg).absolutePath());
+            QFile bpFile(bpCfg);
+            if (bpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                bpFile.write(QJsonDocument(cfgObj).toJson(QJsonDocument::Indented));
+                bpFile.close();
+                QFile::setPermissions(bpCfg, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+            }
+        }
+    }
+    emit toastMessage(QStringLiteral("✓ Saved BluePill / BlueBubbles server configuration"));
 
     if (!m_demoMode && !m_serverUrl.isEmpty() && !m_password.isEmpty()) {
         checkServerAndLoad();
@@ -729,15 +813,24 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
 }
 
 void Backend::loadCredentials() {
-    m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SERVER_URL"));
+    m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SERVER_URL"));
+    if (m_serverUrl.isEmpty()) {
+        m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SERVER_URL"));
+    }
     if (m_serverUrl.isEmpty()) {
         m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEBUBBLES_URL"));
     }
-    m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SECONDARY_URL"));
+    m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SECONDARY_URL"));
+    if (m_secondaryServerUrl.isEmpty()) {
+        m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SECONDARY_URL"));
+    }
     if (m_secondaryServerUrl.isEmpty()) {
         m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEBUBBLES_SECONDARY_URL"));
     }
-    m_password = qEnvironmentVariable("IMSG_PASSWORD").trimmed();
+    m_password = qEnvironmentVariable("BLUEPILL_PASSWORD").trimmed();
+    if (m_password.isEmpty()) {
+        m_password = qEnvironmentVariable("IMSG_PASSWORD").trimmed();
+    }
     if (m_password.isEmpty()) {
         m_password = qEnvironmentVariable("BLUEBUBBLES_PASSWORD").trimmed();
     }
@@ -1013,6 +1106,24 @@ QString Backend::extractMessageText(const QJsonObject &msgObj) {
         }
     }
     return text;
+}
+
+QString Backend::formatExpressiveEffectLabel(const QString &styleId) {
+    const QString s = styleId.trimmed();
+    if (s.isEmpty()) return QString();
+    if (s.endsWith(QStringLiteral(".impact"), Qt::CaseInsensitive)) return QStringLiteral("sent with slam");
+    if (s.endsWith(QStringLiteral(".loud"), Qt::CaseInsensitive)) return QStringLiteral("sent with loud");
+    if (s.endsWith(QStringLiteral(".gentle"), Qt::CaseInsensitive)) return QStringLiteral("sent with gentle");
+    if (s.endsWith(QStringLiteral(".invisibleink"), Qt::CaseInsensitive)) return QStringLiteral("sent with invisible ink");
+    if (s.contains(QStringLiteral("CKConfettiEffect"), Qt::CaseInsensitive)) return QStringLiteral("sent with confetti");
+    if (s.contains(QStringLiteral("CKLasersEffect"), Qt::CaseInsensitive)) return QStringLiteral("sent with lasers");
+    if (s.contains(QStringLiteral("CKFireworksEffect"), Qt::CaseInsensitive)) return QStringLiteral("sent with fireworks");
+    if (s.contains(QStringLiteral("CKSparklesEffect"), Qt::CaseInsensitive)) return QStringLiteral("sent with celebration");
+    if (s.contains(QStringLiteral("CKEchoEffect"), Qt::CaseInsensitive)) return QStringLiteral("sent with echo");
+    if (s.contains(QStringLiteral("CKSpotlightEffect"), Qt::CaseInsensitive)) return QStringLiteral("sent with spotlight");
+    if (s.contains(QStringLiteral("CKHappyBirthdayEffect"), Qt::CaseInsensitive)) return QStringLiteral("sent with balloons");
+    if (s.contains(QStringLiteral("CKHeartEffect"), Qt::CaseInsensitive)) return QStringLiteral("sent with love");
+    return QString();
 }
 
 QString Backend::extractFirstUrl(const QString &text) {
@@ -2875,7 +2986,49 @@ QVariantList Backend::chats() const {
         map.insert(QStringLiteral("isGroup"), c.isGroup);
         map.insert(QStringLiteral("muted"), m_mutedChats.contains(c.guid));
         map.insert(QStringLiteral("isMuted"), m_mutedChats.contains(c.guid));
+        map.insert(QStringLiteral("pinned"), m_pinnedChats.contains(c.guid));
         result.append(map);
+    }
+    return result;
+}
+
+QVariantList Backend::pinnedChats() const {
+    QVariantList result;
+    auto appendEntry = [&](const ChatEntry &c) {
+        QVariantMap map;
+        map.insert(QStringLiteral("guid"), c.guid);
+        map.insert(QStringLiteral("title"), c.title);
+        QString shortTitle = c.title.trimmed();
+        if (!c.isGroup && shortTitle.contains(QLatin1Char(' '))) {
+            shortTitle = shortTitle.section(QLatin1Char(' '), 0, 0);
+        } else if (shortTitle.size() > 12) {
+            shortTitle = shortTitle.left(11) + QStringLiteral("…");
+        }
+        map.insert(QStringLiteral("shortTitle"), shortTitle);
+        map.insert(QStringLiteral("initials"), c.initials);
+        map.insert(QStringLiteral("avatarColor"), c.avatarColor);
+        map.insert(QStringLiteral("avatarUrl"), c.avatarUrl);
+        map.insert(QStringLiteral("unreadCount"), c.unreadCount);
+        map.insert(QStringLiteral("isGroup"), c.isGroup);
+        map.insert(QStringLiteral("service"), c.service);
+        map.insert(QStringLiteral("pinned"), true);
+        result.append(map);
+    };
+    if (!m_pinnedChats.isEmpty()) {
+        for (const QString &pinGuid : m_pinnedChats) {
+            for (const ChatEntry &c : m_chats) {
+                if (c.guid == pinGuid) {
+                    appendEntry(c);
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+    // Default when no manual pins are saved: surface up to top 4 active chats
+    const int maxPins = qMin<int>(4, m_chats.size());
+    for (int i = 0; i < maxPins; ++i) {
+        appendEntry(m_chats.at(i));
     }
     return result;
 }
@@ -3496,18 +3649,47 @@ QVariantList Backend::buildMessageListFromApi(
 
         const bool isIMessage = (service == QStringLiteral("iMessage")) || service.isEmpty();
 
+        const qint64 dateEdited = qMax(
+            m.value(QStringLiteral("dateEdited")).toVariant().toLongLong(),
+            m.value(QStringLiteral("date_edited")).toVariant().toLongLong());
+        const bool isEdited = (dateEdited > 0);
+        QString rawEffect = m.value(QStringLiteral("expressiveSendStyleId")).toString().trimmed();
+        if (rawEffect.isEmpty()) {
+            rawEffect = m.value(QStringLiteral("expressive_send_style_id")).toString().trimmed();
+        }
+        const QString sendEffectLabel = formatExpressiveEffectLabel(rawEffect);
+        const int errorCode = m.value(QStringLiteral("error")).toInt(0);
+        const bool isFailed = isFromMe && (errorCode != 0);
+        if (isFailed) {
+            receiptText = QStringLiteral("⚠ Not Delivered");
+        }
+        const QString baseTimeText = dateCreated > 0 ? QDateTime::fromMSecsSinceEpoch(dateCreated).toString(QStringLiteral("h:mm AP")) : QString();
+        QStringList metaParts;
+        if (!baseTimeText.isEmpty()) metaParts.append(baseTimeText);
+        if (isEdited) metaParts.append(QStringLiteral("Edited"));
+        if (!sendEffectLabel.isEmpty()) metaParts.append(sendEffectLabel);
+        if (isFailed) metaParts.append(QStringLiteral("⚠ Not Delivered"));
+        const QString metaBadgeText = metaParts.join(QStringLiteral(" · "));
+        const QString otpCode = extractVerificationCode(text);
+
         QVariantMap item;
         item.insert(QStringLiteral("guid"), guid);
         item.insert(QStringLiteral("text"), text);
         item.insert(QStringLiteral("formattedText"), formatMessageTextWithLinks(text));
-        item.insert(QStringLiteral("verificationCode"), extractVerificationCode(text));
+        item.insert(QStringLiteral("verificationCode"), otpCode);
+        item.insert(QStringLiteral("otpCode"), otpCode);
+        item.insert(QStringLiteral("isEdited"), isEdited);
+        item.insert(QStringLiteral("sendEffectLabel"), sendEffectLabel);
+        item.insert(QStringLiteral("errorCode"), errorCode);
+        item.insert(QStringLiteral("isFailed"), isFailed);
+        item.insert(QStringLiteral("metaBadgeText"), metaBadgeText);
         item.insert(QStringLiteral("isFromMe"), isFromMe);
         item.insert(QStringLiteral("isIMessage"), isIMessage);
         item.insert(QStringLiteral("dateCreated"), dateCreated);
         item.insert(QStringLiteral("service"), service);
         item.insert(QStringLiteral("senderName"), senderName);
         item.insert(QStringLiteral("senderColor"), computeAvatarColor(handleAddr.isEmpty() ? senderName : handleAddr));
-        item.insert(QStringLiteral("timeText"), dateCreated > 0 ? QDateTime::fromMSecsSinceEpoch(dateCreated).toString(QStringLiteral("h:mm AP")) : QString());
+        item.insert(QStringLiteral("timeText"), baseTimeText);
         item.insert(QStringLiteral("showDateHeader"), showDateHeader);
         item.insert(QStringLiteral("dateHeaderText"), dateHeaderText);
         item.insert(QStringLiteral("reactions"), reactionPills);
@@ -4329,7 +4511,7 @@ void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
         });
     } else {
         QNetworkRequest req(parsedUrl);
-        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Mozilla/5.0 (compatible; imsg/1.0.0; +https://github.com/nertwork/imsg)"));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Mozilla/5.0 (compatible; bluepill/1.1.0; +https://github.com/nertwork/bluepill)"));
         req.setTransferTimeout(8000);
         QNetworkReply *reply = m_mediaNam.get(req);
         connect(reply, &QNetworkReply::finished, this, [this, reply, msgGuid, url, host, jsonPath, thumbPath, applyPreview]() {
@@ -5168,6 +5350,10 @@ QString Backend::extractVerificationCode(const QString &text) {
         auto m = it.next();
         QString cand = m.captured(1);
         cand.remove(QLatin1Char('-'));
+        if (cand.size() == 4) {
+            const int yr = cand.toInt();
+            if (yr >= 1990 && yr <= 2039) continue;
+        }
         return cand;
     }
 
@@ -5200,6 +5386,107 @@ void Backend::copyToClipboard(const QString &text, const QString &label) {
     } else {
         emit toastMessage(QStringLiteral("✓ Copied %1").arg(label));
     }
+}
+
+QString Backend::pasteClipboardImageToTempFile() {
+    QClipboard *cb = QGuiApplication::clipboard();
+    if (!cb) return QString();
+    const QMimeData *mime = cb->mimeData();
+    if (!mime) return QString();
+    if (mime->hasImage()) {
+        const QImage img = cb->image();
+        if (!img.isNull()) {
+            const QString outPath = QDir::tempPath() + QStringLiteral("/bluepill-paste-%1.png").arg(QDateTime::currentMSecsSinceEpoch());
+            if (img.save(outPath, "PNG")) {
+                return outPath;
+            }
+        }
+    }
+    if (mime->hasUrls()) {
+        for (const QUrl &u : mime->urls()) {
+            if (u.isLocalFile()) {
+                const QString localPath = u.toLocalFile();
+                if (isImageMimeOrExt(QString(), localPath) && QFileInfo::exists(localPath)) {
+                    return localPath;
+                }
+            }
+        }
+    }
+    return QString();
+}
+
+void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, const QString &caption) {
+    if (chatGuid.isEmpty() || filePath.trimmed().isEmpty()) return;
+    QFileInfo fi(filePath.trimmed());
+    if (!fi.exists() || !fi.isFile()) return;
+    const QString tempGuid = QStringLiteral("temp-att-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString localUrl = QUrl::fromLocalFile(fi.absoluteFilePath()).toString();
+    const bool isImg = isImageMimeOrExt(QString(), fi.fileName());
+    QVariantMap attMap{
+        {QStringLiteral("guid"), tempGuid},
+        {QStringLiteral("name"), fi.fileName()},
+        {QStringLiteral("mimeType"), isImg ? QStringLiteral("image/png") : QStringLiteral("application/octet-stream")},
+        {QStringLiteral("localUrl"), localUrl},
+        {QStringLiteral("isImage"), isImg}
+    };
+    QVariantMap optimistic;
+    optimistic.insert(QStringLiteral("guid"), tempGuid);
+    optimistic.insert(QStringLiteral("text"), caption.trimmed());
+    optimistic.insert(QStringLiteral("formattedText"), formatMessageTextWithLinks(caption.trimmed()));
+    optimistic.insert(QStringLiteral("isFromMe"), true);
+    optimistic.insert(QStringLiteral("isIMessage"), true);
+    optimistic.insert(QStringLiteral("senderName"), QStringLiteral("You"));
+    optimistic.insert(QStringLiteral("senderColor"), QStringLiteral("#7aa2f7"));
+    optimistic.insert(QStringLiteral("timeText"), QDateTime::currentDateTime().toString(QStringLiteral("h:mm AP")));
+    optimistic.insert(QStringLiteral("metaBadgeText"), QDateTime::currentDateTime().toString(QStringLiteral("h:mm AP")));
+    optimistic.insert(QStringLiteral("hasImageAttachment"), isImg);
+    optimistic.insert(QStringLiteral("hasFileAttachment"), !isImg);
+    optimistic.insert(QStringLiteral("attachmentGuid"), tempGuid);
+    optimistic.insert(QStringLiteral("attachmentName"), fi.fileName());
+    optimistic.insert(QStringLiteral("attachmentLocalUrl"), localUrl);
+    if (isImg) {
+        optimistic.insert(QStringLiteral("imageAttachments"), QVariantList{attMap});
+        optimistic.insert(QStringLiteral("imageAttachmentCount"), 1);
+    } else {
+        optimistic.insert(QStringLiteral("fileAttachments"), QVariantList{attMap});
+        optimistic.insert(QStringLiteral("imageAttachmentCount"), 0);
+    }
+    optimistic.insert(QStringLiteral("receiptText"), m_demoMode ? QStringLiteral("Delivered") : QStringLiteral("Sending..."));
+    emit aboutToChangeMessages();
+    m_messages.append(optimistic);
+    emit messagesChanged();
+    emit toastMessage(QStringLiteral("📎 Sending %1...").arg(fi.fileName()));
+    if (m_demoMode || m_serverUrl.isEmpty()) return;
+    QHttpMultiPart *multiPart = new QHttpMultiPart(QHttpMultiPart::FormDataType);
+    auto addTextPart = [multiPart](const QByteArray &name, const QString &val) {
+        QHttpPart p;
+        p.setHeader(QNetworkRequest::ContentDispositionHeader, QVariant(QStringLiteral("form-data; name=\"%1\"").arg(QString::fromLatin1(name))));
+        p.setBody(val.toUtf8());
+        multiPart->append(p);
+    };
+    addTextPart("chatGuid", chatGuid);
+    addTextPart("tempGuid", tempGuid);
+    addTextPart("name", fi.fileName());
+    addTextPart("method", QStringLiteral("private-api"));
+    if (!caption.trimmed().isEmpty()) addTextPart("message", caption.trimmed());
+    QFile *file = new QFile(fi.absoluteFilePath(), multiPart);
+    if (!file->open(QIODevice::ReadOnly)) { delete multiPart; return; }
+    QHttpPart filePart;
+    filePart.setHeader(QNetworkRequest::ContentDispositionHeader,
+                       QVariant(QStringLiteral("form-data; name=\"attachment\"; filename=\"%1\"").arg(fi.fileName())));
+    filePart.setBodyDevice(file);
+    multiPart->append(filePart);
+    QNetworkRequest req(buildApiUrl(QStringLiteral("/api/v1/message/attachment")));
+    req.setPriority(QNetworkRequest::HighPriority);
+    req.setTransferTimeout(45000);
+    QNetworkReply *reply = m_sendNam.post(req, multiPart);
+    multiPart->setParent(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid]() {
+        reply->deleteLater();
+        if (reply->error() == QNetworkReply::NoError) {
+            loadChatMessages(chatGuid);
+        }
+    });
 }
 
 QString Backend::canonicalizeAddress(const QString &raw) {
@@ -5672,9 +5959,9 @@ void Backend::loadDemoData() {
     stopSocketIoClient();
     m_connected = true;
     m_loading = false;
-    m_serverUrl = QStringLiteral("https://bluebubbles.example.com");
+    m_serverUrl = QStringLiteral("https://bluepill.example.com");
     m_secondaryServerUrl = QStringLiteral("https://failover.example.com");
-    m_serverStatus = QStringLiteral("Connected v1.9.12 · macOS 15.7.7 · Private API");
+    m_serverStatus = QStringLiteral("BluePill Relay v1.1.0 · macOS 15.7.7 · Private API");
 
     // Generate 3 synthetic scenic photos in /tmp (mountain lake, alpine ridge, portrait forest trail)
     const QString lakeImgPath = QDir::tempPath() + QStringLiteral("/imsg_demo_mountain_lake.png");
@@ -5826,7 +6113,7 @@ void Backend::loadDemoData() {
     c1.service = QStringLiteral("iMessage");
     c1.initials = QStringLiteral("AR");
     c1.avatarColor = QStringLiteral("#7aa2f7");
-    c1.lastMessagePreview = QStringLiteral("Native Qt6 client looks super clean on Hyprland!");
+    c1.lastMessagePreview = QStringLiteral("BluePill looks super clean on Hyprland! Your code is G-482910.");
     c1.relativeTime = QStringLiteral("now");
     c1.lastMessageDate = now - 30000;
     c1.unreadCount = 0;
@@ -5948,9 +6235,11 @@ void Backend::loadDemoData() {
 
         QVariantMap m2;
         m2.insert(QStringLiteral("guid"), QStringLiteral("msg-2"));
-        m2.insert(QStringLiteral("text"), QStringLiteral("Incredible shots! The multi-photo gallery and EXIF portrait rendering work seamlessly in https://github.com/nertwork/imsg"));
+        m2.insert(QStringLiteral("text"), QStringLiteral("Incredible shots! The multi-photo gallery and EXIF portrait rendering work seamlessly in https://github.com/nertwork/bluepill"));
         m2.insert(QStringLiteral("formattedText"), Backend::formatMessageTextWithLinks(
-            QStringLiteral("Incredible shots! The multi-photo gallery and EXIF portrait rendering work seamlessly in https://github.com/nertwork/imsg")));
+            QStringLiteral("Incredible shots! The multi-photo gallery and EXIF portrait rendering work seamlessly in https://github.com/nertwork/bluepill")));
+        m2.insert(QStringLiteral("isEdited"), true);
+        m2.insert(QStringLiteral("metaBadgeText"), QStringLiteral("2:15 PM · Edited"));
         m2.insert(QStringLiteral("isFromMe"), true);
         m2.insert(QStringLiteral("isIMessage"), true);
         m2.insert(QStringLiteral("service"), QStringLiteral("iMessage"));
@@ -5963,9 +6252,9 @@ void Backend::loadDemoData() {
         m2.insert(QStringLiteral("hasFileAttachment"), false);
         m2.insert(QStringLiteral("hasLinkPreview"), true);
         m2.insert(QStringLiteral("linkPreview"), QVariantMap{
-            {QStringLiteral("url"), QStringLiteral("https://github.com/nertwork/imsg")},
+            {QStringLiteral("url"), QStringLiteral("https://github.com/nertwork/bluepill")},
             {QStringLiteral("domain"), QStringLiteral("github.com")},
-            {QStringLiteral("title"), QStringLiteral("nertwork/imsg — Native Linux Qt6/QML iMessage, RCS & SMS Client")},
+            {QStringLiteral("title"), QStringLiteral("nertwork/bluepill — BluePill Native Linux Qt6/QML iMessage, RCS & SMS Client & macOS Relay")},
             {QStringLiteral("description"), QStringLiteral("Fast C++20 and Qt6/QML desktop & CLI client backed by BlueBubbles Private API and Socket.IO v4 push.")},
             {QStringLiteral("thumbnail"), QString()},
             {QStringLiteral("isYouTube"), false}
@@ -5975,8 +6264,11 @@ void Backend::loadDemoData() {
 
         QVariantMap m3;
         m3.insert(QStringLiteral("guid"), QStringLiteral("msg-3"));
-        m3.insert(QStringLiteral("text"), QStringLiteral("Native Qt6 client looks super clean on Hyprland! Your verification code is G-482910."));
+        m3.insert(QStringLiteral("text"), QStringLiteral("BluePill looks super clean on Hyprland! Your verification code is G-482910."));
         m3.insert(QStringLiteral("verificationCode"), QStringLiteral("482910"));
+        m3.insert(QStringLiteral("otpCode"), QStringLiteral("482910"));
+        m3.insert(QStringLiteral("sendEffectLabel"), QStringLiteral("sent with confetti"));
+        m3.insert(QStringLiteral("metaBadgeText"), QStringLiteral("2:16 PM · sent with confetti"));
         m3.insert(QStringLiteral("isFromMe"), false);
         m3.insert(QStringLiteral("isIMessage"), true);
         m3.insert(QStringLiteral("service"), QStringLiteral("iMessage"));

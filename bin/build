@@ -9,4 +9,5 @@ mkdir -p build
 echo "$ARCH" > build/.arch
 qmake6 imsg.pro -o build/Makefile
 make -C build -j"$(nproc)"
-echo "Built build/imsg ($ARCH) successfully."
+ln -sf bluepill build/imsg
+echo "Built build/bluepill and build/imsg ($ARCH) successfully."

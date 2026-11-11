@@ -9,7 +9,7 @@ ApplicationWindow {
     height: 820
     minimumWidth: 640
     minimumHeight: 540
-    title: "iMessage"
+    title: "BluePill"
     color: theme.background
 
     readonly property bool isCompactWindow: root.width < 1120
@@ -823,7 +823,7 @@ ApplicationWindow {
                         border.color: backend.selectedChatGuid.length === 0 ? theme.accent : theme.muted
 
                         ToolTip.visible: homeBrandMouse.containsMouse
-                        ToolTip.text: i18n.tr("iMessage Home Page (Ctrl+H)")
+                        ToolTip.text: i18n.tr("BluePill Home Dashboard (Ctrl+H)")
                         ToolTip.delay: 350
 
                         RowLayout {
@@ -836,8 +836,16 @@ ApplicationWindow {
                                 radius: 5
                                 color: backend.connected ? theme.green : theme.red
                             }
+                            Image {
+                                width: 20
+                                height: 20
+                                source: "qrc:/bluepill.svg"
+                                sourceSize.width: 40
+                                sourceSize.height: 40
+                                fillMode: Image.PreserveAspectFit
+                            }
                             Text {
-                                text: "iMessage"
+                                text: "BluePill"
                                 font.pixelSize: theme.fontSize + 2
                                 font.bold: true
                                 color: backend.selectedChatGuid.length === 0 ? theme.accent : theme.brightForeground
@@ -1188,6 +1196,104 @@ ApplicationWindow {
                                         onClicked: {
                                             searchInput.text = ""
                                             backend.setSearchQuery("")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Pinned Conversations Bar (synced from macOS pinning.plist / user pins)
+                    Rectangle {
+                        id: pinnedChatsBar
+                        objectName: "pinnedChatsBar"
+                        visible: backend.pinnedChats.length > 0 && backend.searchQuery.length === 0
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: visible ? 76 : 0
+                        color: "transparent"
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            spacing: 6
+
+                            Repeater {
+                                model: backend.pinnedChats
+                                delegate: Item {
+                                    required property var modelData
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 68
+
+                                    ColumnLayout {
+                                        anchors.centerIn: parent
+                                        spacing: 4
+
+                                        Rectangle {
+                                            Layout.alignment: Qt.AlignHCenter
+                                            width: 42
+                                            height: 42
+                                            radius: 21
+                                            color: modelData.avatarColor || theme.accent
+                                            border.width: modelData.guid === backend.selectedChatGuid ? 2 : (pinTileMouse.containsMouse ? 1 : 0)
+                                            border.color: modelData.guid === backend.selectedChatGuid ? theme.brightForeground : theme.accent
+
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: modelData.initials || "#"
+                                                font.pixelSize: theme.fontSize - 1
+                                                font.bold: true
+                                                color: "#ffffff"
+                                            }
+
+                                            // Unread badge dot on pinned avatar
+                                            Rectangle {
+                                                visible: (modelData.unreadCount || 0) > 0
+                                                anchors.right: parent.right
+                                                anchors.top: parent.top
+                                                anchors.rightMargin: -2
+                                                anchors.topMargin: -2
+                                                width: 16
+                                                height: 16
+                                                radius: 8
+                                                color: theme.accent
+                                                border.width: 2
+                                                border.color: theme.darkBackground
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: modelData.unreadCount > 9 ? "9+" : modelData.unreadCount
+                                                    font.pixelSize: 9
+                                                    font.bold: true
+                                                    color: "#ffffff"
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            Layout.alignment: Qt.AlignHCenter
+                                            Layout.maximumWidth: 64
+                                            elide: Text.ElideRight
+                                            horizontalAlignment: Text.AlignHCenter
+                                            text: modelData.shortTitle || modelData.title || ""
+                                            font.pixelSize: theme.fontSize - 4
+                                            font.bold: modelData.guid === backend.selectedChatGuid || (modelData.unreadCount || 0) > 0
+                                            color: modelData.guid === backend.selectedChatGuid ? theme.accent : theme.foreground
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: pinTileMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: function(mouse) {
+                                            if (mouse.button === Qt.RightButton) {
+                                                backend.togglePinChat(modelData.guid)
+                                            } else {
+                                                backend.selectChat(modelData.guid)
+                                                root.focusAndScrollChat()
+                                            }
                                         }
                                     }
                                 }
@@ -1592,10 +1698,13 @@ ApplicationWindow {
                                             color: theme.selection
                                             border.width: 1
                                             border.color: theme.accent
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: "💬"
-                                                font.pixelSize: theme.fontSize + 8
+                                            Image {
+                                                anchors.fill: parent
+                                                anchors.margins: 3
+                                                source: "qrc:/bluepill.svg"
+                                                sourceSize.width: 96
+                                                sourceSize.height: 96
+                                                fillMode: Image.PreserveAspectFit
                                             }
                                         }
 
@@ -1610,7 +1719,7 @@ ApplicationWindow {
                                                 spacing: 8
                                                 Text {
                                                     id: homeTitleTxt
-                                                    text: i18n.tr("iMessage Home")
+                                                    text: i18n.tr("BluePill Home")
                                                     font.pixelSize: theme.fontSize + 6
                                                     font.bold: true
                                                     color: theme.brightForeground
@@ -1651,7 +1760,7 @@ ApplicationWindow {
                                                 elide: Text.ElideRight
                                                 text: backend.serverUrl.length > 0
                                                           ? (i18n.tr("Relay: ") + backend.serverUrl + " · " + i18n.tr("Instant local cache + Private API sync"))
-                                                          : i18n.tr("BlueBubbles macOS Relay")
+                                                          : i18n.tr("BluePill & BlueBubbles macOS Relay")
                                                 font.pixelSize: theme.fontSize - 2
                                                 color: theme.darkForeground
                                             }
@@ -1685,6 +1794,33 @@ ApplicationWindow {
                                                         root.showNewChatModal = true
                                                         newChatRecipient.forceActiveFocus()
                                                     }
+                                                }
+                                            }
+
+                                            Rectangle {
+                                                id: homeWebUiBtn
+                                                objectName: "homeWebUiBtn"
+                                                height: 34
+                                                implicitHeight: 34
+                                                Layout.preferredHeight: 34
+                                                radius: 8
+                                                implicitWidth: homeWebUiLbl.implicitWidth + 20
+                                                Layout.preferredWidth: implicitWidth
+                                                color: theme.lighterBackground
+                                                border.width: 1
+                                                border.color: theme.accent
+                                                Text {
+                                                    id: homeWebUiLbl
+                                                    anchors.centerIn: parent
+                                                    text: "🌐 " + (homeHeroBanner.compactHeroActions ? i18n.tr("Web") : i18n.tr("Web UI"))
+                                                    font.pixelSize: theme.fontSize - 2
+                                                    font.bold: true
+                                                    color: theme.brightForeground
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: backend.openWebUi()
                                                 }
                                             }
 
@@ -3674,15 +3810,20 @@ ApplicationWindow {
                                             }
                                         }
 
-                                        // Timestamp inside bubble bottom-right
+                                        // Timestamp & Metadata (Edited / Send Effect / Delivery Error) inside bubble bottom-right
                                         Text {
                                             anchors.right: parent ? parent.right : undefined
-                                            text: modelData.timeText || ""
+                                            text: (modelData.metaBadgeText && modelData.metaBadgeText.length > 0)
+                                                  ? modelData.metaBadgeText
+                                                  : (modelData.timeText || "")
                                             font.pixelSize: theme.fontSize - 3
-                                            color: modelData.isFromMe
-                                                   ? ((modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
-                                                      ? "#e0f8e9" : "#d0dff7")
-                                                   : theme.darkForeground
+                                            font.bold: modelData.isFailed || false
+                                            color: (modelData.isFailed || false)
+                                                   ? theme.red
+                                                   : (modelData.isFromMe
+                                                      ? ((modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
+                                                         ? "#e0f8e9" : "#d0dff7")
+                                                      : theme.darkForeground)
                                         }
                                     }
                                 }
@@ -4178,6 +4319,15 @@ ApplicationWindow {
                                 Keys.onPressed: function(event) {
                                     if (root.showPhotoViewer && root.handlePhotoViewerKey(event)) {
                                         return
+                                    }
+                                    if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) {
+                                        var pastedPath = backend.pasteClipboardImageToTempFile()
+                                        if (pastedPath && pastedPath.length > 0 && backend.selectedChatGuid.length > 0) {
+                                            backend.sendAttachment(backend.selectedChatGuid, pastedPath, composerInput.text.trim())
+                                            composerInput.text = ""
+                                            event.accepted = true
+                                            return
+                                        }
                                     }
                                     if (event.key === Qt.Key_PageUp) {
                                         root.scrollMessagesPageUp()
@@ -4882,7 +5032,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 10
                     Text {
-                        text: "⚙ " + i18n.tr("BlueBubbles Server Configuration")
+                        text: "⚙ " + i18n.tr("BluePill & BlueBubbles Server Configuration")
                         font.pixelSize: theme.fontSize + 3
                         font.bold: true
                         color: theme.brightForeground
@@ -4909,7 +5059,7 @@ ApplicationWindow {
 
                 Text {
                     Layout.fillWidth: true
-                    text: i18n.tr("Configure your macOS BlueBubbles relay URL and API password. Credentials are saved with strict 0600 permissions to ~/.config/imsg/config.json.")
+                    text: i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                     wrapMode: Text.WordWrap

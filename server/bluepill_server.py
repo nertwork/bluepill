@@ -1,0 +1,1620 @@
+#!/usr/bin/env python3
+"""
+BluePill Headless macOS Relay Server (`bluepill-server` v1.1.0)
+Zero-Electron, single-file Python 3 stdlib relay for Apple Messages (`chat.db`),
+macOS Contacts (`AddressBook-v22.abcddb`), Pinned Chats (`com.apple.messages.pinning.plist`),
+Engine.IO v4 / Socket.IO v4 push events, and Direct SSH JSON-RPC (`stdio`) mode.
+
+Supported & Tested Platforms:
+- macOS Sequoia (15.x), Sonoma (14.x), and Ventura (13.x) (Apple Silicon & Intel)
+- Arch Linux / Omarchy Linux (x86_64 & aarch64) · Wayland / Hyprland · Qt6 / C++20
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import hashlib
+import io
+import json
+import mimetypes
+import os
+import platform
+import plistlib
+import re
+import shutil
+import socket
+import sqlite3
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+import urllib.request
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Dict, List, Optional, Tuple
+
+VERSION = "1.1.0"
+APPLE_EPOCH_OFFSET_SEC = 978307200
+APPLE_EPOCH_OFFSET_MS = 978307200000
+
+
+def apple_ts_to_epoch_ms(val: Any) -> int:
+    """Convert Apple CoreData / chat.db timestamp (ns or s since 2001-01-01) to Unix epoch ms."""
+    if val is None:
+        return 0
+    try:
+        v = int(val)
+    except (ValueError, TypeError):
+        return 0
+    if v <= 0:
+        return 0
+    if v > 1_000_000_000_000:
+        return int(v // 1_000_000 + APPLE_EPOCH_OFFSET_MS)
+    if v > 1_000_000_000:
+        if v < 2_000_000_000:
+            return int(v * 1000 + APPLE_EPOCH_OFFSET_MS)
+        return int(v + APPLE_EPOCH_OFFSET_MS)
+    return int(v * 1000 + APPLE_EPOCH_OFFSET_MS)
+
+
+def epoch_ms_to_apple_ns(epoch_ms: int) -> int:
+    """Convert Unix epoch milliseconds to Apple chat.db nanoseconds since 2001-01-01."""
+    if epoch_ms <= 0:
+        return 0
+    rel_ms = epoch_ms - APPLE_EPOCH_OFFSET_MS
+    if rel_ms <= 0:
+        return 0
+    return int(rel_ms * 1_000_000)
+
+
+def decode_attributed_body(blob: Optional[bytes]) -> str:
+    """
+    Decode macOS Ventura/Sonoma/Sequoia NSAttributedString / NSMutableAttributedString
+    binary `typedstream` blob in pure Python without Objective-C runtime overhead.
+    """
+    if not blob:
+        return ""
+    if isinstance(blob, memoryview):
+        blob = blob.tobytes()
+    for marker in (b"NSString", b"NSMutableString"):
+        idx = blob.find(marker)
+        if idx != -1:
+            sub = blob[idx + len(marker):]
+            plus = sub.find(b"+")
+            if plus != -1 and plus < 16:
+                pos = plus + 1
+                if pos >= len(sub):
+                    continue
+                length_byte = sub[pos]
+                pos += 1
+                if length_byte == 0x81 and pos + 2 <= len(sub):
+                    length = struct.unpack("<H", sub[pos:pos + 2])[0]
+                    pos += 2
+                elif length_byte == 0x82 and pos + 4 <= len(sub):
+                    length = struct.unpack("<I", sub[pos:pos + 4])[0]
+                    pos += 4
+                elif length_byte == 0x83 and pos + 8 <= len(sub):
+                    length = struct.unpack("<Q", sub[pos:pos + 8])[0]
+                    pos += 8
+                else:
+                    length = length_byte
+                raw = sub[pos:pos + length]
+                text = raw.decode("utf-8", errors="replace").replace("\ufffc", "").strip()
+                if text:
+                    return text
+    return ""
+
+
+def encode_typedstream_nsattributedstring(text: str) -> bytes:
+    """Encode a UTF-8 string into an Apple typedstream NSAttributedString blob for unit tests."""
+    raw = text.encode("utf-8")
+    n = len(raw)
+    if n < 0x80:
+        len_bytes = bytes([n])
+    elif n <= 0xFFFF:
+        len_bytes = b"\x81" + struct.pack("<H", n)
+    else:
+        len_bytes = b"\x82" + struct.pack("<I", n)
+    return (
+        b"\x04\x0bstreamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84\x12NSAttributedString\x00"
+        b"\x84\x84\x08NSObject\x00\x85\x92\x84\x84\x84\x08NSString\x01\x94\x84\x01+"
+        + len_bytes
+        + raw
+        + b"\x86"
+    )
+
+
+class SocketIOSession:
+    """Represents an Engine.IO v4 / Socket.IO v4 long-polling client session."""
+
+    def __init__(self, sid: str) -> None:
+        self.sid = sid
+        self.created_at = time.time()
+        self.last_seen = time.time()
+        self.queue: List[str] = []
+        self.cond = threading.Condition()
+        self.closed = False
+
+    def enqueue(self, packet: str) -> None:
+        with self.cond:
+            self.queue.append(packet)
+            self.cond.notify_all()
+
+    def pop_packets(self, timeout: float = 20.0) -> List[str]:
+        with self.cond:
+            if not self.queue and not self.closed and timeout > 0:
+                self.cond.wait(timeout=timeout)
+            self.last_seen = time.time()
+            if self.queue:
+                pkts = list(self.queue)
+                self.queue.clear()
+                return pkts
+            return ["2"]
+
+
+class BluePillEngine:
+    """Core database & macOS integration engine for BluePill Server."""
+
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        addressbook_glob: Optional[str] = None,
+        pinning_plist_path: Optional[str] = None,
+        password: str = "",
+        helper_port: int = 45670,
+    ) -> None:
+        self.db_path = os.path.expanduser(db_path or "~/Library/Messages/chat.db")
+        self.addressbook_glob = os.path.expanduser(
+            addressbook_glob
+            or "~/Library/Application Support/AddressBook/Sources/*/AddressBook-v22.abcddb"
+        )
+        self.pinning_plist_path = os.path.expanduser(
+            pinning_plist_path or "~/Library/Preferences/com.apple.messages.pinning.plist"
+        )
+        self.password = password
+        self.helper_port = helper_port
+
+        self._contacts_cache: Optional[List[Dict[str, Any]]] = None
+        self._contacts_cache_ts: float = 0.0
+        self._contacts_lock = threading.Lock()
+
+        self._sessions: Dict[str, SocketIOSession] = {}
+        self._sessions_lock = threading.Lock()
+
+        self._helper_conn: Optional[socket.socket] = None
+        self._helper_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._last_max_rowid: int = 0
+
+    def _open_chat_db(self) -> sqlite3.Connection:
+        if not os.path.exists(self.db_path):
+            raise FileNotFoundError(f"chat.db not found at {self.db_path}")
+        uri = f"file:{urllib.parse.quote(os.path.abspath(self.db_path))}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON;")
+        return conn
+
+    def get_macos_version(self) -> str:
+        if sys.platform == "darwin":
+            try:
+                out = subprocess.check_output(
+                    ["/usr/bin/sw_vers", "-productVersion"],
+                    timeout=2.0,
+                    stderr=subprocess.DEVNULL,
+                )
+                return out.decode("utf-8", errors="replace").strip()
+            except Exception:
+                pass
+            return platform.mac_ver()[0] or "15.0"
+        return f"Linux-{platform.release()}"
+
+    def is_private_api_active(self) -> bool:
+        with self._helper_lock:
+            if self._helper_conn is not None:
+                return True
+        for port in (self.helper_port, 45670):
+            for host in ("127.0.0.1", "::1"):
+                try:
+                    with socket.create_connection((host, port), timeout=0.15):
+                        return True
+                except OSError:
+                    pass
+        return False
+
+    def get_server_info(self) -> Dict[str, Any]:
+        priv = self.is_private_api_active()
+        return {
+            "computer_id": "bluepill-macos-relay",
+            "os_version": self.get_macos_version(),
+            "server_version": VERSION,
+            "private_api": priv,
+            "helper_connected": priv,
+            "proxy_service": "bluepill-server",
+            "detected_icloud": "",
+            "detected_imessage": "",
+            "macos_time_sync": int(time.time() * 1000),
+            "capabilities": [
+                "chat-db-wal-direct",
+                "typedstream-attributed-body",
+                "addressbook-sqlite-fast",
+                "pinning-plist",
+                "socketio-v4",
+                "stdio-jsonrpc",
+            ],
+        }
+
+    def query_contacts(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        now = time.time()
+        with self._contacts_lock:
+            if not force_refresh and self._contacts_cache is not None and (now - self._contacts_cache_ts) < 30.0:
+                return self._contacts_cache
+
+        db_files = sorted(glob.glob(self.addressbook_glob))
+        contacts: List[Dict[str, Any]] = []
+        seen_keys = set()
+
+        for db_file in db_files:
+            if not os.path.exists(db_file):
+                continue
+            try:
+                uri = f"file:{urllib.parse.quote(os.path.abspath(db_file))}?mode=ro"
+                conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+                conn.row_factory = sqlite3.Row
+                records = conn.execute(
+                    """
+                    SELECT Z_PK, ZUNIQUEID, ZFIRSTNAME, ZLASTNAME, ZMIDDLENAME,
+                           ZNICKNAME, ZORGANIZATION, ZNAME
+                    FROM ZABCDRECORD
+                    WHERE ZFIRSTNAME IS NOT NULL
+                       OR ZLASTNAME IS NOT NULL
+                       OR ZORGANIZATION IS NOT NULL
+                       OR ZNICKNAME IS NOT NULL
+                    """
+                ).fetchall()
+                if not records:
+                    conn.close()
+                    continue
+
+                phones_by_owner: Dict[int, List[Dict[str, str]]] = {}
+                try:
+                    for prow in conn.execute(
+                        "SELECT ZOWNER, ZFULLNUMBER, ZLABEL FROM ZABCDPHONENUMBER WHERE ZFULLNUMBER IS NOT NULL"
+                    ):
+                        owner = prow["ZOWNER"]
+                        num = (prow["ZFULLNUMBER"] or "").strip()
+                        if owner and num:
+                            phones_by_owner.setdefault(int(owner), []).append({"address": num})
+                except sqlite3.Error:
+                    pass
+
+                emails_by_owner: Dict[int, List[Dict[str, str]]] = {}
+                try:
+                    for erow in conn.execute(
+                        "SELECT ZOWNER, ZADDRESS, ZLABEL FROM ZABCDEMAILADDRESS WHERE ZADDRESS IS NOT NULL"
+                    ):
+                        owner = erow["ZOWNER"]
+                        addr = (erow["ZADDRESS"] or "").strip()
+                        if owner and addr:
+                            emails_by_owner.setdefault(int(owner), []).append({"address": addr})
+                except sqlite3.Error:
+                    pass
+
+                for r in records:
+                    pk = int(r["Z_PK"])
+                    phones = phones_by_owner.get(pk, [])
+                    emails = emails_by_owner.get(pk, [])
+                    if not phones and not emails:
+                        continue
+                    first = (r["ZFIRSTNAME"] or "").strip()
+                    last = (r["ZLASTNAME"] or "").strip()
+                    org = (r["ZORGANIZATION"] or "").strip()
+                    nick = (r["ZNICKNAME"] or "").strip()
+                    display = f"{first} {last}".strip() or org or nick or (r["ZNAME"] or "").strip()
+                    if not display:
+                        continue
+                    uid = (r["ZUNIQUEID"] or str(pk)).strip()
+                    dedup_key = (
+                        display.lower(),
+                        tuple(sorted(p["address"] for p in phones)),
+                        tuple(sorted(e["address"] for e in emails)),
+                    )
+                    if dedup_key in seen_keys:
+                        continue
+                    seen_keys.add(dedup_key)
+                    contacts.append(
+                        {
+                            "id": uid,
+                            "firstName": first,
+                            "lastName": last,
+                            "displayName": display,
+                            "nickname": nick,
+                            "organization": org,
+                            "phoneNumbers": phones,
+                            "emails": emails,
+                            "birthday": "",
+                            "avatar": "",
+                        }
+                    )
+                conn.close()
+            except Exception:
+                continue
+
+        with self._contacts_lock:
+            self._contacts_cache = contacts
+            self._contacts_cache_ts = now
+        return contacts
+
+    def query_pinned_chats(self) -> List[Dict[str, Any]]:
+        """Parse ~/Library/Preferences/com.apple.messages.pinning.plist and resolve against chat.db."""
+        raw_identifiers: List[str] = []
+        if os.path.exists(self.pinning_plist_path):
+            try:
+                with open(self.pinning_plist_path, "rb") as f:
+                    plist_data = plistlib.load(f)
+                pd = plist_data.get("pD") if isinstance(plist_data, dict) else None
+                if isinstance(pd, dict):
+                    pp = pd.get("pP")
+                    if isinstance(pp, list):
+                        for item in pp:
+                            if isinstance(item, str) and item.strip():
+                                raw_identifiers.append(item.strip())
+                            elif isinstance(item, dict):
+                                for k in ("chatIdentifier", "guid", "pI", "identifier", "groupID"):
+                                    v = item.get(k)
+                                    if isinstance(v, str) and v.strip():
+                                        raw_identifiers.append(v.strip())
+                                        break
+                    elif isinstance(pp, dict):
+                        for k, v in pp.items():
+                            if isinstance(v, str) and v.strip():
+                                raw_identifiers.append(v.strip())
+                            elif isinstance(k, str) and k.strip():
+                                raw_identifiers.append(k.strip())
+                for top_key in ("pinnedChatIdentifiers", "pins", "pinnedChats"):
+                    top_val = plist_data.get(top_key) if isinstance(plist_data, dict) else None
+                    if isinstance(top_val, list):
+                        for item in top_val:
+                            if isinstance(item, str) and item.strip():
+                                raw_identifiers.append(item.strip())
+                            elif isinstance(item, dict):
+                                for k in ("guid", "chatIdentifier"):
+                                    v = item.get(k)
+                                    if isinstance(v, str) and v.strip():
+                                        raw_identifiers.append(v.strip())
+                                        break
+            except Exception:
+                pass
+
+        pins: List[Dict[str, Any]] = []
+        seen_guids = set()
+        if os.path.exists(self.db_path) and raw_identifiers:
+            try:
+                conn = self._open_chat_db()
+                for ident in raw_identifiers:
+                    row = conn.execute(
+                        """
+                        SELECT ROWID, guid, chat_identifier, display_name, style, service_name
+                        FROM chat
+                        WHERE guid = ? OR chat_identifier = ? OR group_id = ? OR original_group_id = ?
+                        ORDER BY ROWID DESC LIMIT 1
+                        """,
+                        (ident, ident, ident, ident),
+                    ).fetchone()
+                    if row:
+                        g = row["guid"]
+                        if g not in seen_guids:
+                            seen_guids.add(g)
+                            pins.append(
+                                {
+                                    "pinIndex": len(pins),
+                                    "guid": g,
+                                    "chatIdentifier": row["chat_identifier"] or ident,
+                                    "displayName": row["display_name"] or "",
+                                    "style": int(row["style"] or 45),
+                                }
+                            )
+                    else:
+                        if ident not in seen_guids:
+                            seen_guids.add(ident)
+                            pins.append(
+                                {
+                                    "pinIndex": len(pins),
+                                    "guid": ident if ";" in ident else f"iMessage;-;{ident}",
+                                    "chatIdentifier": ident,
+                                    "displayName": "",
+                                    "style": 45,
+                                }
+                            )
+                conn.close()
+            except Exception:
+                pass
+        elif raw_identifiers:
+            for idx, ident in enumerate(raw_identifiers):
+                if ident not in seen_guids:
+                    seen_guids.add(ident)
+                    pins.append(
+                        {
+                            "pinIndex": idx,
+                            "guid": ident if ";" in ident else f"iMessage;-;{ident}",
+                            "chatIdentifier": ident,
+                            "displayName": "",
+                            "style": 45,
+                        }
+                    )
+        return pins
+
+    def query_chats(
+        self,
+        limit: int = 250,
+        offset: int = 0,
+        chat_guid: Optional[str] = None,
+        with_participants: bool = True,
+    ) -> List[Dict[str, Any]]:
+        conn = self._open_chat_db()
+        try:
+            params: List[Any] = []
+            where_sql = ""
+            if chat_guid:
+                where_sql = "WHERE c.guid = ?"
+                params.append(chat_guid)
+
+            sql = f"""
+                SELECT
+                    c.ROWID AS rowid,
+                    c.guid AS guid,
+                    c.style AS style,
+                    c.chat_identifier AS chat_identifier,
+                    c.service_name AS service_name,
+                    c.display_name AS display_name,
+                    c.is_archived AS is_archived,
+                    c.group_id AS group_id,
+                    c.last_read_message_timestamp AS last_read_message_timestamp,
+                    MAX(cmj.message_date) AS last_message_date
+                FROM chat c
+                LEFT JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+                {where_sql}
+                GROUP BY c.ROWID
+                ORDER BY COALESCE(MAX(cmj.message_date), 0) DESC, c.ROWID DESC
+                LIMIT ? OFFSET ?
+            """
+            params.extend([max(1, min(int(limit), 1000)), max(0, int(offset))])
+            rows = conn.execute(sql, params).fetchall()
+            if not rows:
+                return []
+
+            chat_ids = [int(r["rowid"]) for r in rows]
+            participants_by_chat: Dict[int, List[Dict[str, Any]]] = {}
+
+            if with_participants and chat_ids:
+                placeholders = ",".join("?" for _ in chat_ids)
+                p_rows = conn.execute(
+                    f"""
+                    SELECT chj.chat_id, h.ROWID AS handle_rowid, h.id AS address,
+                           h.service AS service, h.country AS country
+                    FROM chat_handle_join chj
+                    JOIN handle h ON h.ROWID = chj.handle_id
+                    WHERE chj.chat_id IN ({placeholders})
+                    ORDER BY chj.chat_id, h.ROWID
+                    """,
+                    chat_ids,
+                ).fetchall()
+                for pr in p_rows:
+                    cid = int(pr["chat_id"])
+                    participants_by_chat.setdefault(cid, []).append(
+                        {
+                            "originalROWID": int(pr["handle_rowid"]),
+                            "address": pr["address"] or "",
+                            "service": pr["service"] or "iMessage",
+                            "country": pr["country"] or "us",
+                        }
+                    )
+
+            pinned_guids = {p["guid"] for p in self.query_pinned_chats()}
+
+            result: List[Dict[str, Any]] = []
+            for r in rows:
+                cid = int(r["rowid"])
+                guid = r["guid"] or ""
+                last_read_ms = apple_ts_to_epoch_ms(r["last_read_message_timestamp"])
+                result.append(
+                    {
+                        "originalROWID": cid,
+                        "guid": guid,
+                        "style": int(r["style"] or 45),
+                        "chatIdentifier": r["chat_identifier"] or "",
+                        "isArchived": bool(r["is_archived"]),
+                        "isPinned": guid in pinned_guids,
+                        "displayName": r["display_name"] or "",
+                        "groupId": r["group_id"] or "",
+                        "lastReadMessageTimestamp": last_read_ms,
+                        "properties": [],
+                        "participants": participants_by_chat.get(cid, []),
+                    }
+                )
+            return result
+        finally:
+            conn.close()
+
+    def _serialize_messages_from_rows(
+        self, conn: sqlite3.Connection, rows: List[sqlite3.Row]
+    ) -> List[Dict[str, Any]]:
+        if not rows:
+            return []
+        msg_ids = [int(r["ROWID"]) for r in rows]
+        placeholders = ",".join("?" for _ in msg_ids)
+
+        chats_by_msg: Dict[int, List[Dict[str, Any]]] = {}
+        c_rows = conn.execute(
+            f"""
+            SELECT cmj.message_id, c.ROWID AS chat_rowid, c.guid, c.chat_identifier,
+                   c.display_name, c.style, c.is_archived, c.last_read_message_timestamp
+            FROM chat_message_join cmj
+            JOIN chat c ON c.ROWID = cmj.chat_id
+            WHERE cmj.message_id IN ({placeholders})
+            """,
+            msg_ids,
+        ).fetchall()
+        for cr in c_rows:
+            mid = int(cr["message_id"])
+            chats_by_msg.setdefault(mid, []).append(
+                {
+                    "originalROWID": int(cr["chat_rowid"]),
+                    "guid": cr["guid"] or "",
+                    "chatIdentifier": cr["chat_identifier"] or "",
+                    "displayName": cr["display_name"] or "",
+                    "style": int(cr["style"] or 45),
+                    "isArchived": bool(cr["is_archived"]),
+                    "lastReadMessageTimestamp": apple_ts_to_epoch_ms(cr["last_read_message_timestamp"]),
+                }
+            )
+
+        atts_by_msg: Dict[int, List[Dict[str, Any]]] = {}
+        a_rows = conn.execute(
+            f"""
+            SELECT maj.message_id, a.ROWID AS att_rowid, a.guid, a.original_guid,
+                   a.created_date, a.filename, a.uti, a.mime_type, a.transfer_state,
+                   a.is_outgoing, a.transfer_name, a.total_bytes, a.is_sticker, a.hide_attachment
+            FROM message_attachment_join maj
+            JOIN attachment a ON a.ROWID = maj.attachment_id
+            WHERE maj.message_id IN ({placeholders})
+            ORDER BY maj.message_id, a.ROWID
+            """,
+            msg_ids,
+        ).fetchall()
+        for ar in a_rows:
+            mid = int(ar["message_id"])
+            fname = ar["filename"] or ""
+            tname = ar["transfer_name"] or (os.path.basename(fname) if fname else "")
+            mime = ar["mime_type"] or mimetypes.guess_type(tname)[0] or "application/octet-stream"
+            atts_by_msg.setdefault(mid, []).append(
+                {
+                    "originalROWID": int(ar["att_rowid"]),
+                    "guid": ar["guid"] or "",
+                    "originalGuid": ar["original_guid"] or ar["guid"] or "",
+                    "uti": ar["uti"] or "",
+                    "mimeType": mime,
+                    "transferName": tname,
+                    "totalBytes": int(ar["total_bytes"] or 0),
+                    "transferState": int(ar["transfer_state"] or 5),
+                    "isOutgoing": bool(ar["is_outgoing"]),
+                    "hideAttachment": bool(ar["hide_attachment"]),
+                    "isSticker": bool(ar["is_sticker"]),
+                    "hasLivePhoto": False,
+                }
+            )
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            mid = int(r["ROWID"])
+            raw_text = r["text"]
+            attr_blob = r["attributedBody"]
+            decoded_attr = decode_attributed_body(attr_blob) if attr_blob else ""
+            text = (raw_text if (raw_text is not None and raw_text.strip() != "") else decoded_attr) or ""
+            text = text.replace("\ufffc", "").strip()
+
+            attr_json: List[Dict[str, Any]] = []
+            if decoded_attr or text:
+                attr_json = [{"string": decoded_attr or text, "attributes": {}}]
+
+            handle_obj = None
+            if r["handle_id"] and r["handle_address"]:
+                handle_obj = {
+                    "originalROWID": int(r["handle_id"]),
+                    "address": r["handle_address"] or "",
+                    "service": r["handle_service"] or r["service"] or "iMessage",
+                    "country": r["handle_country"] or "us",
+                }
+
+            assoc_type = r["associated_message_type"]
+            out.append(
+                {
+                    "originalROWID": mid,
+                    "guid": r["guid"] or "",
+                    "text": text,
+                    "attributedBody": attr_json,
+                    "subject": r["subject"] or "",
+                    "handleId": int(r["handle_id"] or 0),
+                    "handle": handle_obj,
+                    "otherHandle": int(r["other_handle"] or 0),
+                    "chats": chats_by_msg.get(mid, []),
+                    "attachments": atts_by_msg.get(mid, []),
+                    "error": int(r["error"] or 0),
+                    "dateCreated": apple_ts_to_epoch_ms(r["date"]),
+                    "dateRead": apple_ts_to_epoch_ms(r["date_read"]),
+                    "dateDelivered": apple_ts_to_epoch_ms(r["date_delivered"]),
+                    "dateEdited": apple_ts_to_epoch_ms(r["date_edited"]),
+                    "dateRetracted": apple_ts_to_epoch_ms(r["date_retracted"]),
+                    "isFromMe": bool(r["is_from_me"]),
+                    "isRead": bool(r["is_read"]),
+                    "isDelivered": bool(r["is_delivered"]),
+                    "isSent": bool(r["is_sent"]),
+                    "isArchived": bool(r["is_archive"]),
+                    "isAudioMessage": bool(r["is_audio_message"]),
+                    "itemType": int(r["item_type"] or 0),
+                    "groupTitle": r["group_title"] or "",
+                    "groupActionType": int(r["group_action_type"] or 0),
+                    "associatedMessageGuid": r["associated_message_guid"] or "",
+                    "associatedMessageType": int(assoc_type) if assoc_type is not None else 0,
+                    "associatedMessageEmoji": r["associated_message_emoji"] or "",
+                    "expressiveSendStyleId": r["expressive_send_style_id"] or "",
+                    "replyToGuid": r["reply_to_guid"] or "",
+                    "threadOriginatorGuid": r["thread_originator_guid"] or "",
+                    "threadOriginatorPart": r["thread_originator_part"] or "",
+                    "hasDdResults": bool(r["has_dd_results"]),
+                    "wasDeliveredQuietly": bool(r["was_delivered_quietly"]),
+                    "didNotifyRecipient": bool(r["did_notify_recipient"]),
+                    "service": r["service"] or "iMessage",
+                }
+            )
+        return out
+
+    def query_messages(self, body: Dict[str, Any]) -> List[Dict[str, Any]]:
+        conn = self._open_chat_db()
+        try:
+            limit = max(1, min(int(body.get("limit", 250) or 250), 2500))
+            offset = max(0, int(body.get("offset", 0) or 0))
+            sort_dir = "ASC" if str(body.get("sort", "DESC")).upper() == "ASC" else "DESC"
+            chat_guid = (body.get("chatGuid") or "").strip()
+            after_ms = int(body.get("after", 0) or 0)
+            before_ms = int(body.get("before", 0) or 0)
+
+            clauses: List[str] = []
+            params: List[Any] = []
+            join_chat = False
+
+            if chat_guid:
+                join_chat = True
+                clauses.append("chat.guid = ?")
+                params.append(chat_guid)
+
+            if after_ms > 0:
+                clauses.append("message.date >= ?")
+                params.append(epoch_ms_to_apple_ns(after_ms))
+
+            if before_ms > 0:
+                clauses.append("message.date <= ?")
+                params.append(epoch_ms_to_apple_ns(before_ms))
+
+            where_list = body.get("where")
+            if isinstance(where_list, list):
+                allowed_cols = {
+                    "message.is_read": "message.is_read",
+                    "message.is_from_me": "message.is_from_me",
+                    "message.item_type": "message.item_type",
+                    "message.guid": "message.guid",
+                    "message.ROWID": "message.ROWID",
+                    "message.associated_message_guid": "message.associated_message_guid",
+                    "chat.guid": "chat.guid",
+                }
+                for w in where_list:
+                    if not isinstance(w, dict):
+                        continue
+                    stmt = str(w.get("statement") or "").strip()
+                    args = w.get("args") or {}
+                    if not stmt or not isinstance(args, dict):
+                        continue
+                    if "chat.guid" in stmt:
+                        join_chat = True
+                    sub_parts = re.split(r"\s+AND\s+", stmt, flags=re.IGNORECASE)
+                    for sp in sub_parts:
+                        m = re.match(
+                            r"^\s*([a-zA-Z0-9_.]+)\s*=\s*:([a-zA-Z0-9_]+)\s*$",
+                            sp.strip(),
+                        )
+                        if m and m.group(1) in allowed_cols and m.group(2) in args:
+                            clauses.append(f"{allowed_cols[m.group(1)]} = ?")
+                            params.append(args[m.group(2)])
+
+            join_sql = ""
+            if join_chat:
+                join_sql = (
+                    "JOIN chat_message_join cmj_filter ON cmj_filter.message_id = message.ROWID "
+                    "JOIN chat ON chat.ROWID = cmj_filter.chat_id"
+                )
+
+            where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+            msg_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(message);").fetchall()
+            }
+            opt_cols = [
+                ("date_edited", "0"),
+                ("date_retracted", "0"),
+                ("expressive_send_style_id", ""),
+                ("associated_message_guid", ""),
+                ("associated_message_type", "0"),
+                ("associated_message_emoji", ""),
+                ("reply_to_guid", ""),
+                ("thread_originator_guid", ""),
+                ("thread_originator_part", ""),
+                ("was_delivered_quietly", "0"),
+                ("did_notify_recipient", "0"),
+                ("has_dd_results", "0"),
+                ("is_audio_message", "0"),
+                ("is_archive", "0"),
+                ("other_handle", "0"),
+                ("group_title", ""),
+                ("group_action_type", "0"),
+            ]
+            select_exprs = [
+                "message.ROWID AS ROWID",
+                "message.guid AS guid",
+                "message.text AS text",
+                "message.attributedBody AS attributedBody",
+                "message.subject AS subject",
+                "message.handle_id AS handle_id",
+                "message.error AS error",
+                "message.date AS date",
+                "message.date_read AS date_read",
+                "message.date_delivered AS date_delivered",
+                "message.is_from_me AS is_from_me",
+                "message.is_read AS is_read",
+                "message.is_delivered AS is_delivered",
+                "message.is_sent AS is_sent",
+                "message.item_type AS item_type",
+                "message.service AS service",
+            ]
+            for col_name, default_sql in opt_cols:
+                if col_name in msg_cols:
+                    select_exprs.append(f"message.{col_name} AS {col_name}")
+                else:
+                    select_exprs.append(f"{default_sql} AS {col_name}")
+
+            select_exprs.extend(
+                [
+                    "h.id AS handle_address",
+                    "h.service AS handle_service",
+                    "h.country AS handle_country",
+                ]
+            )
+
+            sql = f"""
+                SELECT {", ".join(select_exprs)}
+                FROM message
+                LEFT JOIN handle h ON h.ROWID = message.handle_id
+                {join_sql}
+                {where_sql}
+                ORDER BY message.date {sort_dir}, message.ROWID {sort_dir}
+                LIMIT ? OFFSET ?
+            """
+            params.extend([limit, offset])
+            rows = conn.execute(sql, params).fetchall()
+            return self._serialize_messages_from_rows(conn, rows)
+        finally:
+            conn.close()
+
+    def resolve_attachment_file(
+        self, guid: str, convert_heic: bool = False, resize: Optional[int] = None
+    ) -> Optional[Tuple[str, str]]:
+        conn = self._open_chat_db()
+        try:
+            clean_guid = urllib.parse.unquote(guid).strip()
+            suffix_uuid = clean_guid.split("_")[-1] if "_" in clean_guid else clean_guid
+            row = conn.execute(
+                """
+                SELECT filename, mime_type, transfer_name
+                FROM attachment
+                WHERE guid = ? OR original_guid = ? OR guid LIKE ?
+                ORDER BY ROWID DESC LIMIT 1
+                """,
+                (clean_guid, clean_guid, f"%{suffix_uuid}"),
+            ).fetchone()
+            if not row or not row["filename"]:
+                return None
+            raw_path = os.path.expanduser(str(row["filename"]))
+            real_path = os.path.realpath(raw_path)
+            if not os.path.exists(real_path):
+                return None
+            mime = (
+                row["mime_type"]
+                or mimetypes.guess_type(real_path)[0]
+                or "application/octet-stream"
+            )
+            lower_ext = os.path.splitext(real_path)[1].lower()
+            if (
+                sys.platform == "darwin"
+                and (convert_heic or resize)
+                and lower_ext in (".heic", ".heif", ".tiff", ".tif")
+                and os.path.exists("/usr/bin/sips")
+            ):
+                cache_dir = os.path.expanduser("~/.cache/bluepill/attachments")
+                os.makedirs(cache_dir, exist_ok=True)
+                digest = hashlib.sha256(f"{real_path}:{resize or 0}".encode("utf-8")).hexdigest()[:24]
+                cached_jpg = os.path.join(cache_dir, f"{digest}.jpg")
+                if not os.path.exists(cached_jpg):
+                    cmd = ["/usr/bin/sips", "-s", "format", "jpeg"]
+                    if resize and resize > 0:
+                        cmd.extend(["-Z", str(int(resize))])
+                    cmd.extend([real_path, "--out", cached_jpg])
+                    subprocess.run(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10.0,
+                        check=False,
+                    )
+                if os.path.exists(cached_jpg):
+                    return cached_jpg, "image/jpeg"
+            return real_path, mime
+        finally:
+            conn.close()
+
+    def _send_via_applescript(self, chat_guid: str, message: str, file_path: Optional[str] = None) -> bool:
+        if sys.platform != "darwin":
+            return False
+        target = chat_guid.split(";-;")[-1] if ";-;" in chat_guid else chat_guid
+        service_type = "SMS" if chat_guid.startswith("SMS;") else "iMessage"
+        script_lines = [
+            'on run argv',
+            '  set targetBuddy to item 1 of argv',
+            '  set targetMessage to item 2 of argv',
+            '  set targetService to item 3 of argv',
+            '  set targetFile to item 4 of argv',
+            '  tell application "Messages"',
+            '    if targetService is "SMS" then',
+            '      set targetAcct to 1st account whose service type = SMS',
+            '    else',
+            '      set targetAcct to 1st account whose service type = iMessage',
+            '    end if',
+            '    set theBuddy to participant targetBuddy of targetAcct',
+            '    if targetFile is not "" then',
+            '      send POSIX file targetFile to theBuddy',
+            '    end if',
+            '    if targetMessage is not "" then',
+            '      send targetMessage to theBuddy',
+            '    end if',
+            '  end tell',
+            'end run',
+        ]
+        try:
+            res = subprocess.run(
+                [
+                    "/usr/bin/osascript",
+                    "-e",
+                    "\n".join(script_lines),
+                    target,
+                    message or "",
+                    service_type,
+                    file_path or "",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15.0,
+                check=False,
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
+
+    def _send_helper_payload(self, action: str, data: Dict[str, Any]) -> bool:
+        payload = json.dumps({"action": action, "data": data}) + "\n"
+        for port in (self.helper_port, 45670):
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1.5) as sock:
+                    sock.sendall(payload.encode("utf-8"))
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def send_text(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        chat_guid = (body.get("chatGuid") or "").strip()
+        message = (body.get("message") or "").strip()
+        temp_guid = (body.get("tempGuid") or f"temp-{uuid.uuid4()}").strip()
+        effect_id = (body.get("effectId") or "").strip()
+        selected_guid = (body.get("selectedMessageGuid") or "").strip()
+
+        sent = False
+        if self.is_private_api_active():
+            sent = self._send_helper_payload(
+                "send-message",
+                {
+                    "chatGuid": chat_guid,
+                    "message": message,
+                    "tempGuid": temp_guid,
+                    "effectId": effect_id,
+                    "selectedMessageGuid": selected_guid,
+                },
+            )
+        if not sent:
+            sent = self._send_via_applescript(chat_guid, message)
+
+        now_ms = int(time.time() * 1000)
+        msg_obj = {
+            "originalROWID": int(now_ms % 1_000_000_000),
+            "guid": temp_guid,
+            "text": message,
+            "attributedBody": [{"string": message, "attributes": {}}],
+            "handleId": 0,
+            "handle": None,
+            "chats": [{"guid": chat_guid}],
+            "attachments": [],
+            "error": 0 if (sent or sys.platform != "darwin") else 4,
+            "dateCreated": now_ms,
+            "dateRead": 0,
+            "dateDelivered": 0,
+            "dateEdited": 0,
+            "dateRetracted": 0,
+            "isFromMe": True,
+            "isRead": True,
+            "isDelivered": bool(sent),
+            "isSent": True,
+            "expressiveSendStyleId": effect_id,
+            "threadOriginatorGuid": selected_guid,
+            "service": "SMS" if chat_guid.startswith("SMS;") else "iMessage",
+        }
+        self.broadcast_socketio("new-message", msg_obj)
+        return msg_obj
+
+    def send_reaction(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        chat_guid = (body.get("chatGuid") or "").strip()
+        selected_guid = (body.get("selectedMessageGuid") or "").strip()
+        reaction = (body.get("reaction") or "love").strip()
+        part_index = int(body.get("partIndex", 0) or 0)
+
+        reaction_codes = {
+            "love": 2000,
+            "like": 2001,
+            "dislike": 2002,
+            "laugh": 2003,
+            "emphasize": 2004,
+            "question": 2005,
+            "-love": 3000,
+            "-like": 3001,
+            "-dislike": 3002,
+            "-laugh": 3003,
+            "-emphasize": 3004,
+            "-question": 3005,
+        }
+        if self.is_private_api_active():
+            self._send_helper_payload(
+                "send-reaction",
+                {
+                    "chatGuid": chat_guid,
+                    "selectedMessageGuid": selected_guid,
+                    "reactionType": reaction,
+                    "partIndex": part_index,
+                },
+            )
+        now_ms = int(time.time() * 1000)
+        return {
+            "guid": f"react-{uuid.uuid4()}",
+            "chats": [{"guid": chat_guid}],
+            "associatedMessageGuid": f"p:{part_index}/{selected_guid}",
+            "associatedMessageType": reaction_codes.get(reaction, 2000),
+            "isFromMe": True,
+            "dateCreated": now_ms,
+        }
+
+    def edit_message(self, msg_guid: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        edited = (body.get("editedMessage") or body.get("message") or "").strip()
+        part_index = int(body.get("partIndex", 0) or 0)
+        if self.is_private_api_active():
+            self._send_helper_payload(
+                "edit-message",
+                {
+                    "messageGuid": msg_guid,
+                    "editedMessage": edited,
+                    " backwardsCompatibilityMessage": edited,
+                    "partIndex": part_index,
+                },
+            )
+        now_ms = int(time.time() * 1000)
+        return {"guid": msg_guid, "text": edited, "dateEdited": now_ms}
+
+    def unsend_message(self, msg_guid: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        part_index = int(body.get("partIndex", 0) or 0)
+        if self.is_private_api_active():
+            self._send_helper_payload(
+                "unsend-message",
+                {"messageGuid": msg_guid, "partIndex": part_index},
+            )
+        now_ms = int(time.time() * 1000)
+        return {"guid": msg_guid, "text": "", "dateRetracted": now_ms}
+
+    def mark_chat_read(self, chat_guid: str, read: bool = True) -> Dict[str, Any]:
+        if self.is_private_api_active():
+            self._send_helper_payload(
+                "mark-chat-read" if read else "mark-chat-unread",
+                {"chatGuid": chat_guid},
+            )
+        return {"chatGuid": chat_guid, "read": read}
+
+    def broadcast_socketio(self, event_name: str, payload: Any) -> None:
+        packet = "42" + json.dumps([event_name, payload])
+        with self._sessions_lock:
+            dead = []
+            for sid, sess in self._sessions.items():
+                if time.time() - sess.last_seen > 120.0:
+                    dead.append(sid)
+                else:
+                    sess.enqueue(packet)
+            for sid in dead:
+                self._sessions.pop(sid, None)
+
+    def handle_rpc(self, method: str, params: Dict[str, Any]) -> Any:
+        if method in ("ping", "api.ping"):
+            return "pong"
+        if method in ("server.info", "api.server.info"):
+            return self.get_server_info()
+        if method in ("pinned.list", "api.pinned"):
+            return self.query_pinned_chats()
+        if method in ("contact.list", "api.contact"):
+            return self.query_contacts()
+        if method in ("chat.query", "api.chat.query"):
+            return self.query_chats(
+                limit=int(params.get("limit", 250) or 250),
+                offset=int(params.get("offset", 0) or 0),
+                chat_guid=params.get("chatGuid"),
+                with_participants=True,
+            )
+        if method in ("message.query", "api.message.query"):
+            return self.query_messages(params)
+        if method in ("message.text", "api.message.text"):
+            return self.send_text(params)
+        if method in ("message.react", "api.message.react"):
+            return self.send_reaction(params)
+        if method in ("chat.read", "api.chat.read"):
+            return self.mark_chat_read(str(params.get("chatGuid") or ""), True)
+        if method in ("chat.unread", "api.chat.unread"):
+            return self.mark_chat_read(str(params.get("chatGuid") or ""), False)
+        raise ValueError(f"Unknown RPC method: {method}")
+
+
+WEB_UI_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BluePill Web UI — Native iMessage, SMS &amp; RCS Relay</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #151b23;
+      --border: #262f3d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #0A84FF;
+      --accent2: #38BDF8;
+      --green: #30D158;
+      --bubble-in: #212832;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    header {
+      height: 54px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 18px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; }
+    .pill-icon {
+      width: 28px; height: 28px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent2), var(--accent));
+      display: inline-flex; align-items: center; justify-content: center;
+      color: #fff; font-weight: 800; font-size: 13px;
+    }
+    .status-pill {
+      font-size: 12px; padding: 4px 10px; border-radius: 999px;
+      background: rgba(48, 209, 88, 0.14); color: var(--green); border: 1px solid rgba(48, 209, 88, 0.35);
+    }
+    .layout { flex: 1; display: flex; min-height: 0; }
+    .sidebar {
+      width: 320px; background: var(--panel); border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; min-height: 0;
+    }
+    .auth-bar { padding: 10px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; }
+    .auth-bar input {
+      flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      padding: 7px 10px; border-radius: 8px; font-size: 12px;
+    }
+    .auth-bar button, .composer button {
+      background: var(--accent); color: #fff; border: none; border-radius: 8px;
+      padding: 7px 12px; font-weight: 600; font-size: 12px; cursor: pointer;
+    }
+    .pinned-bar {
+      display: flex; gap: 10px; padding: 10px 12px; overflow-x: auto;
+      border-bottom: 1px solid var(--border); min-height: 62px; align-items: center;
+    }
+    .pin-avatar {
+      width: 38px; height: 38px; border-radius: 50%; background: var(--accent);
+      display: flex; align-items: center; justify-content: center; font-size: 12px;
+      font-weight: 700; cursor: pointer; flex-shrink: 0;
+    }
+    .chat-list { flex: 1; overflow-y: auto; }
+    .chat-row {
+      padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,0.04);
+      cursor: pointer; transition: background 0.12s;
+    }
+    .chat-row:hover, .chat-row.active { background: rgba(10, 132, 255, 0.14); }
+    .chat-title { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+    .chat-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .chat-header {
+      height: 50px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; padding: 0 18px; font-weight: 600;
+    }
+    .messages {
+      flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 8px;
+    }
+    .msg {
+      max-width: 68%; padding: 9px 13px; border-radius: 16px; font-size: 14px; line-height: 1.4;
+      background: var(--bubble-in); align-self: flex-start; word-break: break-word;
+    }
+    .msg.me { background: var(--accent); color: #fff; align-self: flex-end; }
+    .msg-meta { font-size: 10px; opacity: 0.72; margin-top: 4px; }
+    .composer {
+      padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel);
+      display: flex; gap: 8px;
+    }
+    .composer input {
+      flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      padding: 10px 14px; border-radius: 999px; font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="pill-icon">BP</span>
+      <span>BluePill Web UI</span>
+      <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.1.0 · Zero-Electron macOS Relay</span>
+    </div>
+    <span id="serverBadge" class="status-pill">Connecting…</span>
+  </header>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="auth-bar">
+        <input id="apiKeyInput" type="password" placeholder="API Password / Key" />
+        <button onclick="connectRelay()">Connect</button>
+      </div>
+      <div id="pinnedBar" class="pinned-bar"></div>
+      <div id="chatList" class="chat-list"></div>
+    </aside>
+    <main class="main">
+      <div id="chatHeader" class="chat-header">Select a conversation</div>
+      <div id="messagesPane" class="messages"></div>
+      <div class="composer">
+        <input id="msgInput" type="text" placeholder="iMessage…" onkeydown="if(event.key==='Enter')sendMsg()" />
+        <button onclick="sendMsg()">Send</button>
+      </div>
+    </main>
+  </div>
+  <script>
+    let apiKey = localStorage.getItem('bluepill_key') || new URLSearchParams(location.search).get('password') || '';
+    document.getElementById('apiKeyInput').value = apiKey;
+    let activeChatGuid = '';
+
+    function apiUrl(path) {
+      const sep = path.includes('?') ? '&' : '?';
+      return `${path}${sep}password=${encodeURIComponent(apiKey)}`;
+    }
+
+    async function connectRelay() {
+      apiKey = document.getElementById('apiKeyInput').value.trim();
+      localStorage.setItem('bluepill_key', apiKey);
+      try {
+        const res = await fetch(apiUrl('/api/v1/server/info'));
+        const j = await res.json();
+        if (j && j.data) {
+          document.getElementById('serverBadge').textContent =
+            `Connected · macOS ${j.data.os_version} · v${j.data.server_version}`;
+          await loadPinned();
+          await loadChats();
+        }
+      } catch (e) {
+        document.getElementById('serverBadge').textContent = 'Connection Error';
+      }
+    }
+
+    async function loadPinned() {
+      const bar = document.getElementById('pinnedBar');
+      bar.innerHTML = '';
+      const res = await fetch(apiUrl('/api/v1/pinned'));
+      const j = await res.json();
+      (j.data || []).forEach(p => {
+        const el = document.createElement('div');
+        el.className = 'pin-avatar';
+        const label = p.displayName || p.chatIdentifier || p.guid;
+        el.textContent = label.slice(0, 2).toUpperCase();
+        el.title = label;
+        el.onclick = () => selectChat(p.guid, label);
+        bar.appendChild(el);
+      });
+    }
+
+    async function loadChats() {
+      const list = document.getElementById('chatList');
+      list.innerHTML = '';
+      const res = await fetch(apiUrl('/api/v1/chat/query'), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({limit: 100, offset: 0})
+      });
+      const j = await res.json();
+      (j.data || []).forEach(c => {
+        const row = document.createElement('div');
+        row.className = 'chat-row' + (c.guid === activeChatGuid ? ' active' : '');
+        const title = c.displayName || c.chatIdentifier || c.guid;
+        row.innerHTML = `<div class="chat-title">${title}</div><div class="chat-sub">${c.guid}</div>`;
+        row.onclick = () => selectChat(c.guid, title);
+        list.appendChild(row);
+      });
+    }
+
+    async function selectChat(guid, title) {
+      activeChatGuid = guid;
+      document.getElementById('chatHeader').textContent = title || guid;
+      const pane = document.getElementById('messagesPane');
+      pane.innerHTML = '';
+      const res = await fetch(apiUrl(`/api/v1/chat/${encodeURIComponent(guid)}/message?limit=100&sort=ASC`));
+      const j = await res.json();
+      (j.data || []).forEach(m => {
+        if (!m.text) return;
+        const d = document.createElement('div');
+        d.className = 'msg' + (m.isFromMe ? ' me' : '');
+        d.textContent = m.text;
+        pane.appendChild(d);
+      });
+      pane.scrollTop = pane.scrollHeight;
+    }
+
+    async function sendMsg() {
+      const input = document.getElementById('msgInput');
+      const text = input.value.trim();
+      if (!text || !activeChatGuid) return;
+      input.value = '';
+      await fetch(apiUrl('/api/v1/message/text'), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({chatGuid: activeChatGuid, message: text, tempGuid: 'web-' + Date.now()})
+      });
+      await selectChat(activeChatGuid, document.getElementById('chatHeader').textContent);
+    }
+
+    if (apiKey) connectRelay();
+  </script>
+</body>
+</html>
+"""
+
+
+class BluePillHTTPHandler(BaseHTTPRequestHandler):
+    engine: BluePillEngine
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        return
+
+    def _send_json(self, status: int, data: Any, message: str = "Success") -> None:
+        body = json.dumps({"status": status, "message": message, "data": data}).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_html(self, html_str: str) -> None:
+        body = html_str.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _check_auth(self, parsed_url: urllib.parse.ParseResult) -> bool:
+        expected = self.engine.password
+        if not expected:
+            return True
+        qs = urllib.parse.parse_qs(parsed_url.query)
+        for key in ("password", "guid", "token", "api_key"):
+            vals = qs.get(key)
+            if vals and vals[0] == expected:
+                return True
+        for hdr in ("X-BlueBubbles-Auth", "X-Password", "Authorization"):
+            val = self.headers.get(hdr, "").strip()
+            if val == expected or val == f"Bearer {expected}":
+                return True
+        return False
+
+    def _read_json_body(self) -> Dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            obj = json.loads(raw.decode("utf-8", errors="replace"))
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+
+        if path in ("/", "/web", "/ui"):
+            self._send_html(WEB_UI_HTML)
+            return
+
+        if path == "/socket.io":
+            if not self._check_auth(parsed):
+                self._send_json(401, None, "Unauthorized")
+                return
+            qs = urllib.parse.parse_qs(parsed.query)
+            sid = (qs.get("sid") or [""])[0]
+            if not sid:
+                sid = uuid.uuid4().hex
+                with self.engine._sessions_lock:
+                    self.engine._sessions[sid] = SocketIOSession(sid)
+                handshake = "0" + json.dumps(
+                    {
+                        "sid": sid,
+                        "upgrades": [],
+                        "pingInterval": 25000,
+                        "pingTimeout": 20000,
+                        "maxPayload": 1000000,
+                    }
+                )
+                raw = handshake.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=UTF-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            with self.engine._sessions_lock:
+                sess = self.engine._sessions.get(sid)
+                if not sess:
+                    sess = SocketIOSession(sid)
+                    self.engine._sessions[sid] = sess
+            pkts = sess.pop_packets(timeout=0.05)
+            out = "\x1e".join(pkts).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=UTF-8")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+            return
+
+        if not self._check_auth(parsed):
+            self._send_json(401, None, "Unauthorized")
+            return
+
+        if path == "/api/v1/ping":
+            self._send_json(200, "pong")
+            return
+
+        if path == "/api/v1/server/info":
+            self._send_json(200, self.engine.get_server_info())
+            return
+
+        if path in ("/api/v1/pinned", "/api/v1/chat/pinned"):
+            self._send_json(200, self.engine.query_pinned_chats())
+            return
+
+        if path == "/api/v1/contact":
+            self._send_json(200, self.engine.query_contacts())
+            return
+
+        m_chat_msg = re.match(r"^/api/v1/chat/([^/]+)/message$", path)
+        if m_chat_msg:
+            chat_guid = urllib.parse.unquote(m_chat_msg.group(1))
+            qs = urllib.parse.parse_qs(parsed.query)
+            limit = int((qs.get("limit") or ["100"])[0])
+            offset = int((qs.get("offset") or ["0"])[0])
+            sort_dir = (qs.get("sort") or ["DESC"])[0]
+            try:
+                msgs = self.engine.query_messages(
+                    {"chatGuid": chat_guid, "limit": limit, "offset": offset, "sort": sort_dir}
+                )
+            except FileNotFoundError:
+                msgs = []
+            self._send_json(200, msgs)
+            return
+
+        m_att = re.match(r"^/api/v1/attachment/([^/]+)(?:/download|/live)?$", path)
+        if m_att:
+            att_guid = urllib.parse.unquote(m_att.group(1))
+            qs = urllib.parse.parse_qs(parsed.query)
+            resize_val = int((qs.get("height") or qs.get("width") or ["0"])[0] or 0) or None
+            try:
+                resolved = self.engine.resolve_attachment_file(
+                    att_guid, convert_heic=True, resize=resize_val
+                )
+            except FileNotFoundError:
+                resolved = None
+            if not resolved:
+                self._send_json(404, None, "Attachment not found")
+                return
+            file_path, mime = resolved
+            with open(file_path, "rb") as f:
+                raw = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
+        self._send_json(404, None, f"Not found: {path}")
+
+    def do_POST(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+
+        if path == "/socket.io":
+            if not self._check_auth(parsed):
+                self._send_json(401, None, "Unauthorized")
+                return
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body_text = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else ""
+            qs = urllib.parse.parse_qs(parsed.query)
+            sid = (qs.get("sid") or [""])[0]
+            if sid and "40" in body_text:
+                with self.engine._sessions_lock:
+                    sess = self.engine._sessions.get(sid)
+                    if sess:
+                        sess.enqueue(f'40{{"sid":"{sid}"}}')
+            raw = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=UTF-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
+
+        if not self._check_auth(parsed):
+            self._send_json(401, None, "Unauthorized")
+            return
+
+        body = self._read_json_body()
+
+        if path == "/api/v1/contact/query":
+            self._send_json(200, self.engine.query_contacts())
+            return
+
+        if path == "/api/v1/chat/query":
+            try:
+                chats = self.engine.query_chats(
+                    limit=int(body.get("limit", 250) or 250),
+                    offset=int(body.get("offset", 0) or 0),
+                    chat_guid=body.get("chatGuid"),
+                    with_participants=True,
+                )
+            except FileNotFoundError:
+                chats = []
+            self._send_json(200, chats)
+            return
+
+        if path == "/api/v1/message/query":
+            try:
+                msgs = self.engine.query_messages(body)
+            except FileNotFoundError:
+                msgs = []
+            self._send_json(200, msgs)
+            return
+
+        if path == "/api/v1/message/text":
+            self._send_json(200, self.engine.send_text(body))
+            return
+
+        if path == "/api/v1/message/react":
+            self._send_json(200, self.engine.send_reaction(body))
+            return
+
+        m_edit = re.match(r"^/api/v1/message/([^/]+)/edit$", path)
+        if m_edit:
+            guid = urllib.parse.unquote(m_edit.group(1))
+            self._send_json(200, self.engine.edit_message(guid, body))
+            return
+
+        m_unsend = re.match(r"^/api/v1/message/([^/]+)/unsend$", path)
+        if m_unsend:
+            guid = urllib.parse.unquote(m_unsend.group(1))
+            self._send_json(200, self.engine.unsend_message(guid, body))
+            return
+
+        m_read = re.match(r"^/api/v1/chat/([^/]+)/(read|unread)$", path)
+        if m_read:
+            chat_guid = urllib.parse.unquote(m_read.group(1))
+            is_read = m_read.group(2) == "read"
+            self._send_json(200, self.engine.mark_chat_read(chat_guid, is_read))
+            return
+
+        self._send_json(404, None, f"Not found: {path}")
+
+
+def run_stdio_loop(engine: BluePillEngine) -> int:
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+            req_id = req.get("id")
+            method = str(req.get("method") or "")
+            params = req.get("params") if isinstance(req.get("params"), dict) else {}
+            data = engine.handle_rpc(method, params)
+            resp = {"id": req_id, "status": 200, "data": data}
+        except Exception as exc:
+            resp = {"id": None, "status": 500, "message": str(exc), "data": None}
+        sys.stdout.write(json.dumps(resp) + "\n")
+        sys.stdout.flush()
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="bluepill-server",
+        description="BluePill Headless macOS Relay Server + Web UI (v1.1.0)",
+    )
+    parser.add_argument("--host", default=os.environ.get("BLUEPILL_HOST", "0.0.0.0"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("BLUEPILL_PORT", "1235")))
+    parser.add_argument("--password", default=os.environ.get("BLUEPILL_PASSWORD", ""))
+    parser.add_argument("--db-path", default=os.environ.get("BLUEPILL_DB_PATH", ""))
+    parser.add_argument("--stdio", action="store_true", help="Run JSON-RPC over stdin/stdout (Direct SSH mode)")
+    parser.add_argument("--version", action="store_true", help="Print version and exit")
+    args = parser.parse_args()
+
+    if args.version:
+        print(f"bluepill-server {VERSION}")
+        return 0
+
+    engine = BluePillEngine(
+        db_path=args.db_path or None,
+        password=args.password,
+    )
+
+    if args.stdio:
+        return run_stdio_loop(engine)
+
+    BluePillHTTPHandler.engine = engine
+    httpd = ThreadingHTTPServer((args.host, args.port), BluePillHTTPHandler)
+    print(f"BluePill Server v{VERSION} listening on http://{args.host}:{args.port} (Web UI: http://{args.host}:{args.port}/web)", flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

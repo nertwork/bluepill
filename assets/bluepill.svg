@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b101b"/>
+      <stop offset="50%" stop-color="#111827"/>
+      <stop offset="100%" stop-color="#1a2236"/>
+    </linearGradient>
+    <linearGradient id="pillLeft" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0a84ff"/>
+    </linearGradient>
+    <linearGradient id="pillRight" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a84ff"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="glowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#0a84ff" stop-opacity="0.0"/>
+    </linearGradient>
+    <clipPath id="capsuleClip">
+      <rect x="76" y="148" width="360" height="196" rx="98" ry="98"/>
+    </clipPath>
+  </defs>
+
+  <!-- Rounded Squircle App Icon Background -->
+  <rect x="16" y="16" width="480" height="480" rx="112" ry="112" fill="url(#bgGrad)" stroke="#1e293b" stroke-width="6"/>
+
+  <!-- Subtle Ambient Glow -->
+  <circle cx="256" cy="246" r="185" fill="url(#glowGrad)"/>
+
+  <!-- iMessage Chat Bubble Tail fused onto the Blue Pill -->
+  <path d="M 156 320 L 106 392 C 100 400 108 408 118 404 L 204 342 Z" fill="#0a84ff"/>
+
+  <!-- Main BluePill Capsule (Two-Tone Glowing Blue Pill) -->
+  <g clip-path="url(#capsuleClip)">
+    <rect x="76" y="148" width="184" height="196" fill="url(#pillLeft)"/>
+    <rect x="256" y="148" width="180" height="196" fill="url(#pillRight)"/>
+    <!-- Center Capsule Seam -->
+    <rect x="253" y="148" width="6" height="196" fill="#091326" fill-opacity="0.32"/>
+  </g>
+
+  <!-- Capsule Outer Rim Highlight -->
+  <rect x="76" y="148" width="360" height="196" rx="98" ry="98" fill="none" stroke="#7dd3fc" stroke-opacity="0.45" stroke-width="4"/>
+
+  <!-- Specular Top Glass Highlight -->
+  <rect x="116" y="168" width="280" height="36" rx="18" ry="18" fill="#ffffff" fill-opacity="0.22"/>
+
+  <!-- Three Conversation Typing / Message Dots -->
+  <circle cx="186" cy="246" r="18" fill="#ffffff" fill-opacity="0.95"/>
+  <circle cx="256" cy="246" r="18" fill="#ffffff" fill-opacity="0.95"/>
+  <circle cx="326" cy="246" r="18" fill="#ffffff" fill-opacity="0.95"/>
+</svg>

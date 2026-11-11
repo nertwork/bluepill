@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=BluePill
+GenericName=iMessage, RCS & SMS Client
+Comment=Native Linux Qt6/QML desktop client for iMessage, RCS, and SMS
+Exec=bluepill
+Icon=bluepill
+Terminal=false
+Categories=Network;InstantMessaging;Qt;
+Keywords=iMessage;SMS;RCS;BluePill;BlueBubbles;Messages;Omarchy;
+StartupWMClass=bluepill

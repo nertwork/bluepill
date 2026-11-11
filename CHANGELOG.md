@@ -1,17 +1,31 @@
 # Changelog
 
-All notable changes to **`imsg`** will be documented in this file.
+All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [1.1.0] - 2026-11-11
+
+### Added
+- **Unified Rebrand to `BluePill` (`bluepill` v1.1.0):**
+  - Renamed primary binary and package to `bluepill` while installing a backward-compatible `/usr/bin/imsg -> bluepill` symlink and automatically migrating `~/.config/imsg/config.json` to `~/.config/bluepill/config.json` (`0600`).
+  - Added custom vector SVG and 512x512 PNG **BluePill** desktop icon (`assets/bluepill.svg`, `assets/bluepill.png`, `docs/logo.png`).
+- **Headless macOS Relay Daemon (`server/bluepill_server.py` / `brew install nertwork/tap/bluepill`):**
+  - Zero-Electron (~18 MB RSS) native macOS relay reading `~/Library/Messages/chat.db` in SQLite WAL mode and `AddressBook-v22.abcddb` in `<5ms`.
+  - Dual-mode outbound dispatch: supports both `IMCore` Private API helper (`localhost:45670` for instant tapbacks, unsend, edit, delete, and background read state) and Zero-SIP `osascript` fallback.
+  - 100% REST + Socket.IO v4 API compatibility with legacy BlueBubbles Server (`1.9.x`).
+- **Built-In BluePill Web UI (`/web` & `bluepill --webui`):**
+  - Responsive dark-mode browser interface served directly by `bluepill-server` at `GET /` and `GET /web`, plus a **`🌐 Web UI`** launcher button in the desktop Home Dashboard and `bluepill --webui` CLI flag.
+- **Pinned Conversations Avatar Bar (`pinnedChats`):**
+  - Horizontal pinned conversation avatar row at the top of the sidebar with unread count badges, 1-click thread switching, and right-click pin/unpin toggling.
+- **1-Click 2FA / OTP Verification Code Pill (`extractOtpCode`):**
+  - Automatically extracts 4–8 digit verification codes and `G-XXXXXX` tokens while ignoring 4-digit calendar years (`1990..2039`), phone numbers, and URLs.
+- **Edited, Expressive Send Effects & Outbound Delivery Failure Badges:**
+  - Displays `"· Edited"`, `"· sent with confetti / slam / lasers / loud"`, and `"⚠ Not Delivered"` metadata directly on message bubbles.
+- **Clipboard Image Paste (`Ctrl+V`) & Attachment Upload (`sendAttachment`):**
+  - Pressing `Ctrl+V` inside the composer with an image on the clipboard automatically stages a PNG and sends it via `POST /api/v1/message/attachment`.
+- **Direct SSH Transport Support (`ssh://user@mac-host`):**
+  - Server URL field accepts `ssh://user@host` (or `user@host`) for passwordless SSH key configurations alongside `https://` endpoints.
 
 ## [1.0.0] - 2026-11-10
 
 ### Added
-- **First-Run GUI & JSON Server Setup (`Ctrl+,` / `⚙ Server`):** Interactive Omarchy-themed modal (`serverConfigPopup`) to configure Primary BlueBubbles Server URL, Optional Failover Server URL, and API Password with `0600` `~/.config/imsg/config.json` persistence and dynamic `libsecret` (`secret-tool`) hostname lookup.
-- **Real-Time Socket.IO v4 Push & Multi-Channel HTTP Pool Isolation:** Dedicated `QNetworkAccessManager` instances (`m_sendNam`, `m_mediaNam`, `m_socketNam`) so concurrent multi-photo downloads never block outbound message sends or typing indicators.
-- **Native HEIC/AVIF Magic-Byte Decoding & Full-Window Photo Viewer:** Automatic detection of disguised Apple `ftyp` (`heic`, `heix`, `mif1`, `avif`) attachments via `heif-convert` (`libheif`) and ImageMagick fallback, paired with a zoomable keyboard-driven gallery overlay (`←`/`→`, `+`/`-`/`0`, `Esc`).
-- **Tapback Reactions, Stickers & Rich Link Previews:** Interactive `❤️ 👍 👎 😂 !! ?` reaction pills with hover sender attribution tooltips, sticker overlays, YouTube embeds, and asynchronous OpenGraph link preview cards.
-- **Authoritative SQLite Read-State Sync & Unjoined SMS Recovery:** Reconciles `message.is_read = 0` directly against macOS `chat.db` and synthesizes fallback threads for unjoined short-code 2FA SMS OTP messages with 1-click desktop notification copy.
-- **Omarchy Live Theme Sync & Responsive Split-Window Layout:** Real-time `~/.config/omarchy/current/theme/colors.toml` hot-reload, Omarchy/Mako Do Not Disturb awareness, and 2-tier responsive conversation header (`stackChatHeaderRows`) for 50% tiled Hyprland windows.
-- **Headless CLI Mode:** `imsg status [--json]`, `imsg recent [--limit N] [--json]`, and `imsg send <recipient> <message> [--json]`.
-- **Official Arch User Repository (AUR) Packaging & CI/CD:** Published `aur/imsg` (`yay -S imsg`), GitHub Actions CI (`49/49` offscreen QtTest suite + `makepkg`), Automated Issue Triage (`issue-triage.yml`), and Automated AI Pull Request Review (`ai-pr-review.yml`).
+- Initial open-source release of the native Linux C++20 & Qt6/QML desktop and CLI client (`imsg`), featuring Socket.IO v4 real-time push, 0ms local JSON state cache, built-in Photo Lightbox & Gallery Viewer, magic-byte (`ftyp`) HEIC/AVIF transcoding, two-way read/unread sync, and Omarchy theme hot-reload.

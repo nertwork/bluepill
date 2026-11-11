@@ -1,24 +1,33 @@
-# imsg — Native Linux Qt6/QML iMessage, RCS & SMS Client
+<p align="center">
+  <img src="docs/logo.png" width="136" alt="BluePill Logo" />
+</p>
 
-[![CI](https://github.com/nertwork/imsg/actions/workflows/ci.yml/badge.svg)](https://github.com/nertwork/imsg/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/nertwork/imsg?color=7aa2f7)](https://github.com/nertwork/imsg/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-9ece6a.svg)](LICENSE)
-[![Arch Linux / AUR](https://img.shields.io/badge/Arch_Linux-AUR_Package-1793d1?logo=arch-linux&logoColor=white)](https://aur.archlinux.org/packages/imsg)
-[![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/nertwork/imsg?utm_source=oss&utm_medium=github&utm_campaign=nertwork%2Fimsg&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)](https://coderabbit.ai)
+<h1 align="center">BluePill — Native Linux Qt6/QML iMessage, RCS &amp; SMS Client + macOS Relay &amp; Web UI</h1>
 
-**`imsg`** is a fast, keyboard-centric, native **C++20 and Qt6/QML** desktop and CLI client for **iMessage**, **RCS**, and **SMS** on Linux (Wayland / Hyprland / Omarchy / X11), backed by a macOS [BlueBubbles](https://bluebubbles.app/) relay server.
+<p align="center">
+  <a href="https://github.com/nertwork/bluepill/actions/workflows/ci.yml"><img src="https://github.com/nertwork/bluepill/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/nertwork/bluepill/releases/latest"><img src="https://img.shields.io/github/v/release/nertwork/bluepill?color=0a84ff&label=Release" alt="Release" /></a>
+  <a href="https://aur.archlinux.org/packages/bluepill"><img src="https://img.shields.io/badge/Arch_Linux-AUR_bluepill-1793d1?logo=arch-linux&logoColor=white" alt="AUR Package" /></a>
+  <a href="https://github.com/nertwork/homebrew-tap"><img src="https://img.shields.io/badge/Homebrew-nertwork%2Ftap%2Fbluepill-FBB040?logo=homebrew&logoColor=white" alt="Homebrew Tap" /></a>
+  <a href="https://coderabbit.ai"><img src="https://img.shields.io/coderabbit/prs/github/nertwork/bluepill?utm_source=oss&utm_medium=github&utm_campaign=nertwork%2Fbluepill&labelColor=171717&color=FF570A&label=CodeRabbit+Reviews" alt="CodeRabbit Pull Request Reviews" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-9ece6a.svg" alt="License: MIT" /></a>
+</p>
 
-Designed as a lightweight (~48 MB RSS), zero-Electron, zero-Flutter replacement for the official desktop client, `imsg` eliminates ObjectBox file-locking crashes, starts in **0ms** from a local JSON state cache, delivers real-time messages via **Socket.IO v4 push + REST delta polling**, and hot-reloads [Omarchy](https://omarchy.org) desktop themes automatically.
+**`BluePill`** (`bluepill`, backward-compatible with `imsg`) is a complete, open-source **iMessage, RCS, and SMS ecosystem for Linux and macOS** consisting of three unified interfaces:
+
+1. **Native Linux Desktop Client (`bluepill` / `yay -S bluepill`):** A fast (~48 MB RSS), zero-Electron, zero-Flutter **C++20 and Qt6/QML** desktop application for Wayland / Hyprland / [Omarchy](https://omarchy.org) / X11 with **0ms local cache startup**, real-time **Socket.IO v4 push**, **Pinned Conversations**, **1-click 2FA OTP copy pills**, **built-in Photo Lightbox**, and live Omarchy theme hot-reloading.
+2. **Headless macOS Relay Daemon (`bluepill-server` / `brew install nertwork/tap/bluepill`):** A lightweight (~18 MB RSS), zero-Electron macOS daemon that reads `~/Library/Messages/chat.db` directly in SQLite WAL mode (`<2ms` queries), decodes `attributedBody` typedstreams natively, resolves `AddressBook` contacts in `<5ms`, and supports both **Full `IMCore` Private API mode** (instant tapbacks, unsend, edit, delete, background read receipts) and **Zero-SIP `osascript` Gateway mode** — while remaining **100% API-compatible with legacy BlueBubbles Server (`1.9.x`)**.
+3. **Built-In BluePill Web UI (`http://<mac-relay>:1235/web` or `bluepill --webui`):** A zero-install, dark-mode browser client served directly by `bluepill-server` so you can read, search, react, and send iMessages, SMS, and RCS from any browser on your tailnet or LAN.
 
 ---
 
 ## Screenshots
 
-### Active Conversation — Multi-Photo Gallery, Tapback Reactions & Rich Link Previews
+### Active Conversation — Pinned Chats Bar, Multi-Photo Gallery, Tapbacks, Edited/Confetti Badges & 1-Click 2FA OTP Copy Pill
 ![Active Conversation](docs/screenshots/chat-conversation.png)
 
-### iMessage Home Dashboard — Sync Window Presets, Server Setup & Unread Summary
-![iMessage Home Dashboard](docs/screenshots/home-dashboard.png)
+### BluePill Home Dashboard — Sync Window Presets, Web UI Launcher, Server Setup & Unread Summary
+![BluePill Home Dashboard](docs/screenshots/home-dashboard.png)
 
 ### Built-In Full-Window Photo Lightbox & Gallery Viewer
 ![Photo Lightbox Viewer](docs/screenshots/photo-viewer.png)
@@ -28,175 +37,76 @@ Designed as a lightweight (~48 MB RSS), zero-Electron, zero-Flutter replacement 
 
 ---
 
+## Quick Start Installation
+
+### 1. macOS Relay Setup (`bluepill-server` via Homebrew — Recommended)
+
+On any Mac signed into your Apple ID (`Messages.app`):
+
+```bash
+brew tap nertwork/tap
+brew install nertwork/tap/bluepill
+bluepill-server init
+brew services start bluepill
+```
+
+- **Verify Relay & Web UI:**
+  - Health / Info API: `curl -s http://127.0.0.1:1235/api/v1/server/info`
+  - Built-In Web UI: Open `http://127.0.0.1:1235/web` in any browser (or over Tailscale / HTTPS reverse proxy).
+- **100% Legacy BlueBubbles Compatible:** Already running `BlueBubbles.app` (`v1.9.x`)? `BluePill` on Linux connects to existing BlueBubbles servers out of the box with zero server changes required.
+
+### 2. Linux Desktop Client & CLI Setup (`bluepill` via AUR)
+
+On Arch Linux / Omarchy Linux (`x86_64` & `aarch64`):
+
+```bash
+yay -S bluepill
+# Launch the GUI (press Ctrl+, to open the Server Configuration modal)
+bluepill
+# Or launch the Built-In Web UI in your default browser
+bluepill --webui
+```
+
+---
+
 ## Key Features
 
-- **Native C++20 & Qt6/QML Architecture:** Pure Qt Quick Controls 2 UI running natively on Wayland (`qt6-wayland`) and X11 with ~48 MB RSS memory footprint and zero background database lock contention.
-- **0ms Local Cache Startup:** Persists conversation metadata, participant graphs, and message timelines in `~/.config/imsg/messages_cache.json` (`0600`) so the full UI renders on frame 1 while delta reconciliation runs asynchronously.
-- **Real-Time Socket.IO v4 Push + REST Delta Polling:** Maintains an Engine.IO v4 / Socket.IO v4 long-polling push channel (`new-message`, `updated-message`, `chat-read-status-changed`) paired with a 2.5s REST delta safety poll and 120s delayed-SMS lookback window.
-- **4 Isolated `QNetworkAccessManager` Pools:** Strictly separates outgoing message/reaction dispatch (`m_sendNam`), metadata polling (`m_nam`), Socket.IO push (`m_socketNam`), and background attachment downloads (`m_mediaNam`) so heavy photo downloads never block outgoing messages.
-- **Full BlueBubbles Private API Support:**
-  - Send and receive **iMessage** (blue bubbles), **RCS**, and **SMS** (green bubbles).
-  - Interactive **Tapback reactions** (`❤️`, `👍`, `👎`, `😂`, `‼️`, `❓`) with grouped counts, per-sender attribution, and hover tooltips (`❤️ Alex Rivera, Elena Vance, You`).
-  - Inline **threaded replies**, **Unsend (`↩`)** across iCloud devices, and **Delete message / conversation (`🗑`)**.
-  - **Bidirectional read-state sync** across iPhone, iPad, Mac, and Linux using custom SQLite `message.is_read = 0` queries against macOS Sequoia `chat.db`.
-- **Multi-Photo Bubbles & Disguised HEIC Magic-Byte Conversion:** Renders 1..N image attachments per message with `1 / N` gallery badges, EXIF orientation (`autoTransform`), portrait aspect-ratio preservation, background `ftyp` magic-byte detection (`heif-convert` / `magick` to `.heic.jpg` sidecar), and a keyboard-driven full-window lightbox (`←`/`→`, `+`/`-`/`0`, `Esc`).
-- **One-Click 2FA / OTP Verification Code Extraction:** Automatically detects 4–8 digit verification codes (including hyphenated `G-482910` and orphan short-code SMS rows without `chat_message_join` entries) and renders a one-click **`Copy Code`** pill.
-- **Built-In GUI Server Setup & Automatic Failover:** Configure primary and secondary/failover BlueBubbles relay URLs and API keys directly from the **⚙ Server** modal (`Ctrl+,`) or `~/.config/imsg/config.json`.
-- **Live Omarchy Theme Hot-Reload:** Watches `~/.config/omarchy/current/theme/colors.toml` via `QFileSystemWatcher` and updates all surface, accent, selection, and typography tokens in real time.
-- **Headless CLI Automation:** Query connection health (`imsg status --json`), list recent messages (`imsg recent --limit 20 --json`), or send messages (`imsg send "+14155550142" "Hello!" --json`) from scripts, Waybar modules, or AI agents.
+- **Pinned Conversations Bar:** Syncs pinned threads from macOS (`com.apple.messages.pinning.plist`) or lets you right-click any conversation to pin/unpin circular avatar tiles at the top of the sidebar.
+- **1-Click 2FA / OTP Verification Code Copy (`󰆏 Copy Code: 482910`):** Automatically extracts 4–8 digit verification codes and `G-XXXXXX` tokens from incoming SMS/iMessage texts (while ignoring years, phone numbers, and prices) and renders a 1-click copy pill inside the message bubble.
+- **Edited, Expressive Send Effects & Delivery Failure Badges:** Displays `"· Edited"`, `"· sent with confetti / slam / lasers"`, and red `"⚠ Not Delivered"` indicators directly on message bubbles.
+- **Clipboard Image Paste (`Ctrl+V`) & Multi-Photo Bubbles:** Press `Ctrl+V` in the message composer when an image is on your Wayland clipboard to send it immediately, and view multi-photo messages in the built-in **Photo Lightbox & Gallery Viewer** (zoom, pan, filmstrip thumbnails, EXIF auto-orient, magic-byte `.heic`/`.avif` decoding).
+- **Three Flexible Transports:**
+  - **BluePill Native macOS Relay (`https://...` or `http://...:1235`)** — `<18 MB` headless daemon + built-in Web UI.
+  - **Legacy BlueBubbles Server (`https://...`)** — 100% backward-compatible with `BlueBubbles.app` + `BlueBubblesHelper.dylib`.
+  - **Direct SSH Mode (`ssh://user@mac-host`)** — Key-based SSH transport with zero password required.
+- **Full Headless JSON CLI (`bluepill` & `imsg`):**
+  ```bash
+  bluepill status --json
+  bluepill recent --limit 10 --json
+  bluepill send "+14155550142" "Hello from BluePill CLI" --json
+  bluepill --webui
+  ```
 
 ---
 
-## Quick-Start Installation
+## Platform Compatibility Matrix
 
-### Option 1: Arch Linux (AUR)
+`BluePill` is developed, continuously tested in CI, and verified across the following OS and architecture targets:
 
-```bash
-yay -S imsg
-# or using paru:
-paru -S imsg
-```
-
-### Option 2: Build & Install Arch Package from Source (`makepkg`)
-
-```bash
-git clone https://github.com/nertwork/imsg.git
-cd imsg/pkgbuild
-makepkg -si
-```
-
-### Option 3: Direct Build from Source (Arch / Fedora / Ubuntu / Debian)
-
-Ensure Qt6 (`qt6-base`, `qt6-declarative`, `qt6-svg`, `qt6-wayland`), `libnotify`, and optionally `libheif` / `imagemagick` are installed:
-
-```bash
-git clone https://github.com/nertwork/imsg.git
-cd imsg
-./bin/build
-./bin/test
-sudo install -Dm755 build/imsg /usr/bin/imsg
-```
-
-To try `imsg` immediately without a BlueBubbles server, launch **Demo Mode**:
-
-```bash
-imsg --demo
-```
+| Component | Operating System | CPU Architectures | Display / Runtime Stack | Package / Distribution |
+| :--- | :--- | :--- | :--- | :--- |
+| **BluePill Linux Desktop & CLI (`bluepill`)** | Arch Linux, Omarchy Linux, and modern Linux distributions | `x86_64`, `aarch64` (ARM64) | Wayland (Hyprland, Sway, KDE, GNOME) & X11 · Qt 6.8+ / C++20 · PipeWire · `libnotify` | **AUR:** `yay -S bluepill`<br>**Source:** `./bin/build && ./bin/install` |
+| **BluePill macOS Relay Daemon (`bluepill-server`)** | macOS Sequoia (`15.x`), Sonoma (`14.x`), Ventura (`13.x`), Tahoe (`26.x`) | `arm64` (Apple Silicon) & `x86_64` (Intel / KVM Virtual Machines) | Python 3.11+ · SQLite 3 WAL (`chat.db` + `AddressBook`) · `IMCore` Private API or Zero-SIP `osascript` | **Homebrew:** `brew install nertwork/tap/bluepill`<br>**LaunchAgent:** `brew services start bluepill` |
+| **BluePill Web UI (`/web`)** | Cross-Platform (Linux, macOS, Windows, iOS, Android) | Any | Modern Web Browser (HTML5 / Fetch / EventSource & Socket.IO) | Built into `bluepill-server` (`http://<host>:1235/web`) |
 
 ---
 
-## Setting Up Your BlueBubbles macOS Relay
+## Documentation & Guides
 
-`imsg` connects over HTTPS to a [BlueBubbles Server](https://bluebubbles.app/) running on macOS (either a physical Mac mini / MacBook or a macOS Sequoia VM on Proxmox VE).
-
-See the complete **[BlueBubbles macOS Relay Setup Guide](docs/BLUEBUBBLES_SETUP_GUIDE.md)** for step-by-step instructions covering:
-1. Deploying macOS (Physical Mac or Proxmox macOS Sequoia VM).
-2. Installing `BlueBubbles.app` and configuring **SIP + Private API (`BlueBubblesHelper.dylib`)** for tapbacks, replies, unsends, and bidirectional read-state sync.
-3. Enabling iPhone **Text Message Forwarding** (for SMS/RCS) and **Messages in iCloud**.
-4. Preventing macOS Sequoia from auto-deleting 2FA verification codes (`defaults write com.apple.MobileSMS DeleteVerificationCodes -bool false`).
-5. Configuring a reverse proxy with TLS (Caddy, Nginx, HAProxy, or Tailscale HTTPS) in front of port `1234`.
-
----
-
-## Configuration (GUI, JSON & `libsecret`)
-
-### First-Run GUI Setup (`Ctrl+,`)
-
-On first launch (when `~/.config/imsg/config.json` is not yet configured), `imsg` automatically opens the **BlueBubbles Server Configuration** modal (`⚙ Server` button in the top bar or Home dashboard, or `Ctrl+,`):
-
-1. **Primary Server URL:** Your BlueBubbles HTTPS endpoint (e.g., `https://bluebubbles.example.com`).
-2. **Failover Server URL (Optional):** Optional secondary/LAN endpoint (e.g., `https://bluebubbles-lan.example.com`).
-3. **API Password / Key:** Your BlueBubbles server password.
-4. Click **Save & Connect** — credentials are written to `~/.config/imsg/config.json` with strict `0600` (`chmod 600`) owner-only permissions.
-
-### Configuration File (`~/.config/imsg/config.json`)
-
-```json
-{
-  "serverUrl": "https://bluebubbles.example.com",
-  "secondaryServerUrl": "https://backup-relay.example.com",
-  "password": "your-bluebubbles-server-password",
-  "tlsVerified": true,
-  "authMethod": "tls-apikey"
-}
-```
-
-### Linux Secret Service (`secret-tool` / `libsecret`)
-
-If `"password"` is omitted from `~/.config/imsg/config.json`, `imsg` automatically queries `secret-tool` using the hostname of `serverUrl` or the default `imsg` service:
-
-```bash
-secret-tool store --label="BlueBubbles API Key" service bluebubbles account bluebubbles.example.com
-# or generic default account:
-secret-tool store --label="imsg API Key" service imsg account default
-```
-
-See **[Configuration & CLI Reference](docs/CONFIGURATION_AND_CLI.md)** for environment variables (`IMSG_SERVER_URL`, `IMSG_SECONDARY_URL`, `IMSG_PASSWORD`) and `systemd --user` service setup.
-
----
-
-## Headless CLI Usage
-
-`imsg` includes a zero-GUI headless CLI mode for scripts, status bars, and automation:
-
-```bash
-# Check relay connectivity, unread count, and server status
-imsg status
-imsg status --json
-
-# List the 15 most recent conversations with timestamps and unread counts
-imsg recent --limit 15
-imsg recent --limit 15 --json
-
-# Send an iMessage / SMS by phone number, email, or chat GUID
-imsg send "+14155550142" "Deploying v1.0.0 now!"
-imsg send "iMessage;-;+14155550142" "Hello from Linux!" --json
-```
-
----
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-| :--- | :--- |
-| `Ctrl+H` / `Esc` | Open **iMessage Home** dashboard / clear active conversation |
-| `Ctrl+,` | Open **BlueBubbles Server Configuration** modal (`⚙ Server`) |
-| `Ctrl+N` | Start a **New Message** (with live contact autocomplete) |
-| `Ctrl+F` / `/` | Focus conversation search & filter bar |
-| `Ctrl+J` / `Ctrl+Down` | Select next conversation in sidebar |
-| `Ctrl+P` / `Ctrl+Up` | Select previous conversation in sidebar |
-| `Alt+1` .. `Alt+9` | Jump directly to conversation `1`–`9` |
-| `Ctrl+R` / `F5` | Trigger immediate delta sync & unread reconciliation |
-| `Ctrl+Shift+U` | Toggle active conversation **Read / Unread** in iMessage |
-| `Ctrl+Shift+A` | **Mark All Read** across all conversations |
-| `Ctrl+M` | Toggle mute for active conversation |
-| `Ctrl+D` | Toggle global desktop notifications |
-| `PageUp` / `PageDown` | Scroll message timeline up / down by page |
-| `Home` / `End` | Jump to top / bottom of message timeline |
-| `←` / `→` / `+` / `-` / `0` | Navigate photos and zoom inside the Photo Lightbox Viewer |
-| `Ctrl+K` / `?` / `F1` | Open keyboard shortcuts reference modal |
-| `Ctrl+Q` | Quit `imsg` |
-
----
-
-## Documentation Index
-
-- **[BlueBubbles macOS Relay Setup Guide](docs/BLUEBUBBLES_SETUP_GUIDE.md)** — Full macOS relay installation, SIP & Private API helper setup, iPhone SMS forwarding, 2FA code retention, and TLS reverse proxy configuration.
-- **[Configuration & CLI Reference](docs/CONFIGURATION_AND_CLI.md)** — GUI & JSON setup, `libsecret` keyring storage, environment variables, Omarchy theme integration, and `systemd --user` service management.
-- **[Architecture & Protocol Deep Dive](docs/ARCHITECTURE.md)** — Internal C++20/Qt6 design, 4-pool `QNetworkAccessManager` isolation, Socket.IO v4 state machine, custom SQLite unread reconciliation, and magic-byte HEIC conversion pipeline.
-
----
-
----
-
-## Contributing & Community Governance
-
-We use an **Issue-Driven + Automated AI Pull Request Review** workflow:
-
-- [**Contributing Guide (`CONTRIBUTING.md`)**](CONTRIBUTING.md) — Build prerequisites, repository layout, running the 49-test offscreen suite (`./bin/test`), `cppcheck`/`qmllint`, and `--demo` UI development.
-- [**Changelog (`CHANGELOG.md`)**](CHANGELOG.md) — Release history and architectural highlights.
-- [**Security Policy (`SECURITY.md`)**](SECURITY.md) — TLS verification, `0600` credential storage, and private vulnerability disclosure.
-- [**Code of Conduct (`CODE_OF_CONDUCT.md`)**](CODE_OF_CONDUCT.md) — Contributor Covenant v2.1 community standards.
+- **[macOS Relay & BlueBubbles Setup Guide](docs/BLUEBUBBLES_SETUP_GUIDE.md)** — Installing `bluepill-server` via Homebrew on macOS, using the Built-In Web UI, or connecting to a legacy BlueBubbles Server.
+- **[Configuration, Transports & CLI Reference](docs/CONFIGURATION_AND_CLI.md)** — Configuring HTTPS, Failover URLs, Direct SSH (`ssh://`), Linux Secret Service (`libsecret`), and JSON CLI automation.
+- **[Architecture & Internals](docs/ARCHITECTURE.md)** — How the C++20/Qt6 client, SQLite WAL `bluepill-server` daemon, `IMCore` TCP bridge, and Socket.IO v4 push pipeline work under the hood.
+- **[Contributing Guide](CONTRIBUTING.md)** — Building from source, running the 53 offscreen unit tests (`./bin/test`), and submitting Pull Requests reviewed by `@coderabbitai` and Arch Linux CI.
 
 ---
 

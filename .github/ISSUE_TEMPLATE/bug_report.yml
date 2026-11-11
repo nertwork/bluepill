@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting an issue with **`imsg`**!
+        Thanks for reporting an issue with **`bluepill`**!
         > **Privacy & Zero-PII Notice:** Never paste real phone numbers, email addresses, API passwords, or personal message contents. Redact handles with `555` numbers (`+14155550142`) or `user@example.com`.
 
   - type: input
@@ -49,7 +49,7 @@ body:
     attributes:
       label: Steps to Reproduce
       placeholder: |
-        1. Launch `imsg`
+        1. Launch `bluepill`
         2. Select a group thread with HEIC attachments
         3. Click reaction pill...
     validations:
