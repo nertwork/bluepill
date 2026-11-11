@@ -186,6 +186,19 @@ imsg send "iMessage;-;+14155550142" "Hello from Linux!" --json
 
 ---
 
+---
+
+## Contributing & Community Governance
+
+We use an **Issue-Driven + Automated AI Pull Request Review** workflow:
+
+- [**Contributing Guide (`CONTRIBUTING.md`)**](CONTRIBUTING.md) — Build prerequisites, repository layout, running the 49-test offscreen suite (`./bin/test`), `cppcheck`/`qmllint`, and `--demo` UI development.
+- [**Changelog (`CHANGELOG.md`)**](CHANGELOG.md) — Release history and architectural highlights.
+- [**Security Policy (`SECURITY.md`)**](SECURITY.md) — TLS verification, `0600` credential storage, and private vulnerability disclosure.
+- [**Code of Conduct (`CODE_OF_CONDUCT.md`)**](CODE_OF_CONDUCT.md) — Contributor Covenant v2.1 community standards.
+
+---
+
 ## License
 
 Released under the [MIT License](LICENSE).
