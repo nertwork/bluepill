@@ -1,0 +1,84 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+early_access: true
+enable_free_tier: true
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  review_status: true
+  review_details: true
+  collapse_walkthrough: false
+  changed_files_summary: true
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+  auto_apply_labels: true
+  poem: true
+
+  labeling_instructions:
+    - label: "bug"
+      instructions: "Apply when the PR fixes a crash, race condition, memory leak, layout overlap, or protocol bug."
+    - label: "enhancement"
+      instructions: "Apply when the PR introduces a new feature, UI improvement, or CLI flag."
+    - label: "ui/qml"
+      instructions: "Apply when files in src/*.qml or src/theme.* are modified."
+    - label: "bluebubbles-relay"
+      instructions: "Apply when BlueBubbles REST API, Socket.IO v4, or SQLite chat.db sync logic in src/backend.* is modified."
+    - label: "wayland/hyprland"
+      instructions: "Apply when Wayland, Hyprland tiling, Omarchy theme sync, or Mako DND logic is modified."
+    - label: "aur-packaging"
+      instructions: "Apply when pkgbuild/PKGBUILD, pkgbuild/PKGBUILD.aur, pkgbuild/.SRCINFO, or pkgbuild/imsg.service are modified."
+    - label: "security"
+      instructions: "Apply when TLS verification, 0600 file permissions, libsecret keyring lookup, or Zero-PII rules are touched."
+    - label: "documentation"
+      instructions: "Apply when README.md, CONTRIBUTING.md, CHANGELOG.md, or docs/** are modified."
+    - label: "ci/cd"
+      instructions: "Apply when .github/workflows/**, .coderabbit.yaml, or .github/dependabot.yml are modified."
+
+  path_instructions:
+    - path: "src/**/*.{h,cpp}"
+      instructions: |
+        Review C++20 and Qt6 code for:
+        1. QNetworkReply lifecycle safety (always ensure reply->deleteLater() on all code paths).
+        2. Multi-channel QNetworkAccessManager isolation (m_sendNam for outbound messages/reactions, m_mediaNam for attachments, m_socketNam for Socket.IO v4).
+        3. Strict TLS verification (QSslSocket::VerifyPeer) and 0600 permissions on ~/.config/imsg/config.json.
+        4. Zero hardcoded personal phone numbers, names, or private server hostnames.
+    - path: "src/**/*.qml"
+      instructions: |
+        Review QtQuick / QML code for:
+        1. Responsive layout geometry across wide (1440x900) and 50% Hyprland tiled split-window (920x860) widths (stackChatHeaderRows).
+        2. Null-safe visual item lookups and clean keyboard navigation (Esc, Ctrl+H, Ctrl+F, Ctrl+N, Ctrl+,).
+        3. Dynamic Omarchy theme palette bindings (theme.background, theme.accent, theme.foreground).
+    - path: "tests/**/*.cpp"
+      instructions: |
+        Ensure all unit tests run cleanly under QT_QPA_PLATFORM=offscreen and use only fictional personas (Alex Rivera, Elena Vance, Marcus Chen) and RFC 2606 / 555 test numbers (+14155550142).
+    - path: "pkgbuild/**"
+      instructions: |
+        Verify Arch Linux PKGBUILD standards, accurate sha256sums in PKGBUILD.aur, and matching .SRCINFO metadata.
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+
+  tools:
+    cppcheck:
+      enabled: true
+    yamllint:
+      enabled: true
+    actionlint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    markdownlint:
+      enabled: true
+
+chat:
+  auto_reply: true
