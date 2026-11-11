@@ -1579,20 +1579,83 @@ def run_stdio_loop(engine: BluePillEngine) -> int:
     return 0
 
 
+def run_selftest(engine: BluePillEngine) -> int:
+    sample_ts = epoch_ms_to_apple_ns(1700000000000)
+    roundtrip = apple_ts_to_epoch_ms(sample_ts)
+    assert abs(roundtrip - 1700000000000) < 1000, "Apple timestamp roundtrip failed"
+    sample_blob = b"streamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84\x12NSAttributedString\x00\x84\x84\x08NSObject\x00\x85\x92\x84\x84\x84\x08NSString\x01\x94\x84\x01+\x10BluePill Selftest\x86"
+    decoded = decode_attributed_body(sample_blob)
+    assert "BluePill Selftest" in decoded, f"Typedstream decode failed: {decoded}"
+    info = engine.get_server_info()
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "selftest": "passed",
+                "version": VERSION,
+                "os_version": info["os_version"],
+                "private_api": info["private_api"],
+            }
+        )
+    )
+    return 0
+
+
+def run_status_or_doctor(engine: BluePillEngine, mode: str, as_json: bool) -> int:
+    info = engine.get_server_info()
+    db_exists = os.path.exists(engine.db_path)
+    db_readable = False
+    chat_count = 0
+    if db_exists:
+        try:
+            chats = engine.query_chats(limit=50)
+            db_readable = True
+            chat_count = len(chats)
+        except Exception:
+            db_readable = False
+    contacts = engine.query_contacts()
+    pins = engine.query_pinned_chats()
+    report = {
+        "status": "ok" if (db_readable or sys.platform != "darwin") else "degraded",
+        "mode": mode,
+        "version": VERSION,
+        "os_version": info["os_version"],
+        "chat_db_path": engine.db_path,
+        "chat_db_exists": db_exists,
+        "chat_db_readable": db_readable,
+        "recent_chats_sampled": chat_count,
+        "contacts_resolved": len(contacts),
+        "pinned_chats_resolved": len(pins),
+        "private_api_helper": info["private_api"],
+    }
+    if as_json or mode == "status":
+        print(json.dumps(report))
+    else:
+        print(f"BluePill Server Doctor (v{VERSION} on {info['os_version']})")
+        print(f"  [✓] chat.db readable:      {db_readable} ({engine.db_path}, {chat_count} sampled chats)")
+        print(f"  [✓] Contacts resolved:     {len(contacts)}")
+        print(f"  [✓] Pinned chats resolved: {len(pins)}")
+        print(f"  [✓] Private API helper:    {info['private_api']}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="bluepill-server",
         description="BluePill Headless macOS Relay Server + Web UI (v1.1.0)",
     )
+    parser.add_argument("command", nargs="?", default="serve", help="serve | status | doctor | stdio | selftest")
     parser.add_argument("--host", default=os.environ.get("BLUEPILL_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("BLUEPILL_PORT", "1235")))
     parser.add_argument("--password", default=os.environ.get("BLUEPILL_PASSWORD", ""))
     parser.add_argument("--db-path", default=os.environ.get("BLUEPILL_DB_PATH", ""))
     parser.add_argument("--stdio", action="store_true", help="Run JSON-RPC over stdin/stdout (Direct SSH mode)")
+    parser.add_argument("--selftest", action="store_true", help="Run built-in self-test suite and exit")
+    parser.add_argument("--json", action="store_true", help="Format status/doctor output as JSON")
     parser.add_argument("--version", action="store_true", help="Print version and exit")
     args = parser.parse_args()
 
-    if args.version:
+    if args.version or args.command == "version":
         print(f"bluepill-server {VERSION}")
         return 0
 
@@ -1601,7 +1664,13 @@ def main() -> int:
         password=args.password,
     )
 
-    if args.stdio:
+    if args.selftest or args.command == "selftest":
+        return run_selftest(engine)
+
+    if args.command in ("status", "doctor"):
+        return run_status_or_doctor(engine, args.command, args.json)
+
+    if args.stdio or args.command == "stdio":
         return run_stdio_loop(engine)
 
     BluePillHTTPHandler.engine = engine

@@ -7,7 +7,6 @@ class Bluepill < Formula
   license "MIT"
   head "https://github.com/nertwork/bluepill.git", branch: "main"
 
-  depends_on "python@3.12"
 
   def install
     bin.install "server/bluepill_server.py" => "bluepill-server"
