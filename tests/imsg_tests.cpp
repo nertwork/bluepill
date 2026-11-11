@@ -2979,6 +2979,43 @@ private slots:
         QCOMPARE(b.serverUrl(), QStringLiteral("https://bluepill.example.com"));
         QCOMPARE(b.webUiUrl(), QStringLiteral("https://bluepill.example.com/web"));
     }
+
+    void testOutboundTempGuidDeduplication() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_dedup.json")));
+
+        const QString chatGuid = QStringLiteral("iMessage;-;+15550199999");
+        QJsonObject chatObj;
+        chatObj.insert(QStringLiteral("guid"), chatGuid);
+        chatObj.insert(QStringLiteral("chatIdentifier"), QStringLiteral("+15550199999"));
+        chatObj.insert(QStringLiteral("style"), 45);
+
+        // 1. Ingest an optimistic temp-* message (simulating synthetic send_text response)
+        QJsonObject tempMsg;
+        tempMsg.insert(QStringLiteral("guid"), QStringLiteral("temp-11111111-2222-3333-4444-555555555555"));
+        tempMsg.insert(QStringLiteral("text"), QStringLiteral("Deduplicated outbound test message"));
+        tempMsg.insert(QStringLiteral("isFromMe"), true);
+        tempMsg.insert(QStringLiteral("dateCreated"), 1794368786000LL);
+        tempMsg.insert(QStringLiteral("chats"), QJsonArray{chatObj});
+        b.ingestMessagesForTest(QJsonArray{tempMsg}, false);
+        b.selectChat(chatGuid);
+        QCOMPARE(b.messages().size(), 1);
+
+        // 2. Poll arrives with real chat.db message GUID (even without tempGuid) -> replaces temp-* in-place (still 1 bubble!)
+        QJsonObject realMsg;
+        realMsg.insert(QStringLiteral("guid"), QStringLiteral("p:0/8A9D1234-5678-49AB-CDEF-0123456789AB"));
+        realMsg.insert(QStringLiteral("text"), QStringLiteral("Deduplicated outbound test message"));
+        realMsg.insert(QStringLiteral("isFromMe"), true);
+        realMsg.insert(QStringLiteral("dateCreated"), 1794368786500LL);
+        realMsg.insert(QStringLiteral("chats"), QJsonArray{chatObj});
+        b.ingestMessagesForTest(QJsonArray{realMsg}, false);
+
+        QCOMPARE(b.messages().size(), 1);
+        QCOMPARE(b.messages().first().toMap().value(QStringLiteral("guid")).toString(),
+                 QStringLiteral("p:0/8A9D1234-5678-49AB-CDEF-0123456789AB"));
+    }
 };
 
 QTEST_MAIN(ImsgTests)

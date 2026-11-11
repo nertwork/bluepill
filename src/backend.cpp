@@ -3755,6 +3755,79 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ms
     }
 
     auto &chatMap = m_chatMessagesCache[chatGuid];
+    const bool isTempGuid = msgGuid.startsWith(QStringLiteral("temp-")) || msgGuid.startsWith(QStringLiteral("bp-"));
+    const QString explicitTempGuid = msg.value(QStringLiteral("tempGuid")).toString().trimmed();
+    const bool isFromMe = msg.value(QStringLiteral("isFromMe")).toBool();
+    const QString incomingText = extractMessageText(msg).trimmed();
+    const qint64 incomingDc = msg.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+    const bool incomingHasAtt = !incomingAtts.isEmpty();
+
+    if (isFromMe) {
+        if (!isTempGuid) {
+            // Real server message arrived: evict any matching optimistic temp-*/bp-* entry from chatMap
+            QStringList tempKeysToRemove;
+            if (!explicitTempGuid.isEmpty() && explicitTempGuid != msgGuid && chatMap.contains(explicitTempGuid)) {
+                tempKeysToRemove.append(explicitTempGuid);
+            }
+            for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
+                const QString k = it.key();
+                if (k == msgGuid || tempKeysToRemove.contains(k)) continue;
+                const bool kIsTemp = k.startsWith(QStringLiteral("temp-")) || k.startsWith(QStringLiteral("bp-"));
+                const QString kTempGuid = it.value().value(QStringLiteral("tempGuid")).toString().trimmed();
+                if (!explicitTempGuid.isEmpty() && (k == explicitTempGuid || kTempGuid == explicitTempGuid)) {
+                    tempKeysToRemove.append(k);
+                    continue;
+                }
+                if (!kIsTemp) continue;
+                if (!it.value().value(QStringLiteral("isFromMe")).toBool()) continue;
+                const QString kText = extractMessageText(it.value()).trimmed();
+                const qint64 kDc = it.value().value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+                const bool kHasAtt = !it.value().value(QStringLiteral("attachments")).toArray().isEmpty();
+                const bool closeInTime = (incomingDc == 0 || kDc == 0 || qAbs(incomingDc - kDc) <= 120000LL);
+                if (closeInTime && ((!incomingText.isEmpty() && kText == incomingText) || (incomingHasAtt && kHasAtt && kText == incomingText))) {
+                    tempKeysToRemove.append(k);
+                }
+            }
+            for (const QString &tk : tempKeysToRemove) {
+                chatMap.remove(tk);
+                m_seenMessageGuids.remove(tk);
+            }
+            if (chatGuid == m_selectedChatGuid) {
+                for (int i = 0; i < m_messages.size(); ++i) {
+                    QVariantMap vm = m_messages[i].toMap();
+                    const QString vg = vm.value(QStringLiteral("guid")).toString();
+                    if (vg == explicitTempGuid || tempKeysToRemove.contains(vg) ||
+                        ((vg.startsWith(QStringLiteral("temp-")) || vg.startsWith(QStringLiteral("bp-"))) &&
+                         vm.value(QStringLiteral("isFromMe")).toBool() &&
+                         ((!incomingText.isEmpty() && vm.value(QStringLiteral("text")).toString().trimmed() == incomingText) ||
+                          (incomingHasAtt && (vm.value(QStringLiteral("hasImageAttachment")).toBool() || vm.value(QStringLiteral("hasFileAttachment")).toBool()))))) {
+                        vm.insert(QStringLiteral("guid"), msgGuid);
+                        vm.insert(QStringLiteral("receiptText"), QStringLiteral("Delivered"));
+                        m_messages[i] = vm;
+                    }
+                }
+            }
+        } else {
+            // Incoming message has a synthetic temp-*/bp-* GUID: skip caching if the real server message is already cached
+            for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
+                const QString k = it.key();
+                if (k.startsWith(QStringLiteral("temp-")) || k.startsWith(QStringLiteral("bp-"))) continue;
+                if (!it.value().value(QStringLiteral("isFromMe")).toBool()) continue;
+                const QString kTempGuid = it.value().value(QStringLiteral("tempGuid")).toString().trimmed();
+                if (kTempGuid == msgGuid) {
+                    return;
+                }
+                const QString kText = extractMessageText(it.value()).trimmed();
+                const qint64 kDc = it.value().value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+                const bool kHasAtt = !it.value().value(QStringLiteral("attachments")).toArray().isEmpty();
+                const bool closeInTime = (incomingDc == 0 || kDc == 0 || qAbs(incomingDc - kDc) <= 120000LL);
+                if (closeInTime && ((!incomingText.isEmpty() && kText == incomingText) || (incomingHasAtt && kHasAtt && kText == incomingText))) {
+                    return;
+                }
+            }
+        }
+    }
+
     if (!chatMap.contains(msgGuid)) {
         chatMap.insert(msgGuid, msg);
         return;
@@ -3822,18 +3895,38 @@ void Backend::rebuildSelectedChatMessages() {
     QStringList missingPreviews;
     QVariantList nextMessages = buildMessageListFromApi(rawDesc, m_contactNames, m_attachmentPaths, &missingAtts, m_linkPreviewCache, &missingPreviews, m_deletedMessageGuids);
 
-    // Retain any pending optimistic messages (temp-*) from m_messages if their text is not yet in nextMessages
+    // Retain any pending optimistic messages (temp-*) from m_messages if their text/attachment is not yet in nextMessages
+    const qint64 nowRebuildMs = QDateTime::currentMSecsSinceEpoch();
     for (const QVariant &curr : m_messages) {
         const QVariantMap cm = curr.toMap();
         const QString g = cm.value(QStringLiteral("guid")).toString();
-        if (g.startsWith(QStringLiteral("temp-"))) {
+        if (g.startsWith(QStringLiteral("temp-")) || g.startsWith(QStringLiteral("bp-"))) {
+            const qint64 optTs = cm.value(QStringLiteral("optimisticCreatedAtMs")).toLongLong();
+            if (optTs > 0 && (nowRebuildMs - optTs) > 45000LL) {
+                continue;
+            }
             const QString txt = cm.value(QStringLiteral("text")).toString().trimmed();
+            const bool cmHasAtt = cm.value(QStringLiteral("hasImageAttachment")).toBool() ||
+                                  cm.value(QStringLiteral("hasFileAttachment")).toBool();
             bool echoed = false;
             for (const QVariant &nxt : nextMessages) {
-                if (nxt.toMap().value(QStringLiteral("isFromMe")).toBool() &&
-                    nxt.toMap().value(QStringLiteral("text")).toString().trimmed() == txt) {
+                const QVariantMap nm = nxt.toMap();
+                if (nm.value(QStringLiteral("guid")).toString() == g) {
                     echoed = true;
                     break;
+                }
+                if (nm.value(QStringLiteral("isFromMe")).toBool()) {
+                    const QString nTxt = nm.value(QStringLiteral("text")).toString().trimmed();
+                    const bool nHasAtt = nm.value(QStringLiteral("hasImageAttachment")).toBool() ||
+                                         nm.value(QStringLiteral("hasFileAttachment")).toBool();
+                    if (!txt.isEmpty() && nTxt == txt) {
+                        echoed = true;
+                        break;
+                    }
+                    if (cmHasAtt && nHasAtt && nTxt == txt) {
+                        echoed = true;
+                        break;
+                    }
                 }
             }
             if (!echoed) {
@@ -3996,10 +4089,28 @@ void Backend::reconcileChatMessages(const QString &chatGuid, const QJsonArray &s
     if (m_chatMessagesCache.contains(chatGuid)) {
         auto &chatMap = m_chatMessagesCache[chatGuid];
         const bool serverReturnedCompleteHistory = isFullWindow && (serverMessages.size() < 150);
+        const qint64 nowRecMs = QDateTime::currentMSecsSinceEpoch();
         QStringList toRemove;
         for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
             const QString cachedGuid = it.key();
-            if (cachedGuid.startsWith(QStringLiteral("temp-"))) continue;
+            if (cachedGuid.startsWith(QStringLiteral("temp-")) || cachedGuid.startsWith(QStringLiteral("bp-"))) {
+                const qint64 cachedTs = it.value().value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+                const QString cachedTxt = extractMessageText(it.value()).trimmed();
+                bool matchedReal = false;
+                for (const QJsonValue &sv : serverMessages) {
+                    const QJsonObject sObj = sv.toObject();
+                    if (!sObj.value(QStringLiteral("isFromMe")).toBool()) continue;
+                    if (sObj.value(QStringLiteral("tempGuid")).toString() == cachedGuid ||
+                        (!cachedTxt.isEmpty() && extractMessageText(sObj).trimmed() == cachedTxt)) {
+                        matchedReal = true;
+                        break;
+                    }
+                }
+                if (matchedReal || (cachedTs > 0 && (nowRecMs - cachedTs) > 45000LL)) {
+                    toRemove.append(cachedGuid);
+                }
+                continue;
+            }
             if (m_deletedMessageGuids.contains(cachedGuid) || isMessageDeletedOrRetracted(it.value())) {
                 toRemove.append(cachedGuid);
                 continue;
@@ -4740,6 +4851,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     optimistic.insert(QStringLiteral("hasFileAttachment"), false);
     optimistic.insert(QStringLiteral("receiptText"), m_demoMode ? QStringLiteral("Delivered") : QStringLiteral("Sending..."));
     optimistic.insert(QStringLiteral("replyToGuid"), replyToGuid);
+    optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), QDateTime::currentMSecsSinceEpoch());
     m_messages.append(optimistic);
     emit messagesChanged();
 
@@ -4795,7 +4907,8 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
             bool replaced = false;
             for (int i = 0; i < m_messages.size(); ++i) {
                 QVariantMap m = m_messages[i].toMap();
-                if (m.value(QStringLiteral("guid")).toString() == tempGuid) {
+                const QString curG = m.value(QStringLiteral("guid")).toString();
+                if (curG == tempGuid || curG == realGuid) {
                     m.insert(QStringLiteral("guid"), realGuid);
                     m.insert(QStringLiteral("receiptText"), QStringLiteral("Delivered"));
                     m_messages[i] = m;
@@ -5452,6 +5565,7 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
         optimistic.insert(QStringLiteral("imageAttachmentCount"), 0);
     }
     optimistic.insert(QStringLiteral("receiptText"), m_demoMode ? QStringLiteral("Delivered") : QStringLiteral("Sending..."));
+    optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), QDateTime::currentMSecsSinceEpoch());
     emit aboutToChangeMessages();
     m_messages.append(optimistic);
     emit messagesChanged();
@@ -5471,6 +5585,7 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     if (!caption.trimmed().isEmpty()) addTextPart("message", caption.trimmed());
     QFile *file = new QFile(fi.absoluteFilePath(), multiPart);
     if (!file->open(QIODevice::ReadOnly)) { delete multiPart; return; }
+    const QString absLocalPath = fi.absoluteFilePath();
     QHttpPart filePart;
     filePart.setHeader(QNetworkRequest::ContentDispositionHeader,
                        QVariant(QStringLiteral("form-data; name=\"attachment\"; filename=\"%1\"").arg(fi.fileName())));
@@ -5481,10 +5596,55 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     req.setTransferTimeout(45000);
     QNetworkReply *reply = m_sendNam.post(req, multiPart);
     multiPart->setParent(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid, tempGuid, absLocalPath]() {
         reply->deleteLater();
         if (reply->error() == QNetworkReply::NoError) {
+            const QByteArray respBytes = reply->readAll();
+            const QJsonObject dataObj = QJsonDocument::fromJson(respBytes).object().value(QStringLiteral("data")).toObject();
+            const QString realGuid = dataObj.value(QStringLiteral("guid")).toString();
+            const QJsonArray atts = dataObj.value(QStringLiteral("attachments")).toArray();
+            for (const QJsonValue &av : atts) {
+                const QString ag = av.toObject().value(QStringLiteral("guid")).toString();
+                if (!ag.isEmpty() && QFileInfo::exists(absLocalPath)) {
+                    m_attachmentPaths.insert(ag, absLocalPath);
+                }
+            }
+            if (!realGuid.isEmpty()) {
+                m_seenMessageGuids.insert(realGuid);
+                cacheMessageForChat(chatGuid, dataObj);
+            }
+            bool updatedOpt = false;
+            for (int i = 0; i < m_messages.size(); ++i) {
+                QVariantMap m = m_messages[i].toMap();
+                if (m.value(QStringLiteral("guid")).toString() == tempGuid ||
+                    (!realGuid.isEmpty() && m.value(QStringLiteral("guid")).toString() == realGuid)) {
+                    if (!realGuid.isEmpty()) {
+                        m.insert(QStringLiteral("guid"), realGuid);
+                    }
+                    m.insert(QStringLiteral("receiptText"), QStringLiteral("Delivered"));
+                    m_messages[i] = m;
+                    updatedOpt = true;
+                    break;
+                }
+            }
+            if (updatedOpt) {
+                emit messagesChanged();
+            } else {
+                rebuildSelectedChatMessages();
+            }
+            saveMessagesCache();
             loadChatMessages(chatGuid);
+        } else {
+            for (int i = 0; i < m_messages.size(); ++i) {
+                QVariantMap m = m_messages[i].toMap();
+                if (m.value(QStringLiteral("guid")).toString() == tempGuid) {
+                    m.insert(QStringLiteral("receiptText"), QStringLiteral("Not Delivered"));
+                    m_messages[i] = m;
+                    emit messagesChanged();
+                    break;
+                }
+            }
+            emit toastMessage(QStringLiteral("⚠ Failed to send attachment"));
         }
     });
 }
