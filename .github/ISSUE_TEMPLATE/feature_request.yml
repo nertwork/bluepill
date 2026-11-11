@@ -1,0 +1,39 @@
+name: Feature Request
+description: Propose a new feature, Qt6/QML UI refinement, keyboard shortcut, or CLI flag
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea to make **`imsg`** better on Linux / Omarchy / Hyprland? Share the details below!
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Component / Area
+      options:
+        - Qt6/QML Desktop UI & Keyboard Navigation
+        - BlueBubbles REST / Socket.IO v4 Engine
+        - Media Attachments (HEIC/AVIF/Video/Stickers)
+        - Omarchy Theme / Wayland / Notifications
+        - Headless CLI (`imsg status`, `imsg recent`, `imsg send`)
+        - AUR / Packaging / Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Use Case
+      description: What workflow or problem does this feature solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: How should it work in the UI, config, or CLI?
+    validations:
+      required: true

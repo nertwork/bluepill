@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: BlueBubbles macOS Relay Setup Guide
+    url: https://github.com/nertwork/imsg/blob/main/docs/BLUEBUBBLES_SETUP_GUIDE.md
+    about: Step-by-step guide to configuring macOS Sequoia, Private API, iCloud Messages, and TLS proxy
+  - name: Omarchy Community Showcase & Discussion
+    url: https://github.com/omacom/omarchy/discussions/18422
+    about: Discuss Omarchy Linux / Hyprland integration and community setups
+  - name: Security Vulnerability Disclosure
+    url: https://github.com/nertwork/imsg/blob/main/SECURITY.md
+    about: Report security vulnerabilities privately per SECURITY.md

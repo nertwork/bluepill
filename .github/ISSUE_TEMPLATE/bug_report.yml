@@ -1,0 +1,63 @@
+name: Bug Report
+description: Report a bug, crash, UI layout issue, or BlueBubbles relay sync problem in imsg
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue with **`imsg`**!
+        > **Privacy & Zero-PII Notice:** Never paste real phone numbers, email addresses, API passwords, or personal message contents. Redact handles with `555` numbers (`+14155550142`) or `user@example.com`.
+
+  - type: input
+    id: version
+    attributes:
+      label: imsg Version & Installation Method
+      description: Output of `pacman -Qi imsg` or git commit SHA
+      placeholder: "imsg 1.0.0-1 (AUR / makepkg)"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Linux Distro, Wayland Compositor & Omarchy Theme
+      description: e.g., Arch Linux / Omarchy, Hyprland, KDE Plasma, GNOME
+      placeholder: "Arch Linux (Omarchy) · Hyprland · Tokyo Night"
+    validations:
+      required: true
+
+  - type: input
+    id: relay
+    attributes:
+      label: BlueBubbles Server & macOS Version
+      description: Output of `imsg status --json` (redact any custom internal domains if private)
+      placeholder: "BlueBubbles Server v1.9.12 · macOS 15.7.7 Sequoia · Private API enabled"
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Clear description of the bug and expected vs. actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. Launch `imsg`
+        2. Select a group thread with HEIC attachments
+        3. Click reaction pill...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "`imsg status --json` & Journal Logs"
+      description: Paste sanitized output of `imsg status --json` or `journalctl --user -u imsg -n 40`
+      render: json

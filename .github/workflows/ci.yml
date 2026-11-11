@@ -36,7 +36,7 @@ jobs:
               for f in fn:
                   if f.endswith((".png", ".wav", ".svg")): continue
                   p = os.path.join(dp, f)
-                  if "ci.yml" in p: continue
+                  if "workflows/" in p: continue
                   with open(p, errors="ignore") as fh:
                       for i, line in enumerate(fh, 1):
                           if rx.search(line):

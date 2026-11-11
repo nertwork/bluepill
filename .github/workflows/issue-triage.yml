@@ -1,0 +1,88 @@
+name: Automated Issue Triage & Labeling
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+  models: read
+
+jobs:
+  triage-issue:
+    name: Auto-Classify & Label Issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Classify Issue & Apply Labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          python3 - << 'PY'
+          import json, os, urllib.request
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["REPO"]
+          num = os.environ["ISSUE_NUMBER"]
+          title = (os.environ.get("ISSUE_TITLE") or "").lower()
+          body = (os.environ.get("ISSUE_BODY") or "").lower()
+          text = f"{title}\n{body}"
+
+          labels = set()
+          if any(k in text for k in ["[bug]", "crash", "segfault", "broken", "fail", "overlap", "clip", "bug"]):
+              labels.add("bug")
+          if any(k in text for k in ["[feature]", "enhancement", "request", "support for", "add "]):
+              labels.add("enhancement")
+          if any(k in text for k in ["qml", "header", "window", "split", "photo viewer", "button", "modal", "font", "theme"]):
+              labels.add("ui/qml")
+          if any(k in text for k in ["bluebubbles", "socket.io", "private api", "sequoia", "chat.db", "relay", "webhook", "sms", "rcs"]):
+              labels.add("bluebubbles-relay")
+          if any(k in text for k in ["wayland", "hyprland", "omarchy", "mako", "dnd", "tiling"]):
+              labels.add("wayland/hyprland")
+          if any(k in text for k in ["aur", "pkgbuild", "pacman", "makepkg", "yay", "paru"]):
+              labels.add("aur-packaging")
+          if any(k in text for k in [" readme", "guide", "docs", "documentation"]):
+              labels.add("documentation")
+
+          if labels:
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/issues/{num}/labels",
+                  data=json.dumps({"labels": sorted(labels)}).encode(),
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "Content-Type": "application/json",
+                      "User-Agent": "imsg-issue-triage"
+                  },
+                  method="POST"
+              )
+              with urllib.request.urlopen(req, timeout=15) as r:
+                  print("Applied labels:", sorted(labels), r.status)
+
+          if os.environ.get("EVENT_ACTION") == "opened" and "bug" in labels and "serverversion" not in text and "imsg status" not in text:
+              comment = (
+                  "👋 Thanks for filing this bug report on **`imsg`**!\n\n"
+                  "To help us reproduce and triage this quickly, please share the sanitized output of:\n"
+                  "```bash\n"
+                  "imsg status --json\n"
+                  "```\n"
+                  "*(Note: `imsg status --json` automatically omits passwords/tokens; please ensure any custom private domains or phone numbers are redacted.)*"
+              )
+              req_c = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/issues/{num}/comments",
+                  data=json.dumps({"body": comment}).encode(),
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "Content-Type": "application/json",
+                      "User-Agent": "imsg-issue-triage"
+                  },
+                  method="POST"
+              )
+              with urllib.request.urlopen(req_c, timeout=15) as rc:
+                  print("Posted triage diagnostic comment:", rc.status)
+          PY

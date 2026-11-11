@@ -1,0 +1,156 @@
+name: AI PR Review & Static Analysis
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  models: read
+
+jobs:
+  ai-review-and-static-audit:
+    name: Static Analysis (cppcheck / qmllint) & AI Code Review
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install Analysis & Build Tools
+        run: |
+          pacman -Syu --noconfirm base-devel git qt6-base qt6-declarative qt6-svg cppcheck python curl
+
+      - name: Checkout Pull Request
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run C++20 Static Analysis (cppcheck) & Qt6 QML Lint (qmllint)
+        id: static_analysis
+        run: |
+          cppcheck --enable=warning,performance,portability --std=c++20 --quiet src/ 2> /tmp/cppcheck.txt || true
+          /usr/lib/qt6/bin/qmllint src/Main.qml > /tmp/qmllint.txt 2>&1 || true
+          echo "=== cppcheck ==="
+          cat /tmp/cppcheck.txt
+          echo "=== qmllint ==="
+          cat /tmp/qmllint.txt
+
+      - name: Run AI Pull Request Reviewer (GitHub Models + Rubric Audit)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - << 'PY'
+          import json, os, re, subprocess, urllib.request, urllib.error
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["REPO"]
+          pr_num = os.environ["PR_NUMBER"]
+          base_sha = os.environ["BASE_SHA"]
+          head_sha = os.environ["HEAD_SHA"]
+
+          diff = subprocess.check_output(["git", "diff", f"{base_sha}...{head_sha}"], text=True, errors="ignore")
+          changed_files = subprocess.check_output(["git", "diff", "--name-only", f"{base_sha}...{head_sha}"], text=True, errors="ignore").strip().splitlines()
+          cppcheck_out = open("/tmp/cppcheck.txt", errors="ignore").read().strip() if os.path.exists("/tmp/cppcheck.txt") else ""
+
+          # 1. Deterministic Security, PII & Architecture Rubric Checks
+          findings = []
+          forbidden_rx = re.compile("|".join(["bluebubbles\\." + "(ilb|home)", "home\\." + "nertwork", "172\\." + "28\\.", "jf" + "arr", "Spon" + "see", "Amber" + "wood"]), re.I)
+          for line in diff.splitlines():
+              if line.startswith("+") and not line.startswith("+++"):
+                  if forbidden_rx.search(line):
+                      findings.append(f"- ⚠️ **Zero-PII / Internal Host Check:** Forbidden string detected in added line: `{line[:100]}`")
+          if any(f.startswith("src/") for f in changed_files) and not any("imsg_tests.cpp" in f for f in changed_files):
+              findings.append("- 💡 **Unit Test Coverage Reminder:** `src/` was modified without a corresponding test update in `tests/imsg_tests.cpp`. Consider adding a regression test.")
+          if cppcheck_out:
+              findings.append(f"- 🔍 **`cppcheck` Diagnostics:**\n```text\n{cppcheck_out[:1200]}\n```")
+          if not findings:
+              findings.append("- ✅ **Deterministic Rubric Passed:** Zero PII leaks, clean `cppcheck` static analysis, and matching test coverage.")
+
+          # 2. Query GitHub Models API (openai/gpt-4o-mini) for Deep Architecture Review
+          ai_summary = ""
+          prompt = f"""You are the automated Staff C++20 & Qt6/QML Architect reviewing Pull Request #{pr_num} on {repo} (`imsg` — native Linux iMessage/SMS/RCS client).
+          Review the following git diff concisely (max 250 words) across 4 pillars:
+          1. C++20 & Qt6 Memory / Signal Safety (`QNetworkReply::deleteLater`, pointer lifetimes, QML property bindings).
+          2. BlueBubbles REST & Socket.IO v4 Resilience (HTTP pool isolation, error handling).
+          3. Responsive QML Layout & Omarchy Theme Compatibility.
+          4. Unit Test Coverage & Edge Cases.
+
+          Changed files: {changed_files}
+          Diff (truncated to 12000 chars):
+          {diff[:12000]}
+          """
+          try:
+              req = urllib.request.Request(
+                  "https://models.github.ai/inference/chat/completions",
+                  data=json.dumps({
+                      "model": "openai/gpt-4o-mini",
+                      "messages": [
+                          {"role": "system", "content": "Provide a concise, high-signal markdown code review."},
+                          {"role": "user", "content": prompt}
+                      ],
+                      "temperature": 0.2,
+                      "max_tokens": 600
+                  }).encode(),
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                      "User-Agent": "imsg-ai-pr-reviewer"
+                  },
+                  method="POST"
+              )
+              with urllib.request.urlopen(req, timeout=25) as r:
+                  resp = json.loads(r.read().decode())
+                  ai_summary = resp["choices"][0]["message"]["content"].strip()
+          except Exception as e:
+              ai_summary = f"*(GitHub Models LLM inference note: `{e}` — deterministic static & architectural rubric completed above.)*"
+
+          marker = "<!-- imsg-ai-pr-review -->"
+          body = f"""{marker}
+          ## 🤖 `imsg` Automated AI Architecture & Static Review
+
+          **Reviewed Commit:** `{head_sha[:7]}` • **Changed Files:** `{len(changed_files)}`
+
+          ### 1. Static & Zero-PII Rubric Audit
+          {chr(10).join(findings)}
+
+          ### 2. AI Architectural Review (C++20 / Qt6 / QML)
+          {ai_summary}
+          """
+
+          # Post or update sticky comment on PR
+          comments_url = f"https://api.github.com/repos/{repo}/issues/{pr_num}/comments"
+          req_get = urllib.request.Request(comments_url, headers={
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "imsg-ai-pr-reviewer"
+          })
+          existing_id = None
+          with urllib.request.urlopen(req_get, timeout=15) as r:
+              for c in json.loads(r.read().decode()):
+                  if marker in (c.get("body") or ""):
+                      existing_id = c["id"]
+                      break
+
+          target_url = f"https://api.github.com/repos/{repo}/issues/comments/{existing_id}" if existing_id else comments_url
+          method = "PATCH" if existing_id else "POST"
+          req_post = urllib.request.Request(
+              target_url,
+              data=json.dumps({"body": body}).encode(),
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "Content-Type": "application/json",
+                  "User-Agent": "imsg-ai-pr-reviewer"
+              },
+              method=method
+          )
+          with urllib.request.urlopen(req_post, timeout=15) as r:
+              print("Posted AI PR review comment:", r.status)
+          PY
