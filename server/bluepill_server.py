@@ -2521,6 +2521,9 @@ def run_selftest(engine: BluePillEngine) -> int:
     sample_blob = b"streamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84\x12NSAttributedString\x00\x84\x84\x08NSObject\x00\x85\x92\x84\x84\x84\x08NSString\x01\x94\x84\x01+\x11BluePill Selftest\x86"
     decoded = decode_attributed_body(sample_blob)
     assert "BluePill Selftest" in decoded, f"Typedstream decode failed: {decoded}"
+    large_multiline = "\n".join([f"Paragraph {i}: Multi-line schedule update with emojis 🎉🚀 and details for the group thread." for i in range(1, 8)])
+    large_blob = encode_typedstream_nsattributedstring(large_multiline) + b"\x84\x01i\x01\x92\x84\x84\x84\x0cNSDictionary\x00\x86"
+    assert decode_attributed_body(large_blob) == large_multiline, "Large 0x81 typedstream decode mismatch"
 
     # Verify HTTP multipart attachment upload & server logs endpoints in ephemeral local server
     test_eng = BluePillEngine(

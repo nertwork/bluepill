@@ -3433,10 +3433,25 @@ QVariantList Backend::buildMessageListFromApi(
     QHash<QString, QList<ReactionEntry>> reactionsByParent;
     QHash<QString, QString> messageTextByGuid;
     QHash<QString, QString> messageSenderByGuid;
+    QHash<QString, QString> resolvedReactionTargetByGuid;
+
+    struct SeenMsgMeta {
+        QString guid;
+        QString normalizedText;
+        bool hasAttachments = false;
+    };
+    QList<SeenMsgMeta> seenMessages;
+
+    auto collapseWhitespace = [](const QString &s) -> QString {
+        QString out = s;
+        out.replace(QRegularExpression(QStringLiteral("[\\r\\n\\t]+")), QStringLiteral(" "));
+        return out.simplified();
+    };
 
     for (const QJsonObject &m : chronological) {
         const QString guid = m.value(QStringLiteral("guid")).toString();
-        const QString assocGuid = normalizeAssociatedGuid(m.value(QStringLiteral("associatedMessageGuid")).toString());
+        const QString normGuid = normalizeAssociatedGuid(guid);
+        QString assocGuid = normalizeAssociatedGuid(m.value(QStringLiteral("associatedMessageGuid")).toString());
         const QString assocType = m.value(QStringLiteral("associatedMessageType")).toVariant().toString();
         const QString rawText = extractMessageText(m);
         bool isRemoval = false;
@@ -3445,7 +3460,53 @@ QVariantList Backend::buildMessageListFromApi(
         const bool isFromMe = m.value(QStringLiteral("isFromMe")).toBool();
         const QString senderName = resolveSenderForMessage(m);
 
+        if (assocGuid.isEmpty() && !emoji.isEmpty()) {
+            const QString threadOrig = normalizeAssociatedGuid(m.value(QStringLiteral("threadOriginatorGuid")).toString());
+            if (!threadOrig.isEmpty() && messageTextByGuid.contains(threadOrig)) {
+                assocGuid = threadOrig;
+            } else {
+                const QString tr = rawText.trimmed();
+                const bool isMediaTapback = tr.endsWith(QStringLiteral("an image"))
+                    || tr.endsWith(QStringLiteral("an attachment"))
+                    || tr.endsWith(QStringLiteral("a photo"))
+                    || tr.endsWith(QStringLiteral("a movie"));
+                if (isMediaTapback) {
+                    for (int i = seenMessages.size() - 1; i >= 0; --i) {
+                        if (seenMessages[i].hasAttachments) {
+                            assocGuid = seenMessages[i].guid;
+                            break;
+                        }
+                    }
+                } else {
+                    int qStart = tr.indexOf(QChar(0x201C)); // “
+                    int qEnd = tr.lastIndexOf(QChar(0x201D)); // ”
+                    if (qStart < 0 || qEnd <= qStart) {
+                        qStart = tr.indexOf(QLatin1Char('"'));
+                        qEnd = tr.lastIndexOf(QLatin1Char('"'));
+                    }
+                    if (qStart >= 0 && qEnd > qStart) {
+                        QString quoted = collapseWhitespace(tr.mid(qStart + 1, qEnd - qStart - 1));
+                        if (quoted.endsWith(QChar(0x2026))) quoted.chop(1);
+                        else if (quoted.endsWith(QStringLiteral("..."))) quoted.chop(3);
+                        quoted = quoted.trimmed();
+                        if (!quoted.isEmpty()) {
+                            for (int i = seenMessages.size() - 1; i >= 0; --i) {
+                                const QString &cand = seenMessages[i].normalizedText;
+                                if (!cand.isEmpty() && (cand == quoted || cand.startsWith(quoted) || quoted.startsWith(cand))) {
+                                    assocGuid = seenMessages[i].guid;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if (!assocGuid.isEmpty() && !emoji.isEmpty()) {
+            if (!guid.isEmpty()) {
+                resolvedReactionTargetByGuid.insert(guid, assocGuid);
+            }
             auto &list = reactionsByParent[assocGuid];
             if (isRemoval) {
                 for (int i = list.size() - 1; i >= 0; --i) {
@@ -3458,8 +3519,17 @@ QVariantList Backend::buildMessageListFromApi(
                 list.append({emoji, senderName, isFromMe});
             }
         } else if (!guid.isEmpty()) {
-            messageTextByGuid.insert(guid, rawText);
+            const bool hasAtts = !m.value(QStringLiteral("attachments")).toArray().isEmpty();
+            const QString previewText = (!rawText.trimmed().isEmpty())
+                ? collapseWhitespace(rawText)
+                : (hasAtts ? QStringLiteral("📷 Attachment") : QString());
+            messageTextByGuid.insert(guid, previewText);
             messageSenderByGuid.insert(guid, senderName);
+            if (!normGuid.isEmpty() && normGuid != guid) {
+                messageTextByGuid.insert(normGuid, previewText);
+                messageSenderByGuid.insert(normGuid, senderName);
+            }
+            seenMessages.append({normGuid.isEmpty() ? guid : normGuid, collapseWhitespace(rawText), hasAtts});
         }
     }
 
@@ -3486,12 +3556,14 @@ QVariantList Backend::buildMessageListFromApi(
         const QString text = extractMessageText(m);
 
         // Skip tapback messages from main timeline if they belong to a parent
-        if (!assocGuid.isEmpty() && !mapReactionEmoji(assocType, text).isEmpty()) {
+        const QString effectiveAssocGuid = !assocGuid.isEmpty() ? assocGuid : resolvedReactionTargetByGuid.value(guid);
+        if (!effectiveAssocGuid.isEmpty() && !mapReactionEmoji(assocType, text).isEmpty()) {
             continue;
         }
 
         const QJsonArray atts = m.value(QStringLiteral("attachments")).toArray();
         if (text.isEmpty() && atts.isEmpty()) continue;
+        if (atts.isEmpty() && text.trimmed() == QStringLiteral("Replied to a message:")) continue;
 
         const qint64 dateCreated = m.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
         const bool isFromMe = m.value(QStringLiteral("isFromMe")).toBool();
@@ -3519,12 +3591,13 @@ QVariantList Backend::buildMessageListFromApi(
 
         // Group reactions by emoji
         QVariantList reactionPills;
-        if (reactionsByParent.contains(guid)) {
+        const QString lookupReactionGuid = reactionsByParent.contains(guid) ? guid : normalizeAssociatedGuid(guid);
+        if (reactionsByParent.contains(lookupReactionGuid)) {
             QHash<QString, int> counts;
             QHash<QString, bool> fromMeMap;
             QHash<QString, QStringList> sendersMap;
             QStringList order;
-            for (const ReactionEntry &re : reactionsByParent.value(guid)) {
+            for (const ReactionEntry &re : reactionsByParent.value(lookupReactionGuid)) {
                 if (!counts.contains(re.emoji)) order.append(re.emoji);
                 if (re.fromMe) fromMeMap[re.emoji] = true;
                 const QString effectiveSender = re.sender.trimmed().isEmpty() ? QStringLiteral("Unknown") : re.sender.trimmed();
@@ -3632,12 +3705,16 @@ QVariantList Backend::buildMessageListFromApi(
         }
 
         // Thread reply originator
-        const QString replyGuid = m.value(QStringLiteral("threadOriginatorGuid")).toString();
+        const QString rawReplyGuid = m.value(QStringLiteral("threadOriginatorGuid")).toString().trimmed();
+        const QString replyGuid = normalizeAssociatedGuid(rawReplyGuid);
         QString replyToText;
         QString replyToSender;
         if (!replyGuid.isEmpty() && messageTextByGuid.contains(replyGuid)) {
-            replyToText = messageTextByGuid.value(replyGuid);
+            replyToText = collapseWhitespace(messageTextByGuid.value(replyGuid));
             replyToSender = messageSenderByGuid.value(replyGuid);
+        } else if (!rawReplyGuid.isEmpty() && messageTextByGuid.contains(rawReplyGuid)) {
+            replyToText = collapseWhitespace(messageTextByGuid.value(rawReplyGuid));
+            replyToSender = messageSenderByGuid.value(rawReplyGuid);
         }
 
         QString service = m.value(QStringLiteral("service")).toString();

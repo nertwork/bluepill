@@ -47,6 +47,7 @@ class Backend : public QObject {
     Q_PROPERTY(QString serverStatus READ serverStatus NOTIFY statusChanged)
     Q_PROPERTY(QString serverUrl READ serverUrl NOTIFY configChanged)
     Q_PROPERTY(QString secondaryServerUrl READ secondaryServerUrl NOTIFY configChanged)
+    Q_PROPERTY(QString serverPassword READ serverPassword NOTIFY configChanged)
     Q_PROPERTY(bool hasPasswordConfigured READ hasPasswordConfigured NOTIFY configChanged)
     Q_PROPERTY(bool needsSetup READ needsSetup NOTIFY configChanged)
     Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY filterChanged)
@@ -85,6 +86,7 @@ public:
     QString serverStatus() const { return m_serverStatus; }
     QString serverUrl() const { return m_serverUrl; }
     QString secondaryServerUrl() const { return m_secondaryServerUrl; }
+    QString serverPassword() const { return m_password; }
     bool hasPasswordConfigured() const { return !m_password.isEmpty(); }
     bool needsSetup() const { return !m_demoMode && (m_serverUrl.isEmpty() || (!m_serverUrl.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive) && m_password.isEmpty())); }
     QString searchQuery() const { return m_searchQuery; }

@@ -3016,6 +3016,82 @@ private slots:
         QCOMPARE(b.messages().first().toMap().value(QStringLiteral("guid")).toString(),
                  QStringLiteral("p:0/8A9D1234-5678-49AB-CDEF-0123456789AB"));
     }
+
+    void testLargeReplyAndSettingsPasswordReveal() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString cfgPath = tempDir.filePath(QStringLiteral("bluepill_settings.json"));
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_settings.json")));
+        b.setConfigFilePath(cfgPath);
+        b.saveServerConfig(QStringLiteral("https://bluepill.example.com"),
+                           QStringLiteral("https://backup.example.com"),
+                           QStringLiteral("super-secret-api-key-999"));
+        QCOMPARE(b.serverPassword(), QStringLiteral("super-secret-api-key-999"));
+        QCOMPARE(b.hasPasswordConfigured(), true);
+
+        // Verify large multi-paragraph message + inline reply + unattached RCS textual tapbacks
+        const QString largeText = QStringLiteral(
+            "Hello everyone \n"
+            "We need to move our upcoming meeting to 11/21 at 11 AM \n"
+            "I know it is right before the holiday so no worries if you cannot make it \n"
+            "The final meeting of the year will be 12/12 in downtown \n"
+            "Please keep me in your thoughts on Monday afternoon (😛🤣)\n"
+            "Alex is speaking this Saturday at 6:30 PM in case you want to support \n"
+            "See you all soon😘");
+
+        QJsonObject mOrig;
+        mOrig.insert(QStringLiteral("guid"), QStringLiteral("orig-large-guid-1"));
+        mOrig.insert(QStringLiteral("text"), largeText);
+        mOrig.insert(QStringLiteral("isFromMe"), false);
+        mOrig.insert(QStringLiteral("dateCreated"), 1794340405020LL);
+        mOrig.insert(QStringLiteral("handle"), QJsonObject{{QStringLiteral("address"), QStringLiteral("+15550101111")}});
+
+        // Unattached RCS textual tapback (associatedMessageGuid is empty, text quotes entire multi-line message)
+        QJsonObject mTapback;
+        mTapback.insert(QStringLiteral("guid"), QStringLiteral("tapback-unattached-1"));
+        mTapback.insert(QStringLiteral("text"), QStringLiteral("Emphasized “") + largeText + QStringLiteral("”"));
+        mTapback.insert(QStringLiteral("isFromMe"), false);
+        mTapback.insert(QStringLiteral("dateCreated"), 1794340406000LL);
+        mTapback.insert(QStringLiteral("handle"), QJsonObject{{QStringLiteral("address"), QStringLiteral("+15550102222")}});
+
+        // Carrier RCS reply stub
+        QJsonObject mStub;
+        mStub.insert(QStringLiteral("guid"), QStringLiteral("rcs-reply-stub-1"));
+        mStub.insert(QStringLiteral("text"), QStringLiteral("Replied to a message:"));
+        mStub.insert(QStringLiteral("isFromMe"), false);
+        mStub.insert(QStringLiteral("dateCreated"), 1794372081826LL);
+        mStub.insert(QStringLiteral("handle"), QJsonObject{{QStringLiteral("address"), QStringLiteral("+15550103333")}});
+
+        // Inline reply referencing orig-large-guid-1
+        QJsonObject mReply;
+        mReply.insert(QStringLiteral("guid"), QStringLiteral("reply-large-guid-2"));
+        mReply.insert(QStringLiteral("text"), QStringLiteral("👍🏽 Sounds great for 11/21 - see everyone there!"));
+        mReply.insert(QStringLiteral("threadOriginatorGuid"), QStringLiteral("p:0/orig-large-guid-1"));
+        mReply.insert(QStringLiteral("isFromMe"), false);
+        mReply.insert(QStringLiteral("dateCreated"), 1794372600203LL);
+        mReply.insert(QStringLiteral("handle"), QJsonObject{{QStringLiteral("address"), QStringLiteral("+15550103333")}});
+
+        // rawMessagesDesc is newest -> oldest
+        QJsonArray rawDesc{mReply, mStub, mTapback, mOrig};
+        const QVariantList built = Backend::buildMessageListFromApi(rawDesc, {}, {});
+        // Only mOrig and mReply should be in the timeline (mTapback attached to mOrig, mStub suppressed)
+        QCOMPARE(built.size(), 2);
+
+        const QVariantMap origBuilt = built.at(0).toMap();
+        QCOMPARE(origBuilt.value(QStringLiteral("guid")).toString(), QStringLiteral("orig-large-guid-1"));
+        const QVariantList origReactions = origBuilt.value(QStringLiteral("reactions")).toList();
+        QCOMPARE(origReactions.size(), 1);
+        QCOMPARE(origReactions.first().toMap().value(QStringLiteral("emoji")).toString(), QStringLiteral("‼️"));
+
+        const QVariantMap replyBuilt = built.at(1).toMap();
+        QCOMPARE(replyBuilt.value(QStringLiteral("guid")).toString(), QStringLiteral("reply-large-guid-2"));
+        const QString replyToText = replyBuilt.value(QStringLiteral("replyToText")).toString();
+        QVERIFY(!replyToText.isEmpty());
+        QVERIFY(!replyToText.contains(QLatin1Char('\n')));
+        QVERIFY(replyToText.startsWith(QStringLiteral("Hello everyone We need to move our upcoming meeting")));
+    }
 };
 
 QTEST_MAIN(ImsgTests)

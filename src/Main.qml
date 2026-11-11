@@ -184,6 +184,15 @@ ApplicationWindow {
     property bool showServerConfigModal: false
     property bool showServerPassword: false
 
+    onShowServerConfigModalChanged: {
+        if (showServerConfigModal) {
+            serverUrlInput.text = backend.serverUrl
+            secondaryServerUrlInput.text = backend.secondaryServerUrl
+            serverPasswordInput.text = backend.serverPassword
+            root.showServerPassword = false
+        }
+    }
+
     function openServerConfigModal() {
         root.clearActionMenu()
         root.showShortcutsModal = false
@@ -192,7 +201,7 @@ ApplicationWindow {
         root.showEmojiPicker = false
         serverUrlInput.text = backend.serverUrl
         secondaryServerUrlInput.text = backend.secondaryServerUrl
-        serverPasswordInput.text = ""
+        serverPasswordInput.text = backend.serverPassword
         root.showServerPassword = false
         root.showServerConfigModal = true
         serverUrlInput.forceActiveFocus()
@@ -3059,34 +3068,49 @@ ApplicationWindow {
 
                         // Reply Context Banner above bubble
                         Rectangle {
+                            id: replyContextBanner
+                            objectName: "replyContextBanner"
                             visible: (modelData.replyToText || "").length > 0
                             Layout.alignment: modelData.isFromMe ? Qt.AlignRight : Qt.AlignLeft
                             Layout.leftMargin: modelData.isFromMe ? 80 : 24
                             Layout.rightMargin: modelData.isFromMe ? 24 : 80
+                            readonly property int maxBannerWidth: Math.min(420, Math.max(220, Math.floor((messageListView.width > 0 ? messageListView.width : 640) * 0.65)))
+                            Layout.maximumWidth: maxBannerWidth
                             radius: 6
+                            clip: true
                             color: theme.darkBackground
                             border.width: 1
                             border.color: theme.muted
-                            implicitWidth: Math.min(420, replyPreviewCol.implicitWidth + 16)
-                            implicitHeight: replyPreviewCol.implicitHeight + 10
+                            implicitWidth: Math.min(maxBannerWidth, Math.max(replySenderTxt.implicitWidth, Math.min(maxBannerWidth - 16, replyBodyTxt.implicitWidth)) + 16)
+                            implicitHeight: replyPreviewCol.implicitHeight + 12
 
                             ColumnLayout {
                                 id: replyPreviewCol
-                                anchors.fill: parent
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
                                 anchors.margins: 6
                                 spacing: 2
                                 Text {
+                                    id: replySenderTxt
+                                    Layout.fillWidth: true
                                     text: "↳ " + (modelData.replyToSender || "")
                                     font.pixelSize: theme.fontSize - 4
                                     font.bold: true
                                     color: theme.accent
+                                    elide: Text.ElideRight
+                                    maximumLineCount: 1
                                 }
                                 Text {
-                                    text: modelData.replyToText || ""
+                                    id: replyBodyTxt
+                                    objectName: "replyBodyTxt"
+                                    Layout.fillWidth: true
+                                    text: (modelData.replyToText || "").replace(/[\r\n]+/g, " ").trim()
                                     font.pixelSize: theme.fontSize - 3
                                     color: theme.darkForeground
+                                    wrapMode: Text.Wrap
+                                    maximumLineCount: 2
                                     elide: Text.ElideRight
-                                    Layout.maximumWidth: 380
                                 }
                             }
                         }
@@ -3992,9 +4016,10 @@ ApplicationWindow {
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: root.replyTargetText
+                            text: (root.replyTargetText || "").replace(/[\r\n]+/g, " ").trim()
                             font.pixelSize: theme.fontSize - 2
                             color: theme.foreground
+                            maximumLineCount: 1
                             elide: Text.ElideRight
                         }
                         Text {
@@ -5013,10 +5038,13 @@ ApplicationWindow {
         }
 
         Rectangle {
-            width: Math.min(520, root.width - 40)
-            height: 390
+            id: serverConfigCard
+            objectName: "serverConfigCard"
+            width: Math.min(540, root.width - 40)
+            height: Math.min(root.height - 32, serverConfigCol.implicitHeight + 44)
             anchors.centerIn: parent
             radius: 12
+            clip: true
             color: theme.darkBackground
             border.width: 1
             border.color: theme.accent
@@ -5024,7 +5052,10 @@ ApplicationWindow {
             MouseArea { anchors.fill: parent }
 
             ColumnLayout {
-                anchors.fill: parent
+                id: serverConfigCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
                 anchors.margins: 22
                 spacing: 12
 
@@ -5032,12 +5063,13 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 10
                     Text {
+                        Layout.fillWidth: true
                         text: "⚙ " + i18n.tr("BluePill & BlueBubbles Server Configuration")
-                        font.pixelSize: theme.fontSize + 3
+                        font.pixelSize: theme.fontSize + 2
                         font.bold: true
                         color: theme.brightForeground
+                        elide: Text.ElideRight
                     }
-                    Item { Layout.fillWidth: true }
                     Rectangle {
                         visible: backend.hasPasswordConfigured && backend.serverUrl.length > 0
                         height: 22
@@ -5070,16 +5102,19 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 4
                     Text {
+                        Layout.fillWidth: true
                         text: i18n.tr("Primary Server URL")
                         font.pixelSize: theme.fontSize - 2
                         font.bold: true
                         color: theme.foreground
+                        elide: Text.ElideRight
                     }
                     Rectangle {
                         Layout.fillWidth: true
                         height: Math.max(40, theme.fontSize + 20)
                         Layout.preferredHeight: Math.max(40, theme.fontSize + 20)
                         radius: 6
+                        clip: true
                         color: theme.lighterBackground
                         border.width: 1
                         border.color: serverUrlInput.activeFocus ? theme.accent : theme.muted
@@ -5090,6 +5125,7 @@ ApplicationWindow {
                             anchors.fill: parent
                             anchors.leftMargin: 10
                             anchors.rightMargin: 10
+                            clip: true
                             verticalAlignment: TextInput.AlignVCenter
                             text: backend.serverUrl
                             color: theme.brightForeground
@@ -5106,6 +5142,8 @@ ApplicationWindow {
                                 visible: !serverUrlInput.text && !serverUrlInput.activeFocus
                                 anchors.verticalCenter: parent.verticalCenter
                                 font.pixelSize: theme.fontSize
+                                elide: Text.ElideRight
+                                width: parent.width
                             }
                         }
                     }
@@ -5116,16 +5154,19 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 4
                     Text {
+                        Layout.fillWidth: true
                         text: i18n.tr("Failover Server URL (Optional)")
                         font.pixelSize: theme.fontSize - 2
                         font.bold: true
                         color: theme.foreground
+                        elide: Text.ElideRight
                     }
                     Rectangle {
                         Layout.fillWidth: true
                         height: Math.max(40, theme.fontSize + 20)
                         Layout.preferredHeight: Math.max(40, theme.fontSize + 20)
                         radius: 6
+                        clip: true
                         color: theme.lighterBackground
                         border.width: 1
                         border.color: secondaryServerUrlInput.activeFocus ? theme.accent : theme.muted
@@ -5136,6 +5177,7 @@ ApplicationWindow {
                             anchors.fill: parent
                             anchors.leftMargin: 10
                             anchors.rightMargin: 10
+                            clip: true
                             verticalAlignment: TextInput.AlignVCenter
                             text: backend.secondaryServerUrl
                             color: theme.brightForeground
@@ -5152,6 +5194,8 @@ ApplicationWindow {
                                 visible: !secondaryServerUrlInput.text && !secondaryServerUrlInput.activeFocus
                                 anchors.verticalCenter: parent.verticalCenter
                                 font.pixelSize: theme.fontSize
+                                elide: Text.ElideRight
+                                width: parent.width
                             }
                         }
                     }
@@ -5162,10 +5206,12 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 4
                     Text {
+                        Layout.fillWidth: true
                         text: i18n.tr("API Password / Key")
                         font.pixelSize: theme.fontSize - 2
                         font.bold: true
                         color: theme.foreground
+                        elide: Text.ElideRight
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -5175,6 +5221,7 @@ ApplicationWindow {
                             height: Math.max(40, theme.fontSize + 20)
                             Layout.preferredHeight: Math.max(40, theme.fontSize + 20)
                             radius: 6
+                            clip: true
                             color: theme.lighterBackground
                             border.width: 1
                             border.color: serverPasswordInput.activeFocus ? theme.accent : theme.muted
@@ -5185,7 +5232,9 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 anchors.leftMargin: 10
                                 anchors.rightMargin: 10
+                                clip: true
                                 verticalAlignment: TextInput.AlignVCenter
+                                text: backend.serverPassword
                                 echoMode: root.showServerPassword ? TextInput.Normal : TextInput.Password
                                 color: theme.brightForeground
                                 font.pixelSize: theme.fontSize
@@ -5203,7 +5252,7 @@ ApplicationWindow {
                                     anchors.verticalCenter: parent.verticalCenter
                                     font.pixelSize: theme.fontSize - 1
                                     elide: Text.ElideRight
-                                    width: parent.width - 20
+                                    width: parent.width
                                 }
                             }
                         }
@@ -5231,8 +5280,6 @@ ApplicationWindow {
                         }
                     }
                 }
-
-                Item { Layout.fillHeight: true }
 
                 RowLayout {
                     Layout.fillWidth: true
