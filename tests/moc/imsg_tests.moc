@@ -1,0 +1,336 @@
+/****************************************************************************
+** Meta object code from reading C++ file 'imsg_tests.cpp'
+**
+** Created by: The Qt Meta Object Compiler version 69 (Qt 6.12.0)
+**
+** WARNING! All changes made in this file will be lost!
+*****************************************************************************/
+
+#include <QtCore/qmetatype.h>
+
+#include <QtCore/qtmochelpers.h>
+
+#include <memory>
+
+
+#include <QtCore/qxptype_traits.h>
+#if !defined(Q_MOC_OUTPUT_REVISION)
+#error "The header file 'imsg_tests.cpp' doesn't include <QObject>."
+#elif Q_MOC_OUTPUT_REVISION != 69
+#error "This file was generated using the moc from 6.12.0. It"
+#error "cannot be used with the include files from this version of Qt."
+#error "(The moc has changed too much.)"
+#endif
+
+#ifndef Q_CONSTINIT
+#define Q_CONSTINIT
+#endif
+
+QT_WARNING_PUSH
+QT_WARNING_DISABLE_DEPRECATED
+QT_WARNING_DISABLE_GCC("-Wuseless-cast")
+namespace {
+struct qt_meta_tag_ZN9ImsgTestsE_t {};
+} // unnamed namespace
+
+template <> constexpr inline auto ImsgTests::qt_create_metaobjectdata<qt_meta_tag_ZN9ImsgTestsE_t>()
+{
+    namespace QMC = QtMocConstants;
+    QtMocHelpers::StringRefStorage qt_stringData {
+        "ImsgTests",
+        "testThemeParsing",
+        "",
+        "testTranslator",
+        "testNormalizeHandle",
+        "testContactResolution",
+        "testAttributedBodyAndReactionGrouping",
+        "testDemoModeAndFiltering",
+        "testChatSelectionIsolation",
+        "testEmojiShortcodesAndSearch",
+        "testFailoverCandidateUrls",
+        "testMuteAndNotificationStatePersistence",
+        "testConfigFileStrictPermissions",
+        "testGreenBubbleAndServiceDetection",
+        "testAsciiEmoticonAutocompleteAndSearch",
+        "testAsciiEmoticonReplacement",
+        "testComputeTextPartIndex",
+        "testOmarchyDndDetection",
+        "testRemoteContactEnvelopeResolution",
+        "testUrlExtractionAndYouTubeDetection",
+        "testMessagePayloadAndLinkFormatting",
+        "testFormatMessageTextWithLinks",
+        "testImageMimeAndExtensionDetection",
+        "testSaveContactAndSelectedChatProperties",
+        "testSearchPlaceholderAndHeaderNoAnchorsInLayout",
+        "testFullHistoryAndLoadOlderMessagesPagination",
+        "testBidirectionalReadStateSyncWithIMessage",
+        "testHistorySyncDaysAndPersistentMessagesCache",
+        "testAuthoritativeServerUnreadReconciliation",
+        "testHomePageAndClearSelectedChat",
+        "testVerificationCodeExtractionAndCopyToClipboard",
+        "testSearchContactsAndStartNewChatAutocomplete",
+        "testDeleteAndUnsendMessagesAndDeleteChatAndBidirectionalSync",
+        "testConversationContextMenuAndNonBlockingReadUnreadDelete",
+        "testV158FastSendAttachmentIsolationAndActionMenuSafety",
+        "testV159ComposerBottomClearanceAndContactResolution",
+        "testV160GroupChatTitleAndParticipantPersistence",
+        "testV161BackgroundImagePrefetchAndRetry",
+        "testV162MessageListKeyboardNavigation",
+        "testV163DelayedSmsLookbackAndUnreadReconcile",
+        "testV163SocketIoPushDelivery",
+        "testMultiImageAttachmentsBubbleRendering",
+        "testHomeViewLayoutAndMultiAttachmentQml",
+        "testResponsiveSplitWindowHeaderAndZeroOverlap",
+        "testDisguisedHeicJpegMagicByteConversionGroupChat",
+        "testTapbackScrollPositionPreservedAndAllGroupImagesResolved",
+        "testReactionPillHoverTooltipAndGroupSenderNames",
+        "testOrphanSmsVerificationCodeWithoutChatJoin",
+        "testServerConfigSetupAndDynamicUrlPersistence",
+        "testBluePillOtpExtractionAndYearFiltering",
+        "testBluePillPinnedChatsAndTogglePin",
+        "testBluePillEditedExpressiveAndFailureBadges",
+        "testBluePillSshUrlAndConfigMigration",
+        "testOutboundTempGuidDeduplication",
+        "testLargeReplyAndSettingsPasswordReveal",
+        "testAudioAttachmentWaveformAndPlaybackState",
+        "testVoiceRecordingLifecycle",
+        "testExpressiveSendWithEffect",
+        "testScheduledMessagesLifecycle",
+        "testGroupParticipantManagement"
+    };
+
+    QtMocHelpers::UintData qt_methods {
+        // Slot 'testThemeParsing'
+        QtMocHelpers::SlotData<void()>(1, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testTranslator'
+        QtMocHelpers::SlotData<void()>(3, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testNormalizeHandle'
+        QtMocHelpers::SlotData<void()>(4, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testContactResolution'
+        QtMocHelpers::SlotData<void()>(5, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testAttributedBodyAndReactionGrouping'
+        QtMocHelpers::SlotData<void()>(6, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testDemoModeAndFiltering'
+        QtMocHelpers::SlotData<void()>(7, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testChatSelectionIsolation'
+        QtMocHelpers::SlotData<void()>(8, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testEmojiShortcodesAndSearch'
+        QtMocHelpers::SlotData<void()>(9, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testFailoverCandidateUrls'
+        QtMocHelpers::SlotData<void()>(10, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testMuteAndNotificationStatePersistence'
+        QtMocHelpers::SlotData<void()>(11, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testConfigFileStrictPermissions'
+        QtMocHelpers::SlotData<void()>(12, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testGreenBubbleAndServiceDetection'
+        QtMocHelpers::SlotData<void()>(13, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testAsciiEmoticonAutocompleteAndSearch'
+        QtMocHelpers::SlotData<void()>(14, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testAsciiEmoticonReplacement'
+        QtMocHelpers::SlotData<void()>(15, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testComputeTextPartIndex'
+        QtMocHelpers::SlotData<void()>(16, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testOmarchyDndDetection'
+        QtMocHelpers::SlotData<void()>(17, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testRemoteContactEnvelopeResolution'
+        QtMocHelpers::SlotData<void()>(18, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testUrlExtractionAndYouTubeDetection'
+        QtMocHelpers::SlotData<void()>(19, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testMessagePayloadAndLinkFormatting'
+        QtMocHelpers::SlotData<void()>(20, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testFormatMessageTextWithLinks'
+        QtMocHelpers::SlotData<void()>(21, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testImageMimeAndExtensionDetection'
+        QtMocHelpers::SlotData<void()>(22, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testSaveContactAndSelectedChatProperties'
+        QtMocHelpers::SlotData<void()>(23, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testSearchPlaceholderAndHeaderNoAnchorsInLayout'
+        QtMocHelpers::SlotData<void()>(24, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testFullHistoryAndLoadOlderMessagesPagination'
+        QtMocHelpers::SlotData<void()>(25, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testBidirectionalReadStateSyncWithIMessage'
+        QtMocHelpers::SlotData<void()>(26, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testHistorySyncDaysAndPersistentMessagesCache'
+        QtMocHelpers::SlotData<void()>(27, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testAuthoritativeServerUnreadReconciliation'
+        QtMocHelpers::SlotData<void()>(28, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testHomePageAndClearSelectedChat'
+        QtMocHelpers::SlotData<void()>(29, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testVerificationCodeExtractionAndCopyToClipboard'
+        QtMocHelpers::SlotData<void()>(30, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testSearchContactsAndStartNewChatAutocomplete'
+        QtMocHelpers::SlotData<void()>(31, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testDeleteAndUnsendMessagesAndDeleteChatAndBidirectionalSync'
+        QtMocHelpers::SlotData<void()>(32, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testConversationContextMenuAndNonBlockingReadUnreadDelete'
+        QtMocHelpers::SlotData<void()>(33, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testV158FastSendAttachmentIsolationAndActionMenuSafety'
+        QtMocHelpers::SlotData<void()>(34, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testV159ComposerBottomClearanceAndContactResolution'
+        QtMocHelpers::SlotData<void()>(35, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testV160GroupChatTitleAndParticipantPersistence'
+        QtMocHelpers::SlotData<void()>(36, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testV161BackgroundImagePrefetchAndRetry'
+        QtMocHelpers::SlotData<void()>(37, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testV162MessageListKeyboardNavigation'
+        QtMocHelpers::SlotData<void()>(38, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testV163DelayedSmsLookbackAndUnreadReconcile'
+        QtMocHelpers::SlotData<void()>(39, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testV163SocketIoPushDelivery'
+        QtMocHelpers::SlotData<void()>(40, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testMultiImageAttachmentsBubbleRendering'
+        QtMocHelpers::SlotData<void()>(41, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testHomeViewLayoutAndMultiAttachmentQml'
+        QtMocHelpers::SlotData<void()>(42, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testResponsiveSplitWindowHeaderAndZeroOverlap'
+        QtMocHelpers::SlotData<void()>(43, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testDisguisedHeicJpegMagicByteConversionGroupChat'
+        QtMocHelpers::SlotData<void()>(44, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testTapbackScrollPositionPreservedAndAllGroupImagesResolved'
+        QtMocHelpers::SlotData<void()>(45, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testReactionPillHoverTooltipAndGroupSenderNames'
+        QtMocHelpers::SlotData<void()>(46, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testOrphanSmsVerificationCodeWithoutChatJoin'
+        QtMocHelpers::SlotData<void()>(47, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testServerConfigSetupAndDynamicUrlPersistence'
+        QtMocHelpers::SlotData<void()>(48, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testBluePillOtpExtractionAndYearFiltering'
+        QtMocHelpers::SlotData<void()>(49, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testBluePillPinnedChatsAndTogglePin'
+        QtMocHelpers::SlotData<void()>(50, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testBluePillEditedExpressiveAndFailureBadges'
+        QtMocHelpers::SlotData<void()>(51, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testBluePillSshUrlAndConfigMigration'
+        QtMocHelpers::SlotData<void()>(52, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testOutboundTempGuidDeduplication'
+        QtMocHelpers::SlotData<void()>(53, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testLargeReplyAndSettingsPasswordReveal'
+        QtMocHelpers::SlotData<void()>(54, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testAudioAttachmentWaveformAndPlaybackState'
+        QtMocHelpers::SlotData<void()>(55, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testVoiceRecordingLifecycle'
+        QtMocHelpers::SlotData<void()>(56, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testExpressiveSendWithEffect'
+        QtMocHelpers::SlotData<void()>(57, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testScheduledMessagesLifecycle'
+        QtMocHelpers::SlotData<void()>(58, 2, QMC::AccessPrivate, QMetaType::Void),
+        // Slot 'testGroupParticipantManagement'
+        QtMocHelpers::SlotData<void()>(59, 2, QMC::AccessPrivate, QMetaType::Void),
+    };
+    QtMocHelpers::UintData qt_properties {
+    };
+    QtMocHelpers::UintData qt_enums {
+    };
+    return QtMocHelpers::metaObjectData<ImsgTests, qt_meta_tag_ZN9ImsgTestsE_t>(QMC::MetaObjectFlag{}, qt_stringData,
+            qt_methods, qt_properties, qt_enums);
+}
+Q_CONSTINIT const QMetaObject ImsgTests::staticMetaObject = { {
+    QMetaObject::SuperData::link<QObject::staticMetaObject>(),
+    qt_staticMetaObjectStaticContent<qt_meta_tag_ZN9ImsgTestsE_t>.stringdata,
+    qt_staticMetaObjectStaticContent<qt_meta_tag_ZN9ImsgTestsE_t>.data,
+    qt_static_metacall,
+    nullptr,
+    qt_staticMetaObjectRelocatingContent<qt_meta_tag_ZN9ImsgTestsE_t>.metaTypes,
+    nullptr
+} };
+
+void ImsgTests::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id, void **_a)
+{
+    auto *_t = static_cast<ImsgTests *>(_o);
+    if (_c == QMetaObject::InvokeMetaMethod) {
+        switch (_id) {
+        case 0: _t->testThemeParsing(); break;
+        case 1: _t->testTranslator(); break;
+        case 2: _t->testNormalizeHandle(); break;
+        case 3: _t->testContactResolution(); break;
+        case 4: _t->testAttributedBodyAndReactionGrouping(); break;
+        case 5: _t->testDemoModeAndFiltering(); break;
+        case 6: _t->testChatSelectionIsolation(); break;
+        case 7: _t->testEmojiShortcodesAndSearch(); break;
+        case 8: _t->testFailoverCandidateUrls(); break;
+        case 9: _t->testMuteAndNotificationStatePersistence(); break;
+        case 10: _t->testConfigFileStrictPermissions(); break;
+        case 11: _t->testGreenBubbleAndServiceDetection(); break;
+        case 12: _t->testAsciiEmoticonAutocompleteAndSearch(); break;
+        case 13: _t->testAsciiEmoticonReplacement(); break;
+        case 14: _t->testComputeTextPartIndex(); break;
+        case 15: _t->testOmarchyDndDetection(); break;
+        case 16: _t->testRemoteContactEnvelopeResolution(); break;
+        case 17: _t->testUrlExtractionAndYouTubeDetection(); break;
+        case 18: _t->testMessagePayloadAndLinkFormatting(); break;
+        case 19: _t->testFormatMessageTextWithLinks(); break;
+        case 20: _t->testImageMimeAndExtensionDetection(); break;
+        case 21: _t->testSaveContactAndSelectedChatProperties(); break;
+        case 22: _t->testSearchPlaceholderAndHeaderNoAnchorsInLayout(); break;
+        case 23: _t->testFullHistoryAndLoadOlderMessagesPagination(); break;
+        case 24: _t->testBidirectionalReadStateSyncWithIMessage(); break;
+        case 25: _t->testHistorySyncDaysAndPersistentMessagesCache(); break;
+        case 26: _t->testAuthoritativeServerUnreadReconciliation(); break;
+        case 27: _t->testHomePageAndClearSelectedChat(); break;
+        case 28: _t->testVerificationCodeExtractionAndCopyToClipboard(); break;
+        case 29: _t->testSearchContactsAndStartNewChatAutocomplete(); break;
+        case 30: _t->testDeleteAndUnsendMessagesAndDeleteChatAndBidirectionalSync(); break;
+        case 31: _t->testConversationContextMenuAndNonBlockingReadUnreadDelete(); break;
+        case 32: _t->testV158FastSendAttachmentIsolationAndActionMenuSafety(); break;
+        case 33: _t->testV159ComposerBottomClearanceAndContactResolution(); break;
+        case 34: _t->testV160GroupChatTitleAndParticipantPersistence(); break;
+        case 35: _t->testV161BackgroundImagePrefetchAndRetry(); break;
+        case 36: _t->testV162MessageListKeyboardNavigation(); break;
+        case 37: _t->testV163DelayedSmsLookbackAndUnreadReconcile(); break;
+        case 38: _t->testV163SocketIoPushDelivery(); break;
+        case 39: _t->testMultiImageAttachmentsBubbleRendering(); break;
+        case 40: _t->testHomeViewLayoutAndMultiAttachmentQml(); break;
+        case 41: _t->testResponsiveSplitWindowHeaderAndZeroOverlap(); break;
+        case 42: _t->testDisguisedHeicJpegMagicByteConversionGroupChat(); break;
+        case 43: _t->testTapbackScrollPositionPreservedAndAllGroupImagesResolved(); break;
+        case 44: _t->testReactionPillHoverTooltipAndGroupSenderNames(); break;
+        case 45: _t->testOrphanSmsVerificationCodeWithoutChatJoin(); break;
+        case 46: _t->testServerConfigSetupAndDynamicUrlPersistence(); break;
+        case 47: _t->testBluePillOtpExtractionAndYearFiltering(); break;
+        case 48: _t->testBluePillPinnedChatsAndTogglePin(); break;
+        case 49: _t->testBluePillEditedExpressiveAndFailureBadges(); break;
+        case 50: _t->testBluePillSshUrlAndConfigMigration(); break;
+        case 51: _t->testOutboundTempGuidDeduplication(); break;
+        case 52: _t->testLargeReplyAndSettingsPasswordReveal(); break;
+        case 53: _t->testAudioAttachmentWaveformAndPlaybackState(); break;
+        case 54: _t->testVoiceRecordingLifecycle(); break;
+        case 55: _t->testExpressiveSendWithEffect(); break;
+        case 56: _t->testScheduledMessagesLifecycle(); break;
+        case 57: _t->testGroupParticipantManagement(); break;
+        default: ;
+        }
+    }
+    (void)_a;
+}
+
+const QMetaObject *ImsgTests::metaObject() const
+{
+    return QObject::d_ptr->metaObject ? QObject::d_ptr->dynamicMetaObject() : &staticMetaObject;
+}
+
+void *ImsgTests::qt_metacast(const char *_clname)
+{
+    if (!_clname) return nullptr;
+    if (!strcmp(_clname, qt_staticMetaObjectStaticContent<qt_meta_tag_ZN9ImsgTestsE_t>.strings))
+        return static_cast<void*>(this);
+    return QObject::qt_metacast(_clname);
+}
+
+int ImsgTests::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
+{
+    _id = QObject::qt_metacall(_c, _id, _a);
+    if (_id < 0)
+        return _id;
+    if (_c == QMetaObject::InvokeMetaMethod) {
+        if (_id < 58)
+            qt_static_metacall(this, _c, _id, _a);
+        _id -= 58;
+    }
+    if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
+        if (_id < 58)
+            *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
+        _id -= 58;
+    }
+    return _id;
+}
+QT_WARNING_POP

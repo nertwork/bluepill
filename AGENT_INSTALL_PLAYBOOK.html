@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autonomous AI Agent Install Playbook — BluePill Documentation</title>
+    <meta name="description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <link rel="canonical" href="https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html">
+    <link rel="icon" type="image/png" href="logo.png">
+
+    <!-- Open Graph / Twitter -->
+    <meta property="og:type" content="article">
+    <meta property="og:url" content="https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html">
+    <meta property="og:title" content="Autonomous AI Agent Install Playbook — BluePill Documentation">
+    <meta property="og:description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta property="og:image" content="https://nertwork.github.io/bluepill/screenshot.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:creator" content="@jamesfarr">
+
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #121927;
+            --bg-card: #182235;
+            --accent-cyan: #00e5ff;
+            --accent-blue: #3b82f6;
+            --text-main: #f1f5f9;
+            --text-muted: #94a3b8;
+            --border: #23324d;
+            --code-bg: #0d131f;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-main);
+            line-height: 1.65;
+            padding-bottom: 80px;
+        }
+
+        /* Sticky Top Navigation */
+        .top-nav {
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+            background: rgba(10, 14, 23, 0.92);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .nav-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: #fff;
+            font-weight: 700;
+            font-size: 1.15rem;
+        }
+        .nav-brand img {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+        }
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            list-style: none;
+        }
+        .nav-links a {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.92rem;
+            font-weight: 500;
+            transition: color 0.15s ease;
+        }
+        .nav-links a:hover, .nav-links a.active {
+            color: var(--accent-cyan);
+        }
+        .nav-btn {
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+            color: #050811 !important;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-weight: 600 !important;
+        }
+
+        /* Document Container & Layout */
+        .doc-wrapper {
+            max-width: 1360px;
+            margin: 0 auto;
+            padding: 30px 24px;
+            display: flex;
+            gap: 40px;
+        }
+        .sidebar {
+            width: 280px;
+            flex-shrink: 0;
+            position: sticky;
+            top: 75px;
+            height: calc(100vh - 100px);
+            overflow-y: auto;
+            padding-right: 15px;
+        }
+        .sidebar::-webkit-scrollbar {
+            width: 5px;
+        }
+        .sidebar::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+        }
+        .sidebar-title {
+            font-size: 0.8rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--accent-cyan);
+            margin-bottom: 12px;
+        }
+        .toc ul {
+            list-style: none;
+            padding-left: 12px;
+        }
+        .toc > ul {
+            padding-left: 0;
+        }
+        .toc li {
+            margin: 6px 0;
+        }
+        .toc a {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.88rem;
+            line-height: 1.4;
+            display: block;
+            transition: color 0.15s ease;
+        }
+        .toc a:hover {
+            color: var(--accent-cyan);
+        }
+
+        /* Content Area */
+        .doc-content {
+            flex: 1;
+            min-width: 0;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 40px 48px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+        }
+        .doc-content h1 {
+            font-size: 2.2rem;
+            font-weight: 800;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(135deg, #fff 40%, var(--accent-cyan));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .doc-content h2 {
+            font-size: 1.6rem;
+            margin: 36px 0 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            color: #fff;
+        }
+        .doc-content h3 {
+            font-size: 1.25rem;
+            margin: 24px 0 12px;
+            color: var(--accent-cyan);
+        }
+        .doc-content h4 {
+            font-size: 1.05rem;
+            margin: 20px 0 10px;
+            color: #e2e8f0;
+        }
+        .doc-content p {
+            margin-bottom: 16px;
+            color: #cbd5e1;
+        }
+        .doc-content ul, .doc-content ol {
+            margin: 12px 0 18px 24px;
+            color: #cbd5e1;
+        }
+        .doc-content li {
+            margin-bottom: 6px;
+        }
+        .doc-content a {
+            color: var(--accent-cyan);
+            text-decoration: none;
+        }
+        .doc-content a:hover {
+            text-decoration: underline;
+        }
+        .doc-content hr {
+            border: 0;
+            height: 1px;
+            background: var(--border);
+            margin: 35px 0;
+        }
+        .doc-content blockquote {
+            background: var(--bg-card);
+            border-left: 4px solid var(--accent-cyan);
+            padding: 14px 20px;
+            margin: 20px 0;
+            border-radius: 0 8px 8px 0;
+            color: #cbd5e1;
+        }
+
+        /* Tables */
+        .doc-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 24px 0;
+            font-size: 0.92rem;
+            overflow-x: auto;
+            display: block;
+        }
+        .doc-content th, .doc-content td {
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            text-align: left;
+        }
+        .doc-content th {
+            background: var(--bg-card);
+            color: var(--accent-cyan);
+            font-weight: 600;
+        }
+        .doc-content tr:nth-child(even) {
+            background: rgba(24, 34, 53, 0.4);
+        }
+
+        /* Code Blocks & Inline Code */
+        .doc-content code {
+            font-family: "JetBrains Mono", "SF Mono", Consolas, Menlo, monospace;
+            background: #080d17;
+            color: var(--accent-cyan);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.88em;
+            border: 1px solid rgba(0, 229, 255, 0.15);
+        }
+        .code-container {
+            position: relative;
+            margin: 20px 0;
+        }
+        .codehilite, pre {
+            background: var(--code-bg) !important;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 20px;
+            overflow-x: auto;
+            font-family: "JetBrains Mono", "SF Mono", Consolas, Menlo, monospace;
+            font-size: 0.88rem;
+            line-height: 1.5;
+        }
+        .codehilite code, pre code {
+            background: transparent !important;
+            padding: 0 !important;
+            border: none !important;
+            color: #f1f5f9;
+        }
+        .copy-button {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: var(--bg-card);
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 4px 10px;
+            font-size: 0.78rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .copy-button:hover {
+            background: var(--accent-cyan);
+            color: #050811;
+            border-color: var(--accent-cyan);
+        }
+
+        /* Pygments Syntax Highlighting */
+        pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.codehilite .hll { background-color: #49483e }
+.codehilite { background: #272822; color: #F8F8F2 }
+.codehilite .c { color: #959077 } /* Comment */
+.codehilite .err { color: #ED007E; background-color: #1E0010 } /* Error */
+.codehilite .esc { color: #F8F8F2 } /* Escape */
+.codehilite .g { color: #F8F8F2 } /* Generic */
+.codehilite .k { color: #66D9EF } /* Keyword */
+.codehilite .l { color: #AE81FF } /* Literal */
+.codehilite .n { color: #F8F8F2 } /* Name */
+.codehilite .o { color: #FF4689 } /* Operator */
+.codehilite .x { color: #F8F8F2 } /* Other */
+.codehilite .p { color: #F8F8F2 } /* Punctuation */
+.codehilite .ch { color: #959077 } /* Comment.Hashbang */
+.codehilite .cm { color: #959077 } /* Comment.Multiline */
+.codehilite .cp { color: #959077 } /* Comment.Preproc */
+.codehilite .cpf { color: #959077 } /* Comment.PreprocFile */
+.codehilite .c1 { color: #959077 } /* Comment.Single */
+.codehilite .cs { color: #959077 } /* Comment.Special */
+.codehilite .gd { color: #FF4689 } /* Generic.Deleted */
+.codehilite .ge { color: #F8F8F2; font-style: italic } /* Generic.Emph */
+.codehilite .ges { color: #F8F8F2; font-weight: bold; font-style: italic } /* Generic.EmphStrong */
+.codehilite .gr { color: #FF4689 } /* Generic.Error */
+.codehilite .gh { color: #F8F8F2 } /* Generic.Heading */
+.codehilite .gi { color: #A6E22E } /* Generic.Inserted */
+.codehilite .go { color: #66D9EF } /* Generic.Output */
+.codehilite .gp { color: #FF4689; font-weight: bold } /* Generic.Prompt */
+.codehilite .gs { color: #F8F8F2; font-weight: bold } /* Generic.Strong */
+.codehilite .gu { color: #959077 } /* Generic.Subheading */
+.codehilite .gt { color: #66D9EF } /* Generic.Traceback */
+.codehilite .kc { color: #66D9EF } /* Keyword.Constant */
+.codehilite .kd { color: #66D9EF } /* Keyword.Declaration */
+.codehilite .kn { color: #FF4689 } /* Keyword.Namespace */
+.codehilite .kp { color: #66D9EF } /* Keyword.Pseudo */
+.codehilite .kr { color: #66D9EF } /* Keyword.Reserved */
+.codehilite .kt { color: #66D9EF } /* Keyword.Type */
+.codehilite .ld { color: #E6DB74 } /* Literal.Date */
+.codehilite .m { color: #AE81FF } /* Literal.Number */
+.codehilite .s { color: #E6DB74 } /* Literal.String */
+.codehilite .na { color: #A6E22E } /* Name.Attribute */
+.codehilite .nb { color: #A6E22E } /* Name.Builtin */
+.codehilite .nc { color: #A6E22E } /* Name.Class */
+.codehilite .no { color: #66D9EF } /* Name.Constant */
+.codehilite .nd { color: #A6E22E } /* Name.Decorator */
+.codehilite .ni { color: #F8F8F2 } /* Name.Entity */
+.codehilite .ne { color: #A6E22E } /* Name.Exception */
+.codehilite .nf { color: #A6E22E } /* Name.Function */
+.codehilite .nl { color: #F8F8F2 } /* Name.Label */
+.codehilite .nn { color: #F8F8F2 } /* Name.Namespace */
+.codehilite .nx { color: #A6E22E } /* Name.Other */
+.codehilite .py { color: #F8F8F2 } /* Name.Property */
+.codehilite .nt { color: #FF4689 } /* Name.Tag */
+.codehilite .nv { color: #F8F8F2 } /* Name.Variable */
+.codehilite .ow { color: #FF4689 } /* Operator.Word */
+.codehilite .pm { color: #F8F8F2 } /* Punctuation.Marker */
+.codehilite .w { color: #F8F8F2 } /* Text.Whitespace */
+.codehilite .mb { color: #AE81FF } /* Literal.Number.Bin */
+.codehilite .mf { color: #AE81FF } /* Literal.Number.Float */
+.codehilite .mh { color: #AE81FF } /* Literal.Number.Hex */
+.codehilite .mi { color: #AE81FF } /* Literal.Number.Integer */
+.codehilite .mo { color: #AE81FF } /* Literal.Number.Oct */
+.codehilite .sa { color: #E6DB74 } /* Literal.String.Affix */
+.codehilite .sb { color: #E6DB74 } /* Literal.String.Backtick */
+.codehilite .sc { color: #E6DB74 } /* Literal.String.Char */
+.codehilite .dl { color: #E6DB74 } /* Literal.String.Delimiter */
+.codehilite .sd { color: #E6DB74 } /* Literal.String.Doc */
+.codehilite .s2 { color: #E6DB74 } /* Literal.String.Double */
+.codehilite .se { color: #AE81FF } /* Literal.String.Escape */
+.codehilite .sh { color: #E6DB74 } /* Literal.String.Heredoc */
+.codehilite .si { color: #E6DB74 } /* Literal.String.Interpol */
+.codehilite .sx { color: #E6DB74 } /* Literal.String.Other */
+.codehilite .sr { color: #E6DB74 } /* Literal.String.Regex */
+.codehilite .s1 { color: #E6DB74 } /* Literal.String.Single */
+.codehilite .ss { color: #E6DB74 } /* Literal.String.Symbol */
+.codehilite .bp { color: #A6E22E } /* Name.Builtin.Pseudo */
+.codehilite .fm { color: #A6E22E } /* Name.Function.Magic */
+.codehilite .vc { color: #F8F8F2 } /* Name.Variable.Class */
+.codehilite .vg { color: #F8F8F2 } /* Name.Variable.Global */
+.codehilite .vi { color: #F8F8F2 } /* Name.Variable.Instance */
+.codehilite .vm { color: #F8F8F2 } /* Name.Variable.Magic */
+.codehilite .il { color: #AE81FF } /* Literal.Number.Integer.Long */
+
+        /* Banner Notification */
+        .doc-banner {
+            background: linear-gradient(90deg, rgba(59, 130, 246, 0.15), rgba(0, 229, 255, 0.15));
+            border: 1px solid rgba(0, 229, 255, 0.3);
+            border-radius: 8px;
+            padding: 14px 18px;
+            margin-bottom: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 15px;
+        }
+        .doc-banner a {
+            background: var(--accent-cyan);
+            color: #050811;
+            font-weight: 600;
+            padding: 6px 12px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 0.85rem;
+            white-space: nowrap;
+        }
+
+        /* Responsive */
+        @media (max-width: 960px) {
+            .sidebar { display: none; }
+            .doc-wrapper { padding: 20px 12px; }
+            .doc-content { padding: 25px 20px; }
+            .nav-links { gap: 12px; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Sticky Navigation Bar -->
+    <nav class="top-nav">
+        <a href="index.html" class="nav-brand">
+            <img src="logo.png" alt="BluePill Logo">
+            <span>BluePill 💊</span>
+        </a>
+        <ul class="nav-links">
+            <li><a href="index.html">Overview</a></li>
+            <li><a href="INSTALLATION_AND_OPERATIONS_GUIDE.html" >Install Guide</a></li>
+            <li><a href="AGENT_INSTALL_PLAYBOOK.html" class="active">AI Playbook</a></li>
+            <li><a href="AGENTS.html" >Directives</a></li>
+            <li><a href="https://www.nertwork.com/2026/11/11/introducing-bluepill-imessage-linux/" target="_blank">Blog</a></li>
+            <li><a href="https://github.com/nertwork/bluepill" class="nav-btn" target="_blank">GitHub</a></li>
+        </ul>
+    </nav>
+
+    <!-- Document Layout -->
+    <div class="doc-wrapper">
+        <aside class="sidebar">
+            <div class="sidebar-title">Table of Contents</div>
+            <div class="toc">
+                <div class="toc">
+<ul>
+<li><a href="#bluepill-autonomous-ai-agent-installation-playbook">🤖 BluePill Autonomous AI Agent Installation Playbook</a><ul>
+<li><a href="#agent-execution-mandates">Agent Execution Mandates</a></li>
+<li><a href="#phase-1-environment-architecture-discovery">Phase 1: Environment &amp; Architecture Discovery</a><ul>
+<li><a href="#decision-matrix">Decision Matrix:</a></li>
+</ul>
+</li>
+<li><a href="#phase-2-macos-relay-installation-service-deployment">Phase 2: macOS Relay Installation &amp; Service Deployment</a><ul>
+<li><a href="#step-21-verify-macos-permissions-full-disk-access">Step 2.1: Verify macOS Permissions (Full Disk Access)</a></li>
+<li><a href="#step-22-install-bluepill-server-via-homebrew">Step 2.2: Install bluepill-server via Homebrew</a></li>
+<li><a href="#step-23-generate-secure-server-configuration">Step 2.3: Generate Secure Server Configuration</a></li>
+<li><a href="#step-24-execute-built-in-self-test">Step 2.4: Execute Built-In Self-Test</a></li>
+<li><a href="#step-25-deploy-and-start-launchagent">Step 2.5: Deploy and Start LaunchAgent</a></li>
+</ul>
+</li>
+<li><a href="#phase-3-linux-desktop-client-installation-configuration">Phase 3: Linux Desktop Client Installation &amp; Configuration</a><ul>
+<li><a href="#step-31-install-desktop-client-package">Step 3.1: Install Desktop Client Package</a><ul>
+<li><a href="#option-a-arch-linux-omarchy-via-aur">Option A: Arch Linux / Omarchy via AUR</a></li>
+<li><a href="#option-b-debian-ubuntu-build-from-source">Option B: Debian / Ubuntu Build from Source</a></li>
+</ul>
+</li>
+<li><a href="#step-32-provision-client-state-and-keyring-credentials">Step 3.2: Provision Client State and Keyring Credentials</a></li>
+<li><a href="#step-33-deploy-waybar-notification-integration">Step 3.3: Deploy Waybar Notification Integration</a></li>
+<li><a href="#step-34-verify-client-test-suite-if-source-tree-present">Step 3.4: Verify Client Test Suite (If Source Tree Present)</a></li>
+</ul>
+</li>
+<li><a href="#phase-4-end-to-end-verification-checklist">Phase 4: End-to-End Verification Checklist</a></li>
+</ul>
+</li>
+</ul>
+</div>
+
+            </div>
+        </aside>
+
+        <main class="doc-content">
+            <div class="doc-banner">
+                <div>
+                    <strong>💊 BluePill v1.1.0 Documentation Portal</strong>
+                    <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
+                        Interactive guide with verified copy-paste commands and architecture reference.
+                    </div>
+                </div>
+                <a href="index.html">← Home</a>
+            </div>
+
+            <hr />
+<p>layout: default
+title: BluePill Autonomous AI Agent Install Playbook
+permalink: /AGENT_INSTALL_PLAYBOOK.html
+redirect_from:
+  - /AGENT_INSTALL_PLAYBOOK.html
+  - /AGENT_INSTALL_PLAYBOOK</p>
+<hr />
+<blockquote>
+<p>[!TIP]
+<strong>Interactive Documentation Portal:</strong> View the formatted dark-mode documentation with one-click copy buttons and live sidebar navigation at:<br />
+<a href="https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html"><strong>https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html</strong></a></p>
+</blockquote>
+<h1 id="bluepill-autonomous-ai-agent-installation-playbook">🤖 BluePill Autonomous AI Agent Installation Playbook</h1>
+<p>A deterministic, non-interactive installation and operational playbook for autonomous AI coding agents (including <strong>Claude Code</strong>, <strong>OpenCode</strong>, <strong>Gemini CLI</strong>, <strong>Codex</strong>, <strong>Cursor</strong>, and <strong>Antigravity</strong>).</p>
+<p>This playbook allows an AI agent to reliably inspect the host environment, install the appropriate components (macOS Relay Daemon and/or Linux Desktop Client), configure credentials, verify database access, and validate full end-to-end operation with zero manual prompts.</p>
+<hr />
+<h2 id="agent-execution-mandates">Agent Execution Mandates</h2>
+<p>When executing this playbook, the agent MUST adhere to these strict execution rules:
+1. <strong>Non-Interactive Execution:</strong> Every command that could prompt for user input or block on stdin must append <code>&lt;/dev/null</code> and use non-interactive flags (e.g. <code>yay --noconfirm</code>, <code>brew install --quiet</code>).
+2. <strong>Explicit Timeouts:</strong> Network or build commands must include explicit command-level timeouts (e.g. <code>timeout 60s curl ...</code>, <code>timeout 180s cmake ...</code>).
+3. <strong>No Secrets / Tokens in Logs:</strong> Never echo plaintext passwords, authentication tokens, or personal identifiers (PII) to stdout. Use dummy/placeholder formats in logs (e.g., <code>CHANGE_ME_TO_A_SECURE_TOKEN</code>).
+4. <strong>Idempotence:</strong> Every check and mutation must be safe to re-run multiple times without corrupting existing configuration files or services.</p>
+<hr />
+<h2 id="phase-1-environment-architecture-discovery">Phase 1: Environment &amp; Architecture Discovery</h2>
+<p>Detect operating system, hardware architecture, and determine whether the current host is a <strong>macOS Relay Host</strong>, a <strong>Linux Desktop Client</strong>, or a <strong>Dual-Role Host</strong>.</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># 1.1 Detect OS and Architecture</span>
+<span class="nv">OS_TYPE</span><span class="o">=</span><span class="k">$(</span>uname<span class="w"> </span>-s<span class="k">)</span>
+<span class="nv">ARCH_TYPE</span><span class="o">=</span><span class="k">$(</span>uname<span class="w"> </span>-m<span class="k">)</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s2">"Detected OS: </span><span class="si">${</span><span class="nv">OS_TYPE</span><span class="si">}</span><span class="s2">, Architecture: </span><span class="si">${</span><span class="nv">ARCH_TYPE</span><span class="si">}</span><span class="s2">"</span>
+
+<span class="c1"># 1.2 Inspect Available Package Managers</span>
+<span class="nv">HAS_BREW</span><span class="o">=</span><span class="nb">false</span>
+<span class="nv">HAS_YAY</span><span class="o">=</span><span class="nb">false</span>
+<span class="nv">HAS_APT</span><span class="o">=</span><span class="nb">false</span>
+<span class="nv">HAS_DNF</span><span class="o">=</span><span class="nb">false</span>
+
+<span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>brew<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nv">HAS_BREW</span><span class="o">=</span><span class="nb">true</span>
+<span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>yay<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nv">HAS_YAY</span><span class="o">=</span><span class="nb">true</span>
+<span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>apt-get<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nv">HAS_APT</span><span class="o">=</span><span class="nb">true</span>
+<span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>dnf<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nv">HAS_DNF</span><span class="o">=</span><span class="nb">true</span>
+
+<span class="nb">echo</span><span class="w"> </span><span class="s2">"Package managers: brew=</span><span class="si">${</span><span class="nv">HAS_BREW</span><span class="si">}</span><span class="s2">, yay=</span><span class="si">${</span><span class="nv">HAS_YAY</span><span class="si">}</span><span class="s2">, apt=</span><span class="si">${</span><span class="nv">HAS_APT</span><span class="si">}</span><span class="s2">, dnf=</span><span class="si">${</span><span class="nv">HAS_DNF</span><span class="si">}</span><span class="s2">"</span>
+</code></pre></div>
+
+<h3 id="decision-matrix">Decision Matrix:</h3>
+<ul>
+<li>If <code>OS_TYPE == "Darwin"</code>: Proceed to <strong>Phase 2 (macOS Relay Setup)</strong>.</li>
+<li>If <code>OS_TYPE == "Linux"</code>: Proceed to <strong>Phase 3 (Linux Desktop Client Setup)</strong>.</li>
+</ul>
+<hr />
+<h2 id="phase-2-macos-relay-installation-service-deployment">Phase 2: macOS Relay Installation &amp; Service Deployment</h2>
+<p><em>(Execute only when <code>OS_TYPE == "Darwin"</code>)</em></p>
+<h3 id="step-21-verify-macos-permissions-full-disk-access">Step 2.1: Verify macOS Permissions (Full Disk Access)</h3>
+<p>Before installing packages, verify that the active terminal process has permission to read the Messages database:</p>
+<div class="codehilite"><pre><span></span><code>timeout<span class="w"> </span>10s<span class="w"> </span>sqlite3<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/Library/Messages/chat.db"</span><span class="w"> </span><span class="s2">"SELECT count(*) FROM chat;"</span><span class="w"> </span>&lt;/dev/null
+</code></pre></div>
+
+<ul>
+<li><strong>Expected Result:</strong> A non-negative integer (e.g., <code>12</code>).</li>
+<li><strong>Failure Recovery:</strong> If the command fails with <code>Operation not permitted</code>:<blockquote>
+<p><strong>Agent Action:</strong> Halt and notify the user: <em>"Full Disk Access (FDA) is missing. Please grant Full Disk Access to your Terminal/Python under System Settings -&gt; Privacy &amp; Security -&gt; Full Disk Access, then re-run."</em></p>
+</blockquote>
+</li>
+</ul>
+<h3 id="step-22-install-bluepill-server-via-homebrew">Step 2.2: Install <code>bluepill-server</code> via Homebrew</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Add tap and install formula</span>
+timeout<span class="w"> </span>120s<span class="w"> </span>brew<span class="w"> </span>tap<span class="w"> </span>nertwork/tap<span class="w"> </span>&lt;/dev/null
+timeout<span class="w"> </span>120s<span class="w"> </span>brew<span class="w"> </span>install<span class="w"> </span>nertwork/tap/bluepill<span class="w"> </span>&lt;/dev/null
+
+<span class="c1"># Verify installed binary</span>
+timeout<span class="w"> </span>5s<span class="w"> </span>bluepill-server<span class="w"> </span>--version<span class="w"> </span>&lt;/dev/null
+</code></pre></div>
+
+<h3 id="step-23-generate-secure-server-configuration">Step 2.3: Generate Secure Server Configuration</h3>
+<p>Generate a strong random password if none is provided:</p>
+<div class="codehilite"><pre><span></span><code><span class="nv">CONFIG_DIR</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/.config/bluepill"</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_DIR</span><span class="si">}</span><span class="s2">"</span>
+chmod<span class="w"> </span><span class="m">700</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_DIR</span><span class="si">}</span><span class="s2">"</span>
+
+<span class="nv">CONFIG_FILE</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_DIR</span><span class="si">}</span><span class="s2">/server.json"</span>
+<span class="k">if</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span>!<span class="w"> </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$CONFIG_FILE</span><span class="s2">"</span><span class="w"> </span><span class="o">]]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nv">GENERATED_KEY</span><span class="o">=</span><span class="k">$(</span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s2">"import secrets; print(secrets.token_hex(16))"</span><span class="k">)</span>
+<span class="w">    </span>cat<span class="w"> </span><span class="s">&lt;&lt; EOF_CFG &gt; "${CONFIG_FILE}"</span>
+<span class="s">{</span>
+<span class="s">  "host": "0.0.0.0",</span>
+<span class="s">  "port": 1234,</span>
+<span class="s">  "password": "${GENERATED_KEY}",</span>
+<span class="s">  "helperPort": 45670,</span>
+<span class="s">  "enableBackgroundDaemons": true</span>
+<span class="s">}</span>
+<span class="s">EOF_CFG</span>
+<span class="w">    </span>chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_FILE</span><span class="si">}</span><span class="s2">"</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"Generated server configuration at </span><span class="si">${</span><span class="nv">CONFIG_FILE</span><span class="si">}</span><span class="s2"> (mode 0600)"</span>
+<span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"Configuration already exists at </span><span class="si">${</span><span class="nv">CONFIG_FILE</span><span class="si">}</span><span class="s2">"</span>
+<span class="k">fi</span>
+</code></pre></div>
+
+<h3 id="step-24-execute-built-in-self-test">Step 2.4: Execute Built-In Self-Test</h3>
+<p>Verify that typedstream serialization and database engines pass all assertions:</p>
+<div class="codehilite"><pre><span></span><code>timeout<span class="w"> </span>15s<span class="w"> </span>bluepill-server<span class="w"> </span>--selftest<span class="w"> </span>&lt;/dev/null
+</code></pre></div>
+
+<h3 id="step-25-deploy-and-start-launchagent">Step 2.5: Deploy and Start LaunchAgent</h3>
+<p>Configure automatic startup on user login:</p>
+<div class="codehilite"><pre><span></span><code><span class="nv">PLIST_PATH</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/Library/LaunchAgents/com.nertwork.bluepill-server.plist"</span>
+<span class="nv">BINARY_PATH</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>which<span class="w"> </span>bluepill-server<span class="k">)</span><span class="s2">"</span>
+<span class="nv">SERVER_PORT</span><span class="o">=</span><span class="k">$(</span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.port // 1234'</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_FILE</span><span class="si">}</span><span class="s2">"</span><span class="k">)</span>
+<span class="nv">SERVER_PWD</span><span class="o">=</span><span class="k">$(</span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.password // ""'</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_FILE</span><span class="si">}</span><span class="s2">"</span><span class="k">)</span>
+
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/Library/LaunchAgents"</span>
+cat<span class="w"> </span><span class="s">&lt;&lt; EOF_PL &gt; "${PLIST_PATH}"</span>
+<span class="s">&lt;?xml version="1.0" encoding="UTF-8"?&gt;</span>
+<span class="s">&lt;!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"&gt;</span>
+<span class="s">&lt;plist version="1.0"&gt;</span>
+<span class="s">&lt;dict&gt;</span>
+<span class="s">    &lt;key&gt;Label&lt;/key&gt;</span>
+<span class="s">    &lt;string&gt;com.nertwork.bluepill-server&lt;/string&gt;</span>
+<span class="s">    &lt;key&gt;ProgramArguments&lt;/key&gt;</span>
+<span class="s">    &lt;array&gt;</span>
+<span class="s">        &lt;string&gt;${BINARY_PATH}&lt;/string&gt;</span>
+<span class="s">        &lt;string&gt;serve&lt;/string&gt;</span>
+<span class="s">        &lt;string&gt;--port&lt;/string&gt;</span>
+<span class="s">        &lt;string&gt;${SERVER_PORT}&lt;/string&gt;</span>
+<span class="s">        &lt;string&gt;--password&lt;/string&gt;</span>
+<span class="s">        &lt;string&gt;${SERVER_PWD}&lt;/string&gt;</span>
+<span class="s">    &lt;/array&gt;</span>
+<span class="s">    &lt;key&gt;RunAtLoad&lt;/key&gt;</span>
+<span class="s">    &lt;true/&gt;</span>
+<span class="s">    &lt;key&gt;KeepAlive&lt;/key&gt;</span>
+<span class="s">    &lt;true/&gt;</span>
+<span class="s">    &lt;key&gt;StandardOutPath&lt;/key&gt;</span>
+<span class="s">    &lt;string&gt;/tmp/bluepill-server.log&lt;/string&gt;</span>
+<span class="s">    &lt;key&gt;StandardErrorPath&lt;/key&gt;</span>
+<span class="s">    &lt;string&gt;/tmp/bluepill-server.err&lt;/string&gt;</span>
+<span class="s">    &lt;key&gt;ProcessType&lt;/key&gt;</span>
+<span class="s">    &lt;string&gt;Interactive&lt;/string&gt;</span>
+<span class="s">&lt;/dict&gt;</span>
+<span class="s">&lt;/plist&gt;</span>
+<span class="s">EOF_PL</span>
+
+<span class="c1"># Unload previous instance if present, then bootstrap</span>
+launchctl<span class="w"> </span>bootout<span class="w"> </span><span class="s2">"gui/</span><span class="k">$(</span>id<span class="w"> </span>-u<span class="k">)</span><span class="s2">/com.nertwork.bluepill-server"</span><span class="w"> </span><span class="m">2</span>&gt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">true</span>
+timeout<span class="w"> </span>10s<span class="w"> </span>launchctl<span class="w"> </span>bootstrap<span class="w"> </span><span class="s2">"gui/</span><span class="k">$(</span>id<span class="w"> </span>-u<span class="k">)</span><span class="s2">"</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">PLIST_PATH</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span>&lt;/dev/null
+
+<span class="c1"># Allow 2 seconds for daemon to bind port</span>
+sleep<span class="w"> </span><span class="m">2</span>
+
+<span class="c1"># Verify local REST heartbeat</span>
+timeout<span class="w"> </span>5s<span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-f<span class="w"> </span><span class="s2">"http://127.0.0.1:</span><span class="si">${</span><span class="nv">SERVER_PORT</span><span class="si">}</span><span class="s2">/api/v1/ping?password=</span><span class="si">${</span><span class="nv">SERVER_PWD</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span>&lt;/dev/null
+</code></pre></div>
+
+<hr />
+<h2 id="phase-3-linux-desktop-client-installation-configuration">Phase 3: Linux Desktop Client Installation &amp; Configuration</h2>
+<p><em>(Execute only when <code>OS_TYPE == "Linux"</code>)</em></p>
+<h3 id="step-31-install-desktop-client-package">Step 3.1: Install Desktop Client Package</h3>
+<h4 id="option-a-arch-linux-omarchy-via-aur">Option A: Arch Linux / Omarchy via AUR</h4>
+<div class="codehilite"><pre><span></span><code><span class="k">if</span><span class="w"> </span><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>yay<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span>timeout<span class="w"> </span>300s<span class="w"> </span>yay<span class="w"> </span>-S<span class="w"> </span>--noconfirm<span class="w"> </span>bluepill<span class="w"> </span>&lt;/dev/null
+<span class="k">elif</span><span class="w"> </span><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>paru<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span>timeout<span class="w"> </span>300s<span class="w"> </span>paru<span class="w"> </span>-S<span class="w"> </span>--noconfirm<span class="w"> </span>bluepill<span class="w"> </span>&lt;/dev/null
+<span class="k">else</span>
+<span class="w">    </span><span class="c1"># Fallback: clone and makepkg</span>
+<span class="w">    </span><span class="nv">BUILD_TMP</span><span class="o">=</span><span class="k">$(</span>mktemp<span class="w"> </span>-d<span class="w"> </span>/tmp/bluepill-build-XXXXXX<span class="k">)</span>
+<span class="w">    </span>git<span class="w"> </span>clone<span class="w"> </span>https://aur.archlinux.org/bluepill.git<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
+<span class="w">    </span><span class="nb">cd</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
+<span class="w">    </span>timeout<span class="w"> </span>300s<span class="w"> </span>makepkg<span class="w"> </span>-si<span class="w"> </span>--noconfirm<span class="w"> </span>&lt;/dev/null
+<span class="w">    </span>rm<span class="w"> </span>-rf<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
+<span class="k">fi</span>
+</code></pre></div>
+
+<h4 id="option-b-debian-ubuntu-build-from-source">Option B: Debian / Ubuntu Build from Source</h4>
+<div class="codehilite"><pre><span></span><code><span class="k">if</span><span class="w"> </span><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>apt-get<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span>sudo<span class="w"> </span>apt-get<span class="w"> </span>update
+<span class="w">    </span>sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>build-essential<span class="w"> </span>cmake<span class="w"> </span>ninja-build<span class="w"> </span>qt6-base-dev<span class="w"> </span>qt6-declarative-dev<span class="w"> </span>qt6-quickcontrols2-5-dev<span class="w"> </span>qt6-svg-dev<span class="w"> </span>qt6-wayland-dev<span class="w"> </span>libsecret-1-dev<span class="w"> </span>libnotify-dev<span class="w"> </span>ffmpeg
+<span class="w">    </span><span class="nv">BUILD_TMP</span><span class="o">=</span><span class="k">$(</span>mktemp<span class="w"> </span>-d<span class="w"> </span>/tmp/bluepill-src-XXXXXX<span class="k">)</span>
+<span class="w">    </span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/nertwork/bluepill.git<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
+<span class="w">    </span><span class="nb">cd</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
+<span class="w">    </span>cmake<span class="w"> </span>-B<span class="w"> </span>build<span class="w"> </span>-DCMAKE_BUILD_TYPE<span class="o">=</span>Release<span class="w"> </span>-GNinja
+<span class="w">    </span>cmake<span class="w"> </span>--build<span class="w"> </span>build<span class="w"> </span>-j<span class="k">$(</span>nproc<span class="k">)</span>
+<span class="w">    </span>sudo<span class="w"> </span>cmake<span class="w"> </span>--install<span class="w"> </span>build
+<span class="w">    </span>sudo<span class="w"> </span>ln<span class="w"> </span>-sf<span class="w"> </span>/usr/local/bin/bluepill<span class="w"> </span>/usr/local/bin/imsg
+<span class="w">    </span>rm<span class="w"> </span>-rf<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
+<span class="k">fi</span>
+</code></pre></div>
+
+<h3 id="step-32-provision-client-state-and-keyring-credentials">Step 3.2: Provision Client State and Keyring Credentials</h3>
+<div class="codehilite"><pre><span></span><code><span class="nv">CLIENT_CONFIG_DIR</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/.config/bluepill"</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CLIENT_CONFIG_DIR</span><span class="si">}</span><span class="s2">"</span>
+chmod<span class="w"> </span><span class="m">700</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CLIENT_CONFIG_DIR</span><span class="si">}</span><span class="s2">"</span>
+
+<span class="nv">CLIENT_CONFIG</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">CLIENT_CONFIG_DIR</span><span class="si">}</span><span class="s2">/config.json"</span>
+<span class="nv">RELAY_URL</span><span class="o">=</span><span class="s2">"http://127.0.0.1:1234"</span><span class="w"> </span><span class="c1"># Or ssh://user@mac-host / https://relay.example.com</span>
+<span class="nv">RELAY_PWD</span><span class="o">=</span><span class="s2">"CHANGE_ME_TO_A_SECURE_TOKEN"</span>
+
+cat<span class="w"> </span><span class="s">&lt;&lt; EOF_CLI &gt; "${CLIENT_CONFIG}"</span>
+<span class="s">{</span>
+<span class="s">  "serverUrl": "${RELAY_URL}",</span>
+<span class="s">  "secondaryServerUrl": "",</span>
+<span class="s">  "password": "${RELAY_PWD}",</span>
+<span class="s">  "authMethod": "tls-apikey",</span>
+<span class="s">  "syncDays": 90</span>
+<span class="s">}</span>
+<span class="s">EOF_CLI</span>
+chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CLIENT_CONFIG</span><span class="si">}</span><span class="s2">"</span>
+
+<span class="c1"># Optional: Store securely in Secret Service Keyring if secret-tool is present</span>
+<span class="k">if</span><span class="w"> </span><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>secret-tool<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">printf</span><span class="w"> </span><span class="s2">"%s"</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">RELAY_PWD</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>secret-tool<span class="w"> </span>store<span class="w"> </span>--label<span class="o">=</span><span class="s2">"BluePill Relay Password"</span><span class="w"> </span>service<span class="w"> </span>bluepill<span class="w"> </span>username<span class="w"> </span>relay
+<span class="k">fi</span>
+</code></pre></div>
+
+<h3 id="step-33-deploy-waybar-notification-integration">Step 3.3: Deploy Waybar Notification Integration</h3>
+<div class="codehilite"><pre><span></span><code><span class="nv">WAYBAR_BIN</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/.local/bin/bluepill-waybar"</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/.local/bin"</span>
+
+cat<span class="w"> </span><span class="s">&lt;&lt; 'EOF_WB' &gt; "${WAYBAR_BIN}"</span>
+<span class="s">#!/usr/bin/env bash</span>
+<span class="s">set -euo pipefail</span>
+<span class="s">STATE_FILE="${HOME}/.config/imsg/state.json"</span>
+<span class="s">[[ -f "${HOME}/.config/bluepill/state.json" ]] &amp;&amp; STATE_FILE="${HOME}/.config/bluepill/state.json"</span>
+<span class="s">if [[ ! -f "$STATE_FILE" ]]; then</span>
+<span class="s">    echo '{"text": "", "alt": "disconnected", "tooltip": "BluePill: Disconnected", "class": "disconnected"}'</span>
+<span class="s">    exit 0</span>
+<span class="s">fi</span>
+<span class="s">UNREAD=$(jq -r '.unreadCount // 0' "$STATE_FILE" 2&gt;/dev/null || echo 0)</span>
+<span class="s">CONNECTED=$(jq -r '.connected // false' "$STATE_FILE" 2&gt;/dev/null || echo false)</span>
+<span class="s">if [[ "$CONNECTED" != "true" ]]; then</span>
+<span class="s">    echo '{"text": "󰍡 !", "alt": "offline", "tooltip": "BluePill: Offline", "class": "offline"}'</span>
+<span class="s">elif [[ "$UNREAD" -gt 0 ]]; then</span>
+<span class="s">    echo "{\"text\": \"󰍡 ${UNREAD}\", \"alt\": \"unread\", \"tooltip\": \"${UNREAD} unread message(s)\", \"class\": \"unread\", \"count\": ${UNREAD}}"</span>
+<span class="s">else</span>
+<span class="s">    echo '{"text": "󰍡", "alt": "read", "tooltip": "BluePill: Connected", "class": "read"}'</span>
+<span class="s">fi</span>
+<span class="s">EOF_WB</span>
+chmod<span class="w"> </span>+x<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">WAYBAR_BIN</span><span class="si">}</span><span class="s2">"</span>
+</code></pre></div>
+
+<h3 id="step-34-verify-client-test-suite-if-source-tree-present">Step 3.4: Verify Client Test Suite (If Source Tree Present)</h3>
+<p>If operating inside a BluePill source repository:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">if</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span>-f<span class="w"> </span><span class="s2">"./bin/test"</span><span class="w"> </span><span class="o">]]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span>timeout<span class="w"> </span>60s<span class="w"> </span><span class="nv">QT_QPA_PLATFORM</span><span class="o">=</span>offscreen<span class="w"> </span>./bin/test<span class="w"> </span>&lt;/dev/null
+<span class="k">fi</span>
+</code></pre></div>
+
+<hr />
+<h2 id="phase-4-end-to-end-verification-checklist">Phase 4: End-to-End Verification Checklist</h2>
+<p>Run this non-interactive verification script to validate complete connectivity across all components:</p>
+<div class="codehilite"><pre><span></span><code><span class="nv">RELAY_HOST</span><span class="o">=</span><span class="s2">"127.0.0.1:1234"</span><span class="w"> </span><span class="c1"># Or your configured relay address</span>
+<span class="nv">RELAY_PWD</span><span class="o">=</span><span class="s2">"CHANGE_ME_TO_A_SECURE_TOKEN"</span>
+
+<span class="nb">echo</span><span class="w"> </span><span class="s2">"=== BluePill End-to-End Validation ==="</span>
+
+<span class="c1"># 1. Ping Check</span>
+<span class="nv">PING_RESP</span><span class="o">=</span><span class="k">$(</span>timeout<span class="w"> </span>5s<span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-f<span class="w"> </span><span class="s2">"http://</span><span class="si">${</span><span class="nv">RELAY_HOST</span><span class="si">}</span><span class="s2">/api/v1/ping?password=</span><span class="si">${</span><span class="nv">RELAY_PWD</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span>&lt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"FAILED"</span><span class="k">)</span>
+<span class="k">if</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span><span class="s2">"</span><span class="nv">$PING_RESP</span><span class="s2">"</span><span class="w"> </span><span class="o">==</span><span class="w"> </span>*<span class="s2">"pong"</span>*<span class="w"> </span><span class="o">]]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✓] REST Ping: OK"</span>
+<span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✗] REST Ping: FAILED (</span><span class="si">${</span><span class="nv">PING_RESP</span><span class="si">}</span><span class="s2">)"</span>
+<span class="k">fi</span>
+
+<span class="c1"># 2. Server Info &amp; Private API Check</span>
+<span class="nv">INFO_RESP</span><span class="o">=</span><span class="k">$(</span>timeout<span class="w"> </span>5s<span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-f<span class="w"> </span><span class="s2">"http://</span><span class="si">${</span><span class="nv">RELAY_HOST</span><span class="si">}</span><span class="s2">/api/v1/server/info?password=</span><span class="si">${</span><span class="nv">RELAY_PWD</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span>&lt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"{}"</span><span class="k">)</span>
+<span class="nv">OS_VER</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span><span class="s2">"</span><span class="nv">$INFO_RESP</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.data.os_version // "Unknown"'</span><span class="k">)</span>
+<span class="nv">PRIV_API</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span><span class="s2">"</span><span class="nv">$INFO_RESP</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.data.private_api // false'</span><span class="k">)</span>
+<span class="nb">echo</span><span class="w"> </span><span class="s2">"[✓] Server OS: </span><span class="si">${</span><span class="nv">OS_VER</span><span class="si">}</span><span class="s2">, Private API Active: </span><span class="si">${</span><span class="nv">PRIV_API</span><span class="si">}</span><span class="s2">"</span>
+
+<span class="c1"># 3. Web UI Accessibility Check</span>
+<span class="nv">WEB_CODE</span><span class="o">=</span><span class="k">$(</span>timeout<span class="w"> </span>5s<span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>-w<span class="w"> </span><span class="s2">"%{http_code}"</span><span class="w"> </span><span class="s2">"http://</span><span class="si">${</span><span class="nv">RELAY_HOST</span><span class="si">}</span><span class="s2">/web"</span><span class="w"> </span>&lt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"000"</span><span class="k">)</span>
+<span class="k">if</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span><span class="s2">"</span><span class="nv">$WEB_CODE</span><span class="s2">"</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s2">"200"</span><span class="w"> </span><span class="o">]]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✓] Embedded Web UI: OK (HTTP 200)"</span>
+<span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✗] Embedded Web UI: FAILED (HTTP </span><span class="si">${</span><span class="nv">WEB_CODE</span><span class="si">}</span><span class="s2">)"</span>
+<span class="k">fi</span>
+
+<span class="c1"># 4. Chat Query Check</span>
+<span class="nv">CHAT_RESP</span><span class="o">=</span><span class="k">$(</span>timeout<span class="w"> </span>5s<span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-f<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="s2">"http://</span><span class="si">${</span><span class="nv">RELAY_HOST</span><span class="si">}</span><span class="s2">/api/v1/chat/query?password=</span><span class="si">${</span><span class="nv">RELAY_PWD</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span>-d<span class="w"> </span><span class="s1">'{"limit": 5, "offset": 0}'</span><span class="w"> </span>&lt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"FAILED"</span><span class="k">)</span>
+<span class="k">if</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span><span class="s2">"</span><span class="nv">$CHAT_RESP</span><span class="s2">"</span><span class="w"> </span><span class="o">==</span><span class="w"> </span>*<span class="s2">"\"status\":200"</span>*<span class="w"> </span><span class="o">]]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span><span class="s2">"</span><span class="nv">$CHAT_RESP</span><span class="s2">"</span><span class="w"> </span><span class="o">==</span><span class="w"> </span>*<span class="s2">"\"data\":"</span>*<span class="w"> </span><span class="o">]]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✓] Chat Database Query: OK"</span>
+<span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✗] Chat Database Query: FAILED"</span>
+<span class="k">fi</span>
+
+<span class="nb">echo</span><span class="w"> </span><span class="s2">"=== Verification Completed ==="</span>
+</code></pre></div>
+        </main>
+    </div>
+
+    <script>
+        // Attach copy buttons to all code blocks
+        document.querySelectorAll('pre').forEach(function(pre) {
+            var wrapper = document.createElement('div');
+            wrapper.className = 'code-container';
+            pre.parentNode.insertBefore(wrapper, pre);
+            wrapper.appendChild(pre);
+
+            var button = document.createElement('button');
+            button.className = 'copy-button';
+            button.innerText = 'Copy';
+            button.addEventListener('click', function() {
+                var codeText = pre.innerText;
+                navigator.clipboard.writeText(codeText).then(function() {
+                    button.innerText = 'Copied!';
+                    button.style.background = '#00e5ff';
+                    button.style.color = '#050811';
+                    setTimeout(function() {
+                        button.innerText = 'Copy';
+                        button.style.background = '';
+                        button.style.color = '';
+                    }, 2000);
+                });
+            });
+            wrapper.appendChild(button);
+        });
+
+        // Smooth scroll for TOC links
+        document.querySelectorAll('.toc a').forEach(function(anchor) {
+            anchor.addEventListener('click', function(e) {
+                var targetId = this.getAttribute('href');
+                if (targetId && targetId.startsWith('#')) {
+                    var el = document.querySelector(targetId);
+                    if (el) {
+                        e.preventDefault();
+                        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        history.pushState(null, null, targetId);
+                    }
+                }
+            });
+        });
+    </script>
+</body>
+</html>

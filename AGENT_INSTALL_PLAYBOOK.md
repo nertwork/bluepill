@@ -1,3 +1,16 @@
+---
+layout: default
+title: BluePill Autonomous AI Agent Install Playbook
+permalink: /AGENT_INSTALL_PLAYBOOK.html
+redirect_from:
+  - /AGENT_INSTALL_PLAYBOOK.md
+  - /AGENT_INSTALL_PLAYBOOK
+---
+
+> [!TIP]
+> **Interactive Documentation Portal:** View the formatted dark-mode documentation with one-click copy buttons and live sidebar navigation at:  
+> [**https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html**](https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html)
+
 # 🤖 BluePill Autonomous AI Agent Installation Playbook
 
 A deterministic, non-interactive installation and operational playbook for autonomous AI coding agents (including **Claude Code**, **OpenCode**, **Gemini CLI**, **Codex**, **Cursor**, and **Antigravity**).
