@@ -1583,7 +1583,7 @@ def run_selftest(engine: BluePillEngine) -> int:
     sample_ts = epoch_ms_to_apple_ns(1700000000000)
     roundtrip = apple_ts_to_epoch_ms(sample_ts)
     assert abs(roundtrip - 1700000000000) < 1000, "Apple timestamp roundtrip failed"
-    sample_blob = b"streamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84\x12NSAttributedString\x00\x84\x84\x08NSObject\x00\x85\x92\x84\x84\x84\x08NSString\x01\x94\x84\x01+\x10BluePill Selftest\x86"
+    sample_blob = b"streamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84\x12NSAttributedString\x00\x84\x84\x08NSObject\x00\x85\x92\x84\x84\x84\x08NSString\x01\x94\x84\x01+\x11BluePill Selftest\x86"
     decoded = decode_attributed_body(sample_blob)
     assert "BluePill Selftest" in decoded, f"Typedstream decode failed: {decoded}"
     info = engine.get_server_info()
