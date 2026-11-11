@@ -1,0 +1,13 @@
+title: BluePill
+description: Native Linux/Wayland iMessage, SMS & RCS Client & Zero-Electron macOS Relay
+markdown: kramdown
+permalink: pretty
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+include:
+  - "*.html"
+  - "*.png"
+  - "*.svg"
+  - "*.xml"
+  - "*.txt"

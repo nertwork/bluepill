@@ -1,3 +1,16 @@
+---
+layout: default
+title: BluePill Installation & Operations Guide
+permalink: /INSTALLATION_AND_OPERATIONS_GUIDE.html
+redirect_from:
+  - /INSTALLATION_AND_OPERATIONS_GUIDE.md
+  - /INSTALLATION_AND_OPERATIONS_GUIDE
+---
+
+> [!TIP]
+> **Interactive Documentation Portal:** View the formatted dark-mode documentation with one-click copy buttons and live sidebar navigation at:  
+> [**https://nertwork.github.io/bluepill/INSTALLATION_AND_OPERATIONS_GUIDE.html**](https://nertwork.github.io/bluepill/INSTALLATION_AND_OPERATIONS_GUIDE.html)
+
 # 💊 BluePill Complete Installation & Operations Guide
 
 A comprehensive, production-grade installation, administration, and operations manual for **BluePill** (`bluepill` / `bluepill-server`), the open-source, zero-Electron iMessage, RCS, and SMS ecosystem for Linux workstations and macOS relays.
