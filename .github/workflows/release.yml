@@ -30,7 +30,7 @@ jobs:
           ls -lh pkgbuild/*.pkg.tar.zst
 
       - name: Upload Arch Package to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: pkgbuild/*.pkg.tar.zst
           generate_release_notes: true
