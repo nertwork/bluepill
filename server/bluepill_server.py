@@ -275,6 +275,14 @@ class BluePillEngine:
         self._tx_events: Dict[str, threading.Event] = {}
         self._tx_results: Dict[str, Dict[str, Any]] = {}
         self._tx_lock = threading.Lock()
+        self.deleted_chat_guids: set[str] = set()
+        self.deleted_message_guids: set[str] = set()
+        self.deleted_state_path: Optional[str] = (
+            None
+            if str(db_path or "").startswith("/nonexistent")
+            else os.path.expanduser("~/.config/bluepill/deleted_state.json")
+        )
+        self._load_deleted_state()
         self.logger, self.log_file_path = setup_logging(log_to_stderr=enable_background_daemons)
 
         if enable_background_daemons:
@@ -308,6 +316,46 @@ class BluePillEngine:
             "logFile": self.log_file_path,
             "count": len(out_lines),
         }
+
+    def _load_deleted_state(self) -> None:
+        for cand in (
+            self.deleted_state_path,
+            os.path.expanduser("~/.config/imsg/state.json"),
+            os.path.expanduser("~/.config/bluepill/state.json"),
+        ):
+            if not cand or not os.path.exists(cand):
+                continue
+            try:
+                data = json.loads(open(cand, "r", encoding="utf-8").read())
+                for cg in data.get("deletedChats") or []:
+                    if isinstance(cg, str) and cg.strip():
+                        self.deleted_chat_guids.add(cg.strip())
+                dct = data.get("deletedChatTimestamps")
+                if isinstance(dct, dict):
+                    for cg in dct.keys():
+                        if isinstance(cg, str) and cg.strip():
+                            self.deleted_chat_guids.add(cg.strip())
+                for mg in (data.get("deletedMessages") or data.get("deletedMessageGuids") or []):
+                    if isinstance(mg, str) and mg.strip():
+                        self.deleted_message_guids.add(mg.strip())
+            except Exception:
+                pass
+
+    def _save_deleted_state(self) -> None:
+        if not self.deleted_state_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.deleted_state_path), exist_ok=True)
+            payload = {
+                "deletedChats": sorted(self.deleted_chat_guids),
+                "deletedMessages": sorted(self.deleted_message_guids),
+                "updatedAt": int(time.time() * 1000),
+            }
+            with open(self.deleted_state_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            os.chmod(self.deleted_state_path, 0o600)
+        except Exception:
+            pass
 
     def _load_default_password(self) -> str:
         cfg_json = os.path.expanduser("~/.config/bluepill/server.json")
@@ -819,7 +867,7 @@ class BluePillEngine:
                             "style": 45,
                         }
                     )
-        return pins
+        return [p for p in pins if p.get("guid") not in self.deleted_chat_guids]
 
     def query_chats(
         self,
@@ -893,6 +941,8 @@ class BluePillEngine:
             for r in rows:
                 cid = int(r["rowid"])
                 guid = r["guid"] or ""
+                if guid in self.deleted_chat_guids:
+                    continue
                 last_read_ms = apple_ts_to_epoch_ms(r["last_read_message_timestamp"])
                 result.append(
                     {
@@ -984,6 +1034,10 @@ class BluePillEngine:
         out: List[Dict[str, Any]] = []
         for r in rows:
             mid = int(r["ROWID"])
+            row_guid_chk = r["guid"] or ""
+            norm_guid_chk = row_guid_chk.split("/", 1)[-1] if "/" in row_guid_chk else row_guid_chk
+            if row_guid_chk in self.deleted_message_guids or norm_guid_chk in self.deleted_message_guids:
+                continue
             raw_text = r["text"]
             attr_blob = r["attributedBody"]
             decoded_attr = decode_attributed_body(attr_blob) if attr_blob else ""
@@ -1446,7 +1500,7 @@ class BluePillEngine:
                 if helper_guid and temp_guid:
                     self.temp_guid_by_guid[helper_guid] = temp_guid
 
-        if not sent:
+        if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
             sent = self._send_via_applescript(chat_guid, message)
             if sent:
                 used_method = "apple-script"
@@ -1601,7 +1655,7 @@ class BluePillEngine:
                 timeout_s=1.8,
             )
 
-        if (not sent or (db_msg is None and not helper_guid)) and sys.platform == "darwin":
+        if (not sent or (db_msg is None and not helper_guid)) and sys.platform == "darwin" and os.path.exists(self.db_path):
             as_sent = self._send_via_applescript(chat_guid, caption, file_path=abs_file_path)
             if as_sent:
                 sent = True
@@ -1766,6 +1820,111 @@ class BluePillEngine:
         )
         return {"chatGuid": chat_guid, "read": read}
 
+    def delete_chat(self, chat_guid: str) -> Dict[str, Any]:
+        cg = (chat_guid or "").strip()
+        if not cg:
+            return {"deleted": False, "chatGuid": ""}
+        target_guids = {cg}
+        chat_ident = cg.split(";")[-1].strip() if ";" in cg else ""
+        if ";-;" in cg and chat_ident:
+            for svc in ("iMessage", "SMS", "RCS"):
+                target_guids.add(f"{svc};-;{chat_ident}")
+        self.deleted_chat_guids.update(target_guids)
+        self._save_deleted_state()
+
+        db_deleted_chats = 0
+        if os.path.exists(self.db_path):
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                conn.create_function("after_delete_message_plugin", -1, lambda *a: None)
+                conn.create_function("delete_attachment_path", -1, lambda *a: None)
+                conn.create_function("before_delete_attachment_path", -1, lambda *a: None)
+                placeholders = ",".join("?" for _ in target_guids)
+                params = list(target_guids)
+                c_rows = conn.execute(
+                    f"SELECT ROWID, guid FROM chat WHERE guid IN ({placeholders})",
+                    params,
+                ).fetchall()
+                chat_ids = [int(r[0]) for r in c_rows]
+                if chat_ids:
+                    id_ph = ",".join("?" for _ in chat_ids)
+                    m_rows = conn.execute(
+                        f"SELECT message_id FROM chat_message_join WHERE chat_id IN ({id_ph})",
+                        chat_ids,
+                    ).fetchall()
+                    msg_ids = [int(r[0]) for r in m_rows]
+                    conn.execute(f"DELETE FROM chat_message_join WHERE chat_id IN ({id_ph})", chat_ids)
+                    conn.execute(f"DELETE FROM chat_handle_join WHERE chat_id IN ({id_ph})", chat_ids)
+                    if msg_ids:
+                        m_ph = ",".join("?" for _ in msg_ids)
+                        conn.execute(
+                            f"DELETE FROM message WHERE ROWID IN ({m_ph}) AND ROWID NOT IN (SELECT message_id FROM chat_message_join)",
+                            msg_ids,
+                        )
+                    cur = conn.execute(f"DELETE FROM chat WHERE ROWID IN ({id_ph})", chat_ids)
+                    db_deleted_chats = cur.rowcount if cur.rowcount is not None else len(chat_ids)
+                    conn.commit()
+                conn.close()
+            except Exception as exc:
+                self.logger.warning("[delete_chat] db delete warning for %s: %s", cg, exc)
+
+        if sys.platform == "darwin" and os.path.exists(self.db_path):
+            for tg in target_guids:
+                self._send_helper_payload("delete-chat", {"chatGuid": tg})
+            try:
+                esc_cg = cg.replace('\\', '\\\\').replace('"', '\\"')
+                subprocess.run(
+                    ["osascript", "-e", f'tell application "Messages" to delete chat id "{esc_cg}"'],
+                    capture_output=True,
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
+
+        self.logger.info("[delete_chat] chat=%s db_deleted=%d", cg, db_deleted_chats)
+        self.broadcast_socketio("chat-deleted", {"chatGuid": cg})
+        return {"deleted": True, "chatGuid": cg, "dbDeleted": db_deleted_chats}
+
+    def delete_message(self, chat_guid: str, msg_guid: str) -> Dict[str, Any]:
+        cg = (chat_guid or "").strip()
+        mg = (msg_guid or "").strip()
+        if not mg:
+            return {"deleted": False, "messageGuid": ""}
+        norm_mg = mg.split("/", 1)[-1] if "/" in mg else mg
+        if norm_mg.startswith("bp:"):
+            norm_mg = norm_mg[3:]
+        self.deleted_message_guids.add(mg)
+        self.deleted_message_guids.add(norm_mg)
+        self._save_deleted_state()
+
+        db_deleted = 0
+        if os.path.exists(self.db_path):
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
+                conn.create_function("after_delete_message_plugin", -1, lambda *a: None)
+                conn.create_function("delete_attachment_path", -1, lambda *a: None)
+                conn.create_function("before_delete_attachment_path", -1, lambda *a: None)
+                m_rows = conn.execute(
+                    "SELECT ROWID FROM message WHERE guid IN (?, ?)",
+                    (mg, norm_mg),
+                ).fetchall()
+                m_ids = [int(r[0]) for r in m_rows]
+                if m_ids:
+                    m_ph = ",".join("?" for _ in m_ids)
+                    conn.execute(f"DELETE FROM chat_message_join WHERE message_id IN ({m_ph})", m_ids)
+                    cur = conn.execute(f"DELETE FROM message WHERE ROWID IN ({m_ph})", m_ids)
+                    db_deleted = cur.rowcount if cur.rowcount is not None else len(m_ids)
+                    conn.commit()
+                conn.close()
+            except Exception as exc:
+                self.logger.warning("[delete_message] db delete warning for %s: %s", mg, exc)
+
+        if sys.platform == "darwin" and os.path.exists(self.db_path):
+            self._send_helper_payload("delete-message", {"chatGuid": cg, "messageGuid": norm_mg})
+
+        self.logger.info("[delete_message] chat=%s message=%s db_deleted=%d", cg, norm_mg, db_deleted)
+        return {"deleted": True, "chatGuid": cg, "messageGuid": norm_mg, "dbDeleted": db_deleted}
+
     def broadcast_socketio(self, event_name: str, payload: Any) -> None:
         packet = "42" + json.dumps([event_name, payload])
         with self._sessions_lock:
@@ -1808,6 +1967,10 @@ class BluePillEngine:
             return self.mark_chat_read(str(params.get("chatGuid") or ""), True)
         if method in ("chat.unread", "api.chat.unread"):
             return self.mark_chat_read(str(params.get("chatGuid") or ""), False)
+        if method in ("chat.delete", "api.chat.delete"):
+            return self.delete_chat(str(params.get("chatGuid") or ""))
+        if method in ("message.delete", "api.message.delete"):
+            return self.delete_message(str(params.get("chatGuid") or ""), str(params.get("messageGuid") or ""))
         raise ValueError(f"Unknown RPC method: {method}")
 
 
@@ -1939,7 +2102,10 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       <div id="chatList" class="chat-list"></div>
     </aside>
     <main class="main">
-      <div id="chatHeader" class="chat-header">Select a conversation</div>
+      <div id="chatHeader" class="chat-header" style="justify-content:space-between;">
+        <span id="chatHeaderTitle">Select a conversation</span>
+        <button id="deleteChatBtn" onclick="deleteActiveChat()" style="display:none;background:#212832;color:#f85149;border:1px solid #30363d;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;">🗑 Delete</button>
+      </div>
       <div id="messagesPane" class="messages"></div>
       <div class="composer">
         <input id="msgInput" type="text" placeholder="iMessage…" onkeydown="if(event.key==='Enter')sendMsg()" />
@@ -2053,9 +2219,21 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       }
     }
 
+    async function deleteActiveChat() {
+      if (!activeChatGuid) return;
+      await fetch(apiUrl(`/api/v1/chat/${encodeURIComponent(activeChatGuid)}`), { method: 'DELETE' });
+      activeChatGuid = '';
+      document.getElementById('chatHeaderTitle').textContent = 'Select a conversation';
+      document.getElementById('deleteChatBtn').style.display = 'none';
+      document.getElementById('messagesPane').innerHTML = '';
+      await loadPinned();
+      await loadChats();
+    }
+
     async function selectChat(guid, title) {
       activeChatGuid = guid;
-      document.getElementById('chatHeader').textContent = title || guid;
+      document.getElementById('chatHeaderTitle').textContent = title || guid;
+      document.getElementById('deleteChatBtn').style.display = guid ? 'inline-block' : 'none';
       const pane = document.getElementById('messagesPane');
       pane.innerHTML = '';
       const res = await fetch(apiUrl(`/api/v1/chat/${encodeURIComponent(guid)}/message?limit=100&sort=DESC`));
@@ -2113,7 +2291,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({chatGuid: activeChatGuid, message: text, tempGuid: 'web-' + Date.now()})
       });
-      await selectChat(activeChatGuid, document.getElementById('chatHeader').textContent);
+      await selectChat(activeChatGuid, document.getElementById('chatHeaderTitle').textContent);
     }
 
     if (apiKey) connectRelay();
@@ -2492,6 +2670,23 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         if not self._check_auth(parsed):
             self._send_json(401, None, "Unauthorized")
             return
+        path = parsed.path.rstrip("/")
+        m_chat_msg = re.match(r"^/api/v1/chat/([^/]+)/([^/]+)$", path)
+        if m_chat_msg:
+            chat_guid = urllib.parse.unquote(m_chat_msg.group(1))
+            msg_guid = urllib.parse.unquote(m_chat_msg.group(2))
+            self._send_json(200, self.engine.delete_message(chat_guid, msg_guid))
+            return
+        m_chat = re.match(r"^/api/v1/chat/([^/]+)$", path)
+        if m_chat:
+            chat_guid = urllib.parse.unquote(m_chat.group(1))
+            self._send_json(200, self.engine.delete_chat(chat_guid))
+            return
+        m_msg = re.match(r"^/api/v1/message/([^/]+)$", path)
+        if m_msg:
+            msg_guid = urllib.parse.unquote(m_msg.group(1))
+            self._send_json(200, self.engine.delete_message("", msg_guid))
+            return
         self._send_json(200, {"deleted": True})
 
 
@@ -2568,6 +2763,16 @@ def run_selftest(engine: BluePillEngine) -> int:
         ) as dl_resp:
             dl_bytes = dl_resp.read()
         assert dl_bytes == png_bytes, "Downloaded attachment bytes mismatch"
+
+        del_req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/chat/iMessage%3B-%3B%2B15550001111?password=selftest-secret",
+            method="DELETE",
+        )
+        with urllib.request.urlopen(del_req, timeout=5.0) as del_resp:
+            del_json = json.loads(del_resp.read().decode("utf-8"))
+        assert del_json["status"] == 200 and del_json["data"]["deleted"] is True, f"Delete chat failed: {del_json}"
+        assert "iMessage;-;+15550001111" in test_eng.deleted_chat_guids
+        assert "SMS;-;+15550001111" in test_eng.deleted_chat_guids
 
         with urllib.request.urlopen(
             f"http://127.0.0.1:{port}/api/v1/server/logs?password=selftest-secret&lines=20",
