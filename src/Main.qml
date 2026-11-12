@@ -3340,6 +3340,7 @@ ApplicationWindow {
                         required property var modelData
                         required property int index
                         property bool invisibleInkRevealed: false
+                        readonly property bool isGreenService: Boolean(modelData.isGreenBubble || modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
                         readonly property bool isInvisibleInkMsg: (modelData.expressiveEffect === "🕵️ Invisible Ink") || ((modelData.sendEffectLabel || "").toLowerCase().indexOf("invisible ink") !== -1)
                         readonly property bool isAnyPartHovered: (bubbleHover.hovered || (typeof msgTextHover !== "undefined" && msgTextHover.hovered) || actionZoneHover.hovered || actionBarHover.hovered || (typeof invisibleInkMouse !== "undefined" && invisibleInkMouse.containsMouse))
                         width: messageListView.width
@@ -3840,15 +3841,13 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     radius: theme.radius + 2
                                     color: modelData.isFromMe
-                                           ? ((modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
-                                              ? "#30D158" : "#0A84FF")
+                                           ? (msgDelegate.isGreenService ? "#1B6E38" : "#0A84FF")
                                            : "#1e2430"
                                     border.width: 1
                                     border.color: (root.activeActionMessageGuid === modelData.guid)
                                                   ? theme.brightForeground
                                                   : (modelData.isFromMe
-                                                     ? ((modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
-                                                        ? "#248A3D" : "#0066CC")
+                                                     ? (msgDelegate.isGreenService ? "#268C48" : "#0066CC")
                                                      : "#2c3545")
                                     implicitWidth: Math.max(bubbleContent.width + 28, 96)
                                     implicitHeight: bubbleContent.height + 20
@@ -4292,13 +4291,19 @@ ApplicationWindow {
                                                 anchors.fill: parent
                                                 opacity: (msgDelegate.isInvisibleInkMsg && !msgDelegate.invisibleInkRevealed) ? 0.0 : 1.0
                                                 Behavior on opacity { NumberAnimation { duration: 200 } }
-                                                text: modelData.formattedText || root.linkifyText(modelData.text || "")
+                                                text: {
+                                                    var rawHtml = modelData.formattedText || root.linkifyText(modelData.text || "")
+                                                    if (modelData.isFromMe && rawHtml.indexOf("#64B5F6") !== -1) {
+                                                        return rawHtml.replace(/color:\s*#64B5F6;/gi, "color: #FFFFFF; font-weight: 600;")
+                                                    }
+                                                    return rawHtml
+                                                }
                                                 textFormat: TextEdit.RichText
                                                 readOnly: true
                                                 selectByMouse: true
                                                 selectByKeyboard: true
                                                 selectedTextColor: "#ffffff"
-                                                selectionColor: modelData.isFromMe ? "#004080" : theme.accent
+                                                selectionColor: modelData.isFromMe ? (msgDelegate.isGreenService ? "#0F4221" : "#004080") : theme.accent
                                                 font.pixelSize: theme.fontSize
                                                 color: modelData.isFromMe ? "#ffffff" : theme.brightForeground
                                                 wrapMode: TextEdit.Wrap
@@ -4354,9 +4359,9 @@ ApplicationWindow {
                                                 visible: textContainer.visible && msgDelegate.isInvisibleInkMsg && !msgDelegate.invisibleInkRevealed
                                                 clip: true
                                                 radius: 8
-                                                color: modelData.isFromMe ? "#0866c6" : "#252d3d"
+                                                color: modelData.isFromMe ? (msgDelegate.isGreenService ? "#15572C" : "#0866c6") : "#252d3d"
                                                 border.width: 1
-                                                border.color: modelData.isFromMe ? "#5cb3ff" : theme.accent
+                                                border.color: modelData.isFromMe ? (msgDelegate.isGreenService ? "#34D399" : "#5cb3ff") : theme.accent
                                                 z: 10
 
                                                 // Animated shimmering / twinkling dots
@@ -4476,8 +4481,7 @@ ApplicationWindow {
                                                 color: (modelData.isFailed || false)
                                                        ? theme.red
                                                        : (modelData.isFromMe
-                                                          ? ((modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
-                                                             ? "#e0f8e9" : "#d0dff7")
+                                                          ? (msgDelegate.isGreenService ? "#CBEFD8" : "#d0dff7")
                                                           : theme.darkForeground)
                                             }
 
@@ -5299,8 +5303,10 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignVCenter
                             radius: theme.radius
                             color: composerInput.text.trim().length > 0
-                                   ? (backend.selectedChatService !== "iMessage" ? "#30D158" : theme.accent)
+                                   ? (backend.selectedChatService !== "iMessage" ? "#1B6E38" : theme.accent)
                                    : theme.lighterBackground
+                            border.width: (composerInput.text.trim().length > 0 && backend.selectedChatService !== "iMessage") ? 1 : 0
+                            border.color: "#268C48"
 
                             Text {
                                 anchors.centerIn: parent

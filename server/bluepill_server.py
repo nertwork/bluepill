@@ -5034,7 +5034,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       background: var(--bubble-in); align-self: flex-start; word-break: break-word;
     }
     .msg.me { background: var(--accent); color: #fff; align-self: flex-end; }
-    .msg.sms.me { background: var(--green); color: #fff; }
+    .msg.sms.me { background: #1B6E38; border: 1px solid #268C48; color: #fff; }
     .msg img { max-width: 280px; border-radius: 10px; display: block; margin-top: 6px; }
     .msg-meta { font-size: 11px; opacity: 0.78; margin-top: 4px; display: flex; gap: 8px; align-items: center; }
     .otp-btn {
