@@ -1,3 +1,5 @@
+#include <QImageReader>
+#include <QElapsedTimer>
 #include <QKeyEvent>
 #include <QClipboard>
 #include <QGuiApplication>
@@ -4112,24 +4114,30 @@ private slots:
         Backend backend(false);
         backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_clip.json")));
 
-        QImage srcImg(64, 48, QImage::Format_RGBA8888);
+        QImage srcImg(2400, 1800, QImage::Format_RGBA8888);
         srcImg.fill(QColor(30, 144, 255));
-        const QString imgPath = tempDir.filePath(QStringLiteral("sample_photo.png"));
-        QVERIFY(srcImg.save(imgPath, "PNG"));
+        const QString imgPath = tempDir.filePath(QStringLiteral("sample_photo.jpg"));
+        QVERIFY(srcImg.save(imgPath, "JPG", 90));
 
         const QString fileUrl = QUrl::fromLocalFile(imgPath).toString();
+        QElapsedTimer timer;
+        timer.start();
         QVERIFY(backend.copyImageToClipboard(fileUrl, QStringLiteral("att-img-001")));
+        const qint64 copyElapsedMs = timer.elapsed();
+        QVERIFY2(copyElapsedMs < 50, qPrintable(QStringLiteral("copyImageToClipboard took %1ms on GUI thread").arg(copyElapsedMs)));
 
         // Calling copyToClipboard with placeholder "📷 Photo" must NOT overwrite the copied image
         backend.copyToClipboard(QStringLiteral("📷 Photo"), QStringLiteral("message"));
 
+        timer.restart();
         const QString pastedPath = backend.pasteClipboardImageToTempFile();
+        const qint64 pasteElapsedMs = timer.elapsed();
+        QVERIFY2(pasteElapsedMs < 50, qPrintable(QStringLiteral("pasteClipboardImageToTempFile took %1ms on GUI thread").arg(pasteElapsedMs)));
         QVERIFY(!pastedPath.isEmpty());
         QVERIFY(QFileInfo::exists(pastedPath));
-        QImage pastedImg(pastedPath);
-        QVERIFY(!pastedImg.isNull());
-        QCOMPARE(pastedImg.width(), 64);
-        QCOMPARE(pastedImg.height(), 48);
+        QImageReader pastedReader(pastedPath);
+        QVERIFY(pastedReader.canRead());
+        QCOMPARE(pastedReader.size(), QSize(2400, 1800));
 
         // Copying real text clears the staged image so normal text copy works as expected
         backend.copyToClipboard(QStringLiteral("Hello world text"), QStringLiteral("message"));

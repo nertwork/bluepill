@@ -14,6 +14,7 @@
 #include <QFileInfo>
 #include <QImage>
 #include <QImageReader>
+#include <QImageWriter>
 
 static QString cleanIcloudNoteBody(const QString &title, const QString &body) {
     QString cleanTitle = title;
@@ -796,7 +797,7 @@ void Backend::loadMessagesCache() {
 
 void Backend::saveMessagesCache() const {
     if (m_demoMode || m_stateFilePath.isEmpty()) return;
-    m_saveCacheTimer.start(600);
+    m_saveCacheTimer.start(1500);
 }
 
 void Backend::flushMessagesCacheNow(bool async) const {
@@ -807,94 +808,104 @@ void Backend::flushMessagesCacheNow(bool async) const {
     const QString cachePath = messagesCacheFilePath();
     if (cachePath.isEmpty()) return;
 
-    const qint64 cutoffMs = QDateTime::currentMSecsSinceEpoch() - (static_cast<qint64>(m_historySyncDays) * 86400LL * 1000LL);
-    QJsonArray allMessages;
+    const auto cacheSnapshot = m_chatMessagesCache;
+    const auto chatsSnapshot = m_chats;
+    const int historySyncDays = m_historySyncDays;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const qint64 cutoffMs = nowMs - (static_cast<qint64>(historySyncDays) * 86400LL * 1000LL);
 
-    for (auto chatIt = m_chatMessagesCache.constBegin(); chatIt != m_chatMessagesCache.constEnd(); ++chatIt) {
-        const QString chatGuid = chatIt.key();
-        const auto &msgMap = chatIt.value();
-        QList<QJsonObject> chatMsgs = msgMap.values();
-        std::sort(chatMsgs.begin(), chatMsgs.end(), [](const QJsonObject &a, const QJsonObject &b) {
-            return a.value(QStringLiteral("dateCreated")).toVariant().toLongLong() >
-                   b.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
-        });
+    auto buildAndWriteFn = [cachePath, cacheSnapshot, chatsSnapshot, historySyncDays, nowMs, cutoffMs]() {
+        QHash<QString, QJsonObject> chatMetaMap;
+        chatMetaMap.reserve(chatsSnapshot.size());
+        for (const ChatEntry &ce : chatsSnapshot) {
+            if (ce.guid.isEmpty()) continue;
+            QJsonObject chatMetaObj;
+            chatMetaObj.insert(QStringLiteral("guid"), ce.guid);
+            chatMetaObj.insert(QStringLiteral("chatIdentifier"), ce.chatIdentifier);
+            chatMetaObj.insert(QStringLiteral("displayName"), ce.displayName);
+            chatMetaObj.insert(QStringLiteral("style"), ce.isGroup ? 43 : 45);
+            QJsonArray partsArr;
+            for (const QString &h : ce.participantHandles) {
+                QJsonObject pObj;
+                pObj.insert(QStringLiteral("address"), h);
+                partsArr.append(pObj);
+            }
+            if (!partsArr.isEmpty()) {
+                chatMetaObj.insert(QStringLiteral("participants"), partsArr);
+            }
+            chatMetaMap.insert(ce.guid, chatMetaObj);
+        }
 
-        QJsonObject chatMetaObj;
-        chatMetaObj.insert(QStringLiteral("guid"), chatGuid);
-        for (const ChatEntry &ce : m_chats) {
-            if (ce.guid == chatGuid) {
-                chatMetaObj.insert(QStringLiteral("chatIdentifier"), ce.chatIdentifier);
-                chatMetaObj.insert(QStringLiteral("displayName"), ce.displayName);
-                chatMetaObj.insert(QStringLiteral("style"), ce.isGroup ? 43 : 45);
-                QJsonArray partsArr;
-                for (const QString &h : ce.participantHandles) {
-                    QJsonObject pObj;
-                    pObj.insert(QStringLiteral("address"), h);
-                    partsArr.append(pObj);
+        QJsonArray allMessages;
+        for (auto chatIt = cacheSnapshot.constBegin(); chatIt != cacheSnapshot.constEnd(); ++chatIt) {
+            const QString chatGuid = chatIt.key();
+            const auto &msgMap = chatIt.value();
+            QList<QJsonObject> chatMsgs = msgMap.values();
+            std::sort(chatMsgs.begin(), chatMsgs.end(), [](const QJsonObject &a, const QJsonObject &b) {
+                return a.value(QStringLiteral("dateCreated")).toVariant().toLongLong() >
+                       b.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+            });
+
+            QJsonObject chatMetaObj = chatMetaMap.value(chatGuid);
+            if (chatMetaObj.isEmpty()) {
+                chatMetaObj.insert(QStringLiteral("guid"), chatGuid);
+            }
+
+            int keptForChat = 0;
+            for (QJsonObject m : chatMsgs) {
+                const QString mg = m.value(QStringLiteral("guid")).toString().trimmed();
+                if (mg.isEmpty() || mg.startsWith(QStringLiteral("temp-")) || mg.startsWith(QStringLiteral("bp-"))) {
+                    continue;
                 }
-                if (!partsArr.isEmpty()) {
-                    chatMetaObj.insert(QStringLiteral("participants"), partsArr);
+                const qint64 dc = m.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+                if (keptForChat >= 30 && dc > 0 && dc < cutoffMs) {
+                    continue;
                 }
-                break;
+                if (keptForChat >= 80) {
+                    break;
+                }
+                if (m.value(QStringLiteral("text")).toString().trimmed().isEmpty() && m.contains(QStringLiteral("attributedBody"))) {
+                    const QString extracted = Backend::extractMessageText(m);
+                    if (!extracted.isEmpty() && !extracted.startsWith(QStringLiteral("📷 ")) &&
+                        !extracted.startsWith(QStringLiteral("🎬 ")) && !extracted.startsWith(QStringLiteral("🎙️ ")) &&
+                        !extracted.startsWith(QStringLiteral("📎 "))) {
+                        m.insert(QStringLiteral("text"), extracted);
+                    }
+                }
+                m.remove(QStringLiteral("attributedBody"));
+                if (!m.contains(QStringLiteral("chats")) || m.value(QStringLiteral("chats")).toArray().isEmpty()) {
+                    m.insert(QStringLiteral("chats"), QJsonArray{chatMetaObj});
+                } else if (!chatMetaObj.isEmpty()) {
+                    QJsonArray chatsArr = m.value(QStringLiteral("chats")).toArray();
+                    QJsonObject firstChat = chatsArr.first().toObject();
+                    if (chatMetaObj.contains(QStringLiteral("participants"))) {
+                        firstChat.insert(QStringLiteral("participants"), chatMetaObj.value(QStringLiteral("participants")));
+                    }
+                    if (!chatMetaObj.value(QStringLiteral("displayName")).toString().isEmpty()) {
+                        firstChat.insert(QStringLiteral("displayName"), chatMetaObj.value(QStringLiteral("displayName")));
+                    }
+                    if (!chatMetaObj.value(QStringLiteral("chatIdentifier")).toString().isEmpty() &&
+                        firstChat.value(QStringLiteral("chatIdentifier")).toString().isEmpty()) {
+                        firstChat.insert(QStringLiteral("chatIdentifier"), chatMetaObj.value(QStringLiteral("chatIdentifier")));
+                    }
+                    if (chatMetaObj.contains(QStringLiteral("style"))) {
+                        firstChat.insert(QStringLiteral("style"), chatMetaObj.value(QStringLiteral("style")));
+                    }
+                    chatsArr[0] = firstChat;
+                    m.insert(QStringLiteral("chats"), chatsArr);
+                }
+                allMessages.append(m);
+                ++keptForChat;
             }
         }
 
-        int keptForChat = 0;
-        for (QJsonObject m : chatMsgs) {
-            const QString mg = m.value(QStringLiteral("guid")).toString().trimmed();
-            if (mg.isEmpty() || mg.startsWith(QStringLiteral("temp-")) || mg.startsWith(QStringLiteral("bp-"))) {
-                continue;
-            }
-            const qint64 dc = m.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
-            if (keptForChat >= 30 && dc > 0 && dc < cutoffMs) {
-                continue;
-            }
-            if (keptForChat >= 80) {
-                break;
-            }
-            if (m.value(QStringLiteral("text")).toString().trimmed().isEmpty() && m.contains(QStringLiteral("attributedBody"))) {
-                const QString extracted = extractMessageText(m);
-                if (!extracted.isEmpty() && !extracted.startsWith(QStringLiteral("📷 ")) &&
-                    !extracted.startsWith(QStringLiteral("🎬 ")) && !extracted.startsWith(QStringLiteral("🎙️ ")) &&
-                    !extracted.startsWith(QStringLiteral("📎 "))) {
-                    m.insert(QStringLiteral("text"), extracted);
-                }
-            }
-            m.remove(QStringLiteral("attributedBody"));
-            if (!m.contains(QStringLiteral("chats")) || m.value(QStringLiteral("chats")).toArray().isEmpty()) {
-                m.insert(QStringLiteral("chats"), QJsonArray{chatMetaObj});
-            } else if (!chatMetaObj.isEmpty()) {
-                QJsonArray chatsArr = m.value(QStringLiteral("chats")).toArray();
-                QJsonObject firstChat = chatsArr.first().toObject();
-                if (chatMetaObj.contains(QStringLiteral("participants"))) {
-                    firstChat.insert(QStringLiteral("participants"), chatMetaObj.value(QStringLiteral("participants")));
-                }
-                if (!chatMetaObj.value(QStringLiteral("displayName")).toString().isEmpty()) {
-                    firstChat.insert(QStringLiteral("displayName"), chatMetaObj.value(QStringLiteral("displayName")));
-                }
-                if (!chatMetaObj.value(QStringLiteral("chatIdentifier")).toString().isEmpty() &&
-                    firstChat.value(QStringLiteral("chatIdentifier")).toString().isEmpty()) {
-                    firstChat.insert(QStringLiteral("chatIdentifier"), chatMetaObj.value(QStringLiteral("chatIdentifier")));
-                }
-                if (chatMetaObj.contains(QStringLiteral("style"))) {
-                    firstChat.insert(QStringLiteral("style"), chatMetaObj.value(QStringLiteral("style")));
-                }
-                chatsArr[0] = firstChat;
-                m.insert(QStringLiteral("chats"), chatsArr);
-            }
-            allMessages.append(m);
-            ++keptForChat;
-        }
-    }
+        QJsonObject root;
+        root.insert(QStringLiteral("version"), 1);
+        root.insert(QStringLiteral("historySyncDays"), historySyncDays);
+        root.insert(QStringLiteral("savedAt"), nowMs);
+        root.insert(QStringLiteral("messages"), allMessages);
 
-    QJsonObject root;
-    root.insert(QStringLiteral("version"), 1);
-    root.insert(QStringLiteral("historySyncDays"), m_historySyncDays);
-    root.insert(QStringLiteral("savedAt"), QDateTime::currentMSecsSinceEpoch());
-    root.insert(QStringLiteral("messages"), allMessages);
-
-    const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
-    auto writeDiskFn = [cachePath, payload]() {
+        const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
         QFileInfo fi(cachePath);
         QDir().mkpath(fi.absolutePath());
         const QString tmpPath = cachePath + QStringLiteral(".tmp");
@@ -909,9 +920,9 @@ void Backend::flushMessagesCacheNow(bool async) const {
     };
 
     if (async) {
-        QThreadPool::globalInstance()->start(writeDiskFn);
+        QThreadPool::globalInstance()->start(buildAndWriteFn);
     } else {
-        writeDiskFn();
+        buildAndWriteFn();
     }
 }
 
@@ -4979,9 +4990,7 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
     }
     const QString existingCached = lookupCachedAttachmentPath(m_attachmentPaths, attachmentGuid);
     if (!existingCached.isEmpty() && QFileInfo::exists(existingCached) && QFileInfo(existingCached).size() >= 100) {
-        if (!isImageMimeOrExt(QString(), existingCached) || QImageReader(existingCached).canRead()) {
-            return;
-        }
+        return;
     }
 
     const QString cacheDir = QDir::homePath() + QStringLiteral("/.cache/imsg/attachments");
@@ -6319,60 +6328,78 @@ bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString 
         return false;
     }
 
-    QImageReader reader(localPath);
-    reader.setAutoTransform(true);
-    QImage img = reader.read();
-    if (img.isNull()) {
-        for (const QByteArray &fmt : {QByteArrayLiteral("JPEG"), QByteArrayLiteral("PNG"), QByteArrayLiteral("WEBP"), QByteArrayLiteral("GIF"), QByteArrayLiteral("HEIC"), QByteArrayLiteral("HEIF")}) {
-            QImageReader fallbackReader(localPath, fmt);
-            fallbackReader.setAutoTransform(true);
-            img = fallbackReader.read();
-            if (!img.isNull()) break;
-        }
-    }
-
-    if (img.isNull()) {
+    // Header-only validation (<0.1ms; does NOT decode pixels on the GUI thread)
+    QImageReader headerReader(localPath);
+    if (!headerReader.canRead() && !isImageMimeOrExt(QString(), localPath)) {
         emit toastMessage(QStringLiteral("⚠ Could not decode image for clipboard"));
         return false;
     }
 
-    const QString clipPngPath = QDir::tempPath() + QStringLiteral("/bluepill-clipboard-image.png");
-    if (!img.save(clipPngPath, "PNG")) {
-        emit toastMessage(QStringLiteral("⚠ Failed to stage image for clipboard"));
-        return false;
-    }
-
-    m_lastCopiedImagePath = clipPngPath;
+    m_lastCopiedImagePath = localPath;
     m_lastCopiedImageTimeMs = QDateTime::currentMSecsSinceEpoch();
 
+    // Instant non-blocking clipboard URL registration (<0.1ms on GUI thread)
     if (QClipboard *cb = QGuiApplication::clipboard()) {
         auto *mime = new QMimeData();
-        mime->setImageData(img);
-        mime->setUrls({QUrl::fromLocalFile(clipPngPath)});
-        cb->setMimeData(mime, QClipboard::Clipboard);
-        if (cb->supportsSelection()) {
-            auto *selMime = new QMimeData();
-            selMime->setImageData(img);
-            selMime->setUrls({QUrl::fromLocalFile(clipPngPath)});
-            cb->setMimeData(selMime, QClipboard::Selection);
-        }
-    }
-
-    if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
-        QFileInfo::exists(QStringLiteral("/usr/bin/wl-copy"))) {
-        QFile pngFile(clipPngPath);
-        if (pngFile.open(QIODevice::ReadOnly)) {
-            const QByteArray pngBytes = pngFile.readAll();
-            pngFile.close();
-            if (!pngBytes.isEmpty()) {
-                QProcess *proc = new QProcess(this);
-                connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                        proc, &QObject::deleteLater);
-                proc->start(QStringLiteral("/usr/bin/wl-copy"), QStringList{QStringLiteral("--type"), QStringLiteral("image/png")});
-                proc->write(pngBytes);
-                proc->closeWriteChannel();
+        mime->setUrls({QUrl::fromLocalFile(localPath)});
+        if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+            const QSize sz = headerReader.size();
+            if (sz.isValid() && sz.width() * sz.height() <= 256 * 256) {
+                const QImage tinyImg = headerReader.read();
+                if (!tinyImg.isNull()) {
+                    mime->setImageData(tinyImg);
+                }
             }
         }
+        cb->setMimeData(mime, QClipboard::Clipboard);
+    }
+
+    // Offload PNG encoding and Wayland wl-copy piping to background worker thread so GUI never freezes
+    if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
+        QFileInfo::exists(QStringLiteral("/usr/bin/wl-copy"))) {
+        QThreadPool::globalInstance()->start([localPath]() {
+            QByteArray pngBytes;
+            if (localPath.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive)) {
+                QFile rawPng(localPath);
+                if (rawPng.open(QIODevice::ReadOnly)) {
+                    pngBytes = rawPng.readAll();
+                    rawPng.close();
+                }
+            } else {
+                QImageReader bgReader(localPath);
+                bgReader.setAutoTransform(true);
+                QImage img = bgReader.read();
+                if (img.isNull()) {
+                    for (const QByteArray &fmt : {QByteArrayLiteral("JPEG"), QByteArrayLiteral("PNG"), QByteArrayLiteral("WEBP"), QByteArrayLiteral("GIF")}) {
+                        QImageReader fb(localPath, fmt);
+                        fb.setAutoTransform(true);
+                        img = fb.read();
+                        if (!img.isNull()) break;
+                    }
+                }
+                if (!img.isNull()) {
+                    const QString clipPngPath = QDir::tempPath() + QStringLiteral("/bluepill-clipboard-image.png");
+                    QImageWriter writer(clipPngPath, QByteArrayLiteral("png"));
+                    writer.setCompression(1); // Fast zlib level 1 (~6x faster than default)
+                    if (writer.write(img)) {
+                        QFile pngFile(clipPngPath);
+                        if (pngFile.open(QIODevice::ReadOnly)) {
+                            pngBytes = pngFile.readAll();
+                            pngFile.close();
+                        }
+                    }
+                }
+            }
+            if (!pngBytes.isEmpty()) {
+                QProcess proc;
+                proc.start(QStringLiteral("/usr/bin/wl-copy"), QStringList{QStringLiteral("--type"), QStringLiteral("image/png")});
+                if (proc.waitForStarted(1000)) {
+                    proc.write(pngBytes);
+                    proc.closeWriteChannel();
+                    proc.waitForFinished(3000);
+                }
+            }
+        });
     }
 
     emit toastMessage(QStringLiteral("✓ Copied image to clipboard"));
@@ -6382,15 +6409,20 @@ bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString 
 QString Backend::pasteClipboardImageToTempFile() {
     QClipboard *cb = QGuiApplication::clipboard();
     const QMimeData *mime = cb ? cb->mimeData() : nullptr;
-    if (mime && mime->hasImage()) {
-        const QImage img = cb->image();
-        if (!img.isNull()) {
-            const QString outPath = QDir::tempPath() + QStringLiteral("/bluepill-paste-%1.png").arg(QDateTime::currentMSecsSinceEpoch());
-            if (img.save(outPath, "PNG")) {
-                return outPath;
-            }
+
+    // Priority 1 (0ms Fast-Path): Use in-app copied image path directly without decoding or re-encoding
+    if (!m_lastCopiedImagePath.isEmpty() && QFileInfo::exists(m_lastCopiedImagePath)) {
+        const QString clipText = (mime && mime->hasText()) ? mime->text().trimmed() : QString();
+        if (clipText.isEmpty() ||
+            clipText == QStringLiteral("📷 Photo") ||
+            clipText.startsWith(QStringLiteral("📷 ")) ||
+            clipText.startsWith(QStringLiteral("file://")) ||
+            clipText == m_lastCopiedImagePath) {
+            return m_lastCopiedImagePath;
         }
     }
+
+    // Priority 2 (0ms Fast-Path): Local image file URL in clipboard
     if (mime && mime->hasUrls()) {
         for (const QUrl &u : mime->urls()) {
             if (u.isLocalFile()) {
@@ -6401,6 +6433,8 @@ QString Backend::pasteClipboardImageToTempFile() {
             }
         }
     }
+
+    // Priority 3 (0ms Fast-Path): Local file:// or absolute image path in clipboard text
     if (mime && mime->hasText()) {
         const QString txt = mime->text().trimmed();
         if (txt.startsWith(QStringLiteral("file://")) || txt.startsWith(QStringLiteral("/"))) {
@@ -6410,40 +6444,54 @@ QString Backend::pasteClipboardImageToTempFile() {
             }
         }
     }
-    if (!m_lastCopiedImagePath.isEmpty() && QFileInfo::exists(m_lastCopiedImagePath)) {
-        const QString clipText = (mime && mime->hasText()) ? mime->text().trimmed() : QString();
-        if (clipText.isEmpty() ||
-            clipText == QStringLiteral("📷 Photo") ||
-            clipText.startsWith(QStringLiteral("📷 ")) ||
-            clipText.startsWith(QStringLiteral("file://"))) {
+
+    // Priority 4: External bitmap image in clipboard (e.g. screenshot tool / browser Copy Image)
+    if (mime && mime->hasImage()) {
+        const QImage img = cb->image();
+        if (!img.isNull()) {
             const QString outPath = QDir::tempPath() + QStringLiteral("/bluepill-paste-%1.png").arg(QDateTime::currentMSecsSinceEpoch());
-            if (QFile::copy(m_lastCopiedImagePath, outPath)) {
+            QImageWriter writer(outPath, QByteArrayLiteral("png"));
+            writer.setCompression(1);
+            if (writer.write(img)) {
                 return outPath;
             }
-            return m_lastCopiedImagePath;
         }
     }
+
+    // Priority 5: Wayland wl-paste raw byte stream fallback (no QImage decode/re-encode)
     if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
         QFileInfo::exists(QStringLiteral("/usr/bin/wl-paste"))) {
         const QString clipText = (mime && mime->hasText()) ? mime->text().trimmed() : QString();
         if (clipText.isEmpty() || clipText == QStringLiteral("📷 Photo") || clipText.startsWith(QStringLiteral("📷 "))) {
             QProcess listProc;
             listProc.start(QStringLiteral("/usr/bin/wl-paste"), QStringList{QStringLiteral("--list-types")});
-            if (listProc.waitForFinished(800)) {
+            if (listProc.waitForFinished(250)) {
                 const QString typesOut = QString::fromUtf8(listProc.readAllStandardOutput());
                 QString targetMime;
-                if (typesOut.contains(QStringLiteral("image/png"))) targetMime = QStringLiteral("image/png");
-                else if (typesOut.contains(QStringLiteral("image/jpeg"))) targetMime = QStringLiteral("image/jpeg");
-                else if (typesOut.contains(QStringLiteral("image/webp"))) targetMime = QStringLiteral("image/webp");
+                QString ext;
+                if (typesOut.contains(QStringLiteral("image/png"))) {
+                    targetMime = QStringLiteral("image/png");
+                    ext = QStringLiteral(".png");
+                } else if (typesOut.contains(QStringLiteral("image/jpeg"))) {
+                    targetMime = QStringLiteral("image/jpeg");
+                    ext = QStringLiteral(".jpg");
+                } else if (typesOut.contains(QStringLiteral("image/webp"))) {
+                    targetMime = QStringLiteral("image/webp");
+                    ext = QStringLiteral(".webp");
+                }
                 if (!targetMime.isEmpty()) {
                     QProcess pasteProc;
                     pasteProc.start(QStringLiteral("/usr/bin/wl-paste"), QStringList{QStringLiteral("--type"), targetMime});
-                    if (pasteProc.waitForFinished(1500)) {
+                    if (pasteProc.waitForFinished(450)) {
                         const QByteArray rawBytes = pasteProc.readAllStandardOutput();
-                        QImage wlImg;
-                        if (wlImg.loadFromData(rawBytes)) {
-                            const QString outPath = QDir::tempPath() + QStringLiteral("/bluepill-paste-%1.png").arg(QDateTime::currentMSecsSinceEpoch());
-                            if (wlImg.save(outPath, "PNG")) {
+                        if (rawBytes.size() >= 64) {
+                            const QString outPath = QDir::tempPath() + QStringLiteral("/bluepill-paste-%1%2")
+                                                                           .arg(QDateTime::currentMSecsSinceEpoch())
+                                                                           .arg(ext);
+                            QFile outFile(outPath);
+                            if (outFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                                outFile.write(rawBytes);
+                                outFile.close();
                                 return outPath;
                             }
                         }
@@ -6460,8 +6508,10 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     QFileInfo fi(filePath.trimmed());
     if (!fi.exists() || !fi.isFile()) return;
     const QString tempGuid = QStringLiteral("temp-att-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString localUrl = QUrl::fromLocalFile(fi.absoluteFilePath()).toString();
+    const QString absLocalPath = fi.absoluteFilePath();
+    const QString localUrl = QUrl::fromLocalFile(absLocalPath).toString();
     const bool isImg = isImageMimeOrExt(QString(), fi.fileName());
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     QVariantMap attMap{
         {QStringLiteral("guid"), tempGuid},
         {QStringLiteral("name"), fi.fileName()},
@@ -6493,14 +6543,34 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
         optimistic.insert(QStringLiteral("imageAttachmentCount"), 0);
     }
     optimistic.insert(QStringLiteral("receiptText"), m_demoMode ? QStringLiteral("Delivered") : QStringLiteral("Sending..."));
-    optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), QDateTime::currentMSecsSinceEpoch());
+    optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), nowMs);
     if (chatGuid == m_selectedChatGuid) {
         emit aboutToChangeMessages();
         m_messages.append(optimistic);
         emit messagesChanged();
     }
+
+    m_unreadOverrides.remove(chatGuid);
+    for (ChatEntry &c : m_chats) {
+        if (c.guid == chatGuid) {
+            c.lastMessagePreview = caption.trimmed().isEmpty()
+                                       ? (isImg ? QStringLiteral("📷 Photo") : (QStringLiteral("📎 ") + fi.fileName()))
+                                       : caption.trimmed();
+            c.lastMessageDate = nowMs;
+            c.relativeTime = QStringLiteral("now");
+            c.unreadCount = 0;
+            m_readWatermarks[chatGuid] = qMax(m_readWatermarks.value(chatGuid, 0), nowMs);
+            break;
+        }
+    }
+    sortChats();
+    emit chatsChanged();
     emit toastMessage(QStringLiteral("📎 Sending %1...").arg(fi.fileName()));
     if (m_demoMode || m_serverUrl.isEmpty()) return;
+
+    ++m_activeSendCount;
+    emit sendingMessageChanged();
+
     QHttpMultiPart *multiPart = new QHttpMultiPart(QHttpMultiPart::FormDataType);
     auto addTextPart = [multiPart](const QByteArray &name, const QString &val) {
         QHttpPart p;
@@ -6513,9 +6583,15 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     addTextPart("name", fi.fileName());
     addTextPart("method", QStringLiteral("private-api"));
     if (!caption.trimmed().isEmpty()) addTextPart("message", caption.trimmed());
-    QFile *file = new QFile(fi.absoluteFilePath(), multiPart);
-    if (!file->open(QIODevice::ReadOnly)) { delete multiPart; return; }
-    const QString absLocalPath = fi.absoluteFilePath();
+    QFile *file = new QFile(absLocalPath, multiPart);
+    if (!file->open(QIODevice::ReadOnly)) {
+        delete multiPart;
+        if (m_activeSendCount > 0) {
+            --m_activeSendCount;
+            emit sendingMessageChanged();
+        }
+        return;
+    }
     QHttpPart filePart;
     filePart.setHeader(QNetworkRequest::ContentDispositionHeader,
                        QVariant(QStringLiteral("form-data; name=\"attachment\"; filename=\"%1\"").arg(fi.fileName())));
@@ -6528,50 +6604,73 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     multiPart->setParent(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid, tempGuid, absLocalPath]() {
         reply->deleteLater();
+        if (m_activeSendCount > 0) {
+            --m_activeSendCount;
+            emit sendingMessageChanged();
+        }
         if (reply->error() == QNetworkReply::NoError) {
             const QByteArray respBytes = reply->readAll();
             const QJsonObject dataObj = QJsonDocument::fromJson(respBytes).object().value(QStringLiteral("data")).toObject();
             const QString realGuid = dataObj.value(QStringLiteral("guid")).toString();
             const QJsonArray atts = dataObj.value(QStringLiteral("attachments")).toArray();
+            QString firstAttGuid;
             for (const QJsonValue &av : atts) {
                 const QString ag = av.toObject().value(QStringLiteral("guid")).toString();
                 if (!ag.isEmpty() && QFileInfo::exists(absLocalPath)) {
-                    m_attachmentPaths.insert(ag, absLocalPath);
+                    insertCachedAttachmentPath(m_attachmentPaths, ag, absLocalPath);
+                    if (firstAttGuid.isEmpty()) firstAttGuid = ag;
                 }
             }
             if (!realGuid.isEmpty()) {
                 m_seenMessageGuids.insert(realGuid);
                 cacheMessageForChat(chatGuid, dataObj);
             }
-            bool updatedOpt = false;
-            for (int i = 0; i < m_messages.size(); ++i) {
-                QVariantMap m = m_messages[i].toMap();
-                if (m.value(QStringLiteral("guid")).toString() == tempGuid ||
-                    (!realGuid.isEmpty() && m.value(QStringLiteral("guid")).toString() == realGuid)) {
-                    if (!realGuid.isEmpty()) {
-                        m.insert(QStringLiteral("guid"), realGuid);
+            if (chatGuid == m_selectedChatGuid) {
+                bool updatedOpt = false;
+                for (int i = 0; i < m_messages.size(); ++i) {
+                    QVariantMap m = m_messages[i].toMap();
+                    if (m.value(QStringLiteral("guid")).toString() == tempGuid ||
+                        (!realGuid.isEmpty() && m.value(QStringLiteral("guid")).toString() == realGuid)) {
+                        if (!realGuid.isEmpty()) {
+                            m.insert(QStringLiteral("guid"), realGuid);
+                        }
+                        if (!firstAttGuid.isEmpty()) {
+                            m.insert(QStringLiteral("attachmentGuid"), firstAttGuid);
+                            QVariantList imgList = m.value(QStringLiteral("imageAttachments")).toList();
+                            if (!imgList.isEmpty()) {
+                                QVariantMap firstImg = imgList[0].toMap();
+                                firstImg.insert(QStringLiteral("guid"), firstAttGuid);
+                                imgList[0] = firstImg;
+                                m.insert(QStringLiteral("imageAttachments"), imgList);
+                            }
+                        }
+                        m.insert(QStringLiteral("receiptText"), QStringLiteral("Delivered"));
+                        m_messages[i] = m;
+                        updatedOpt = true;
+                        break;
                     }
-                    m.insert(QStringLiteral("receiptText"), QStringLiteral("Delivered"));
-                    m_messages[i] = m;
-                    updatedOpt = true;
-                    break;
+                }
+                if (updatedOpt) {
+                    emit messagesChanged();
+                } else {
+                    rebuildSelectedChatMessages();
                 }
             }
-            if (updatedOpt) {
-                emit messagesChanged();
-            } else {
-                rebuildSelectedChatMessages();
-            }
             saveMessagesCache();
-            loadChatMessages(chatGuid);
+            if (realGuid.isEmpty()) {
+                loadChatMessages(chatGuid);
+            }
         } else {
-            for (int i = 0; i < m_messages.size(); ++i) {
-                QVariantMap m = m_messages[i].toMap();
-                if (m.value(QStringLiteral("guid")).toString() == tempGuid) {
-                    m.insert(QStringLiteral("receiptText"), QStringLiteral("Not Delivered"));
-                    m_messages[i] = m;
-                    emit messagesChanged();
-                    break;
+            if (chatGuid == m_selectedChatGuid) {
+                for (int i = 0; i < m_messages.size(); ++i) {
+                    QVariantMap m = m_messages[i].toMap();
+                    if (m.value(QStringLiteral("guid")).toString() == tempGuid) {
+                        m.insert(QStringLiteral("receiptText"), QStringLiteral("⚠ Not Delivered"));
+                        m.insert(QStringLiteral("isFailed"), true);
+                        m_messages[i] = m;
+                        emit messagesChanged();
+                        break;
+                    }
                 }
             }
             emit toastMessage(QStringLiteral("⚠ Failed to send attachment"));
