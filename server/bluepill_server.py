@@ -25,6 +25,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import datetime
 import gzip
+import zlib
 import mimetypes
 import os
 import platform
@@ -2752,9 +2753,33 @@ class BluePillEngine:
         resize: Optional[int] = None,
         transcode_audio: bool = False,
     ) -> Optional[Tuple[str, str]]:
-        return self.resolve_attachment_file(
+        clean_guid = urllib.parse.unquote(guid).strip()
+        safe_guid = re.sub(r"[^A-Za-z0-9_-]", "_", clean_guid) if clean_guid else ""
+        if safe_guid:
+            photo_cache = os.path.expanduser(f"~/.cache/bluepill/icloud-photos/{safe_guid}.jpg")
+            if os.path.exists(photo_cache):
+                return photo_cache, "image/jpeg"
+        res = self.resolve_attachment_file(
             guid, convert_heic=convert_heic, resize=resize, transcode_audio=transcode_audio
         )
+        if res and sys.platform == "darwin" and safe_guid and os.path.exists("/usr/bin/sips"):
+            real_path, mime = res
+            lower_ext = os.path.splitext(real_path)[1].lower()
+            if lower_ext in (".heic", ".heif", ".tiff", ".tif"):
+                cache_dir = os.path.expanduser("~/.cache/bluepill/icloud-photos")
+                os.makedirs(cache_dir, exist_ok=True)
+                cached_jpg = os.path.join(cache_dir, f"{safe_guid}.jpg")
+                if not os.path.exists(cached_jpg):
+                    subprocess.run(
+                        ["/usr/bin/sips", "-s", "format", "jpeg", real_path, "--out", cached_jpg],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10.0,
+                        check=False,
+                    )
+                if os.path.exists(cached_jpg):
+                    return cached_jpg, "image/jpeg"
+        return res
 
     def _resolve_photos_library_asset(self, guid: str) -> Optional[Tuple[str, str]]:
         clean_guid = urllib.parse.unquote(guid).strip()
@@ -2901,6 +2926,77 @@ class BluePillEngine:
             "mimeType": "",
         }
 
+    @staticmethod
+    def _get_image_dimensions(file_path: str) -> Tuple[int, int, bool]:
+        if not file_path or not os.path.exists(file_path):
+            return 0, 0, False
+        # Try sips on macOS if file is HEIC
+        lower = file_path.lower()
+        if sys.platform == "darwin" and lower.endswith((".heic", ".heif", ".tiff", ".tif")) and os.path.exists("/usr/bin/sips"):
+            try:
+                res = subprocess.run(
+                    ["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight", file_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                    check=False,
+                )
+                w_match = re.search(r"pixelWidth:\s*(\d+)", res.stdout)
+                h_match = re.search(r"pixelHeight:\s*(\d+)", res.stdout)
+                if w_match and h_match:
+                    w, h = int(w_match.group(1)), int(h_match.group(1))
+                    return w, h, (h > w)
+            except Exception:
+                pass
+        # Pure-Python inspection for JPEG, PNG, GIF
+        try:
+            with open(file_path, "rb") as f:
+                data = f.read(65536)
+            if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+                w, h = struct.unpack(">II", data[16:24])
+                return w, h, (h > w)
+            if (data.startswith(b"GIF87a") or data.startswith(b"GIF89a")) and len(data) >= 10:
+                w, h = struct.unpack("<HH", data[6:10])
+                return w, h, (h > w)
+            if data.startswith(b"\xff\xd8"):
+                idx = 2
+                orientation = 1
+                w, h = 0, 0
+                while idx < len(data) - 4:
+                    if data[idx] != 0xFF:
+                        break
+                    marker = data[idx + 1]
+                    idx += 2
+                    if marker in (0xD9, 0xDA):
+                        break
+                    length = struct.unpack(">H", data[idx : idx + 2])[0]
+                    if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                        h, w = struct.unpack(">HH", data[idx + 3 : idx + 7])
+                    elif marker == 0xE1 and data[idx + 2 : idx + 8] == b"Exif\x00\x00":
+                        exif_data = data[idx + 8 : idx + length]
+                        if len(exif_data) > 14:
+                            endian = exif_data[:2]
+                            fmt = ">" if endian == b"MM" else "<"
+                            if (endian == b"MM" or endian == b"II") and struct.unpack(fmt + "H", exif_data[2:4])[0] == 0x002A:
+                                first_ifd = struct.unpack(fmt + "I", exif_data[4:8])[0]
+                                if first_ifd + 2 < len(exif_data):
+                                    num_entries = struct.unpack(fmt + "H", exif_data[first_ifd : first_ifd + 2])[0]
+                                    for e in range(min(num_entries, 64)):
+                                        entry_offset = first_ifd + 2 + e * 12
+                                        if entry_offset + 12 > len(exif_data):
+                                            break
+                                        tag = struct.unpack(fmt + "H", exif_data[entry_offset : entry_offset + 2])[0]
+                                        if tag == 0x0112:
+                                            orientation = struct.unpack(fmt + "H", exif_data[entry_offset + 8 : entry_offset + 10])[0]
+                                            break
+                    idx += length
+                if w > 0 and h > 0:
+                    is_p = (h > w) if orientation not in (5, 6, 7, 8) else (w > h)
+                    return w, h, is_p
+        except Exception:
+            pass
+        return 0, 0, False
+
     def query_icloud_photos(self, limit: int = 48) -> List[Dict[str, Any]]:
         clamped_limit = max(1, min(int(limit or 48), 100))
         photos_lib = os.path.expanduser("~/Pictures/Photos Library.photoslibrary")
@@ -2909,27 +3005,55 @@ class BluePillEngine:
         seen_guids: set[str] = set()
         chat_photos: List[Dict[str, Any]] = []
         lib_photos: List[Dict[str, Any]] = []
+        cache_dir = os.path.expanduser("~/.cache/bluepill/icloud-photos")
 
-        # 1. Query chat.db image attachments
+        # 1. Query chat.db image attachments strictly filtered to iCloud CloudKit camera photos
         if os.path.exists(self.db_path):
             try:
                 conn = self._open_chat_db()
                 try:
-                    rows = conn.execute(
-                        """
-                        SELECT guid, filename, mime_type, total_bytes, transfer_state, transfer_name
+                    cols = {c[1] for c in conn.execute("PRAGMA table_info(attachment)").fetchall()}
+                    has_is_sticker = "is_sticker" in cols
+                    has_transfer_name = "transfer_name" in cols
+                    has_transfer_state = "transfer_state" in cols
+
+                    where_clauses = [
+                        "COALESCE(mime_type, '') IN ('image/heic', 'image/heif', 'image/jpeg', 'image/png')"
+                    ]
+                    if has_is_sticker:
+                        where_clauses.append("COALESCE(is_sticker, 0) = 0")
+                    if has_transfer_name:
+                        where_clauses.append("COALESCE(transfer_name, '') NOT LIKE 'sts-%'")
+                        where_clauses.append("COALESCE(transfer_name, '') NOT LIKE 'bluepill-%'")
+                        where_clauses.append("COALESCE(transfer_name, '') NOT LIKE '%.gif'")
+                        where_clauses.append("COALESCE(transfer_name, '') NOT LIKE '%.GIF'")
+                        where_clauses.append(
+                            "(COALESCE(transfer_name, '') LIKE 'IMG_%' OR COALESCE(transfer_name, '') LIKE '%__%' OR COALESCE(mime_type, '') = 'image/heic')"
+                        )
+                    else:
+                        where_clauses.append("COALESCE(mime_type, '') = 'image/heic'")
+
+                    order_clause = (
+                        "ORDER BY CASE WHEN transfer_state = 5 THEN 0 ELSE 1 END, ROWID DESC"
+                        if has_transfer_state
+                        else "ORDER BY ROWID DESC"
+                    )
+
+                    chat_sql = f"""
+                        SELECT guid, filename, mime_type, total_bytes,
+                               {('transfer_state' if has_transfer_state else '5 AS transfer_state')},
+                               {('transfer_name' if has_transfer_name else "'' AS transfer_name")}
                         FROM attachment
-                        WHERE mime_type LIKE 'image/%'
-                        ORDER BY ROWID DESC
+                        WHERE {' AND '.join(where_clauses)}
+                        {order_clause}
                         LIMIT ?
-                        """,
-                        (clamped_limit,),
-                    ).fetchall()
+                    """
+                    fetch_limit = max(clamped_limit * 2, 60)
+                    rows = conn.execute(chat_sql, (fetch_limit,)).fetchall()
                     for r in rows:
                         g = str(r["guid"] or "").strip()
                         if not g or g in seen_guids:
                             continue
-                        seen_guids.add(g)
                         fn = str(r["filename"] or "").strip()
                         raw_path = os.path.expanduser(fn) if fn else ""
                         real_p = os.path.realpath(raw_path) if raw_path else ""
@@ -2940,17 +3064,58 @@ class BluePillEngine:
                             or (os.path.basename(real_p) if real_p else "")
                             or f"photo_{g[:8]}.jpg"
                         )
+                        lower_name = name.lower()
+                        # Strictly filter out stickers, GIFs, and desktop pastes (IMG_*, <id>__*, or HEIC)
+                        if not (
+                            name.startswith("IMG_")
+                            or "__" in name
+                            or str(r["mime_type"] or "") == "image/heic"
+                            or lower_name.endswith((".heic", ".heif"))
+                        ):
+                            continue
+                        seen_guids.add(g)
+                        safe_guid = re.sub(r"[^A-Za-z0-9_-]", "_", g)
+                        cached_target = os.path.join(cache_dir, f"{safe_guid}.jpg")
+                        mime = str(r["mime_type"] or "image/jpeg")
+                        w, h, is_p = 0, 0, False
+                        if os.path.exists(cached_target):
+                            w, h, is_p = self._get_image_dimensions(cached_target)
+                            mime = "image/jpeg"
+                        elif exists_on_disk:
+                            ext = os.path.splitext(real_p)[1].lower()
+                            if sys.platform == "darwin" and ext in (".heic", ".heif", ".tiff", ".tif") and os.path.exists("/usr/bin/sips"):
+                                os.makedirs(cache_dir, exist_ok=True)
+                                try:
+                                    subprocess.run(
+                                        ["/usr/bin/sips", "-s", "format", "jpeg", real_p, "--out", cached_target],
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL,
+                                        timeout=4.0,
+                                        check=False,
+                                    )
+                                    if os.path.exists(cached_target):
+                                        w, h, is_p = self._get_image_dimensions(cached_target)
+                                        mime = "image/jpeg"
+                                except Exception:
+                                    pass
+                            if w == 0:
+                                w, h, is_p = self._get_image_dimensions(real_p)
                         chat_photos.append({
                             "guid": g,
                             "name": name,
-                            "mimeType": str(r["mime_type"] or "image/jpeg"),
+                            "mimeType": mime,
                             "totalBytes": int(r["total_bytes"] or 0),
                             "isCloudEvicted": (not exists_on_disk),
                             "canUnpurge": True,
                             "source": "chat_attachment",
                             "transferState": t_state,
                             "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(g)}/live",
+                            "width": w,
+                            "height": h,
+                            "isPortrait": is_p,
                         })
+                        if len(chat_photos) >= clamped_limit:
+                            break
                 finally:
                     conn.close()
             except sqlite3.Error as exc:
@@ -2969,6 +3134,7 @@ class BluePillEngine:
                             SELECT ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY
                             FROM ZASSET
                             WHERE ZFILENAME IS NOT NULL
+                              AND (ZTRASHEDSTATE IS NULL OR ZTRASHEDSTATE = 0)
                               AND (
                                 ZUNIFORMTYPEIDENTIFIER IS NULL
                                 OR (
@@ -3011,12 +3177,37 @@ class BluePillEngine:
                             if not mime.startswith("image/"):
                                 continue
                             size_bytes = 0
+                            w, h, is_p = 0, 0, False
                             if resolved_asset:
                                 self._photos_library_assets[zuuid] = (resolved_asset, mime)
                                 try:
                                     size_bytes = int(os.path.getsize(resolved_asset))
                                 except OSError:
                                     size_bytes = 0
+                                safe_zuuid = re.sub(r"[^A-Za-z0-9_-]", "_", zuuid)
+                                cached_target = os.path.join(cache_dir, f"{safe_zuuid}.jpg")
+                                if os.path.exists(cached_target):
+                                    w, h, is_p = self._get_image_dimensions(cached_target)
+                                    mime = "image/jpeg"
+                                else:
+                                    ext = os.path.splitext(resolved_asset)[1].lower()
+                                    if sys.platform == "darwin" and ext in (".heic", ".heif", ".tiff", ".tif") and os.path.exists("/usr/bin/sips"):
+                                        os.makedirs(cache_dir, exist_ok=True)
+                                        try:
+                                            subprocess.run(
+                                                ["/usr/bin/sips", "-s", "format", "jpeg", resolved_asset, "--out", cached_target],
+                                                stdout=subprocess.DEVNULL,
+                                                stderr=subprocess.DEVNULL,
+                                                timeout=4.0,
+                                                check=False,
+                                            )
+                                            if os.path.exists(cached_target):
+                                                w, h, is_p = self._get_image_dimensions(cached_target)
+                                                mime = "image/jpeg"
+                                        except Exception:
+                                            pass
+                                    if w == 0:
+                                        w, h, is_p = self._get_image_dimensions(resolved_asset)
                             can_unpurge = bool(
                                 resolved_asset is not None
                                 or (sys.platform == "darwin" and bool(zdir and zfn) and os.path.exists("/usr/bin/brctl"))
@@ -3032,6 +3223,9 @@ class BluePillEngine:
                                 "source": "photos_library",
                                 "transferState": 5 if resolved_asset else 0,
                                 "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(zuuid)}/live",
+                                "width": w,
+                                "height": h,
+                                "isPortrait": is_p,
                             })
                 finally:
                     pconn.close()
@@ -3051,6 +3245,61 @@ class BluePillEngine:
             reserved_lib += extra_lib
         photos = chat_photos[:reserved_chat] + lib_photos[:reserved_lib]
         return photos[:clamped_limit]
+
+    def sync_icloud_photos(self, limit: int = 100) -> Dict[str, Any]:
+        """
+        Batch unpurges evicted iCloud photos via download_cloud_attachment
+        and transcodes on-disk HEIC/TIFF files to ~/.cache/bluepill/icloud-photos/<guid>.jpg.
+        """
+        photos = self.query_icloud_photos(limit=max(10, min(limit, 200)))
+        cache_dir = os.path.expanduser("~/.cache/bluepill/icloud-photos")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        unpurged_count = 0
+        transcoded_count = 0
+        total_count = len(photos)
+
+        for p in photos:
+            guid = p.get("guid") or ""
+            if not guid:
+                continue
+            is_evicted = p.get("isCloudEvicted", False)
+            if is_evicted:
+                res = self.download_cloud_attachment(guid)
+                if res.get("downloaded"):
+                    unpurged_count += 1
+            # Check on-disk file
+            resolved = self.resolve_attachment_file(guid, convert_heic=False)
+            if resolved:
+                src_path, _ = resolved
+                if sys.platform == "darwin" and os.path.exists("/usr/bin/sips"):
+                    safe_guid = re.sub(r"[^A-Za-z0-9_-]", "_", guid)
+                    cached_target = os.path.join(cache_dir, f"{safe_guid}.jpg")
+                    ext = os.path.splitext(src_path)[1].lower()
+                    if ext in (".heic", ".heif", ".tiff", ".tif"):
+                        if not os.path.exists(cached_target):
+                            try:
+                                subprocess.run(
+                                    ["/usr/bin/sips", "-s", "format", "jpeg", src_path, "--out", cached_target],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=10.0,
+                                    check=False,
+                                )
+                                if os.path.exists(cached_target):
+                                    transcoded_count += 1
+                            except Exception:
+                                pass
+                        else:
+                            transcoded_count += 1
+
+        return {
+            "status": "ok",
+            "total": total_count,
+            "synced": unpurged_count + transcoded_count,
+            "unpurged": unpurged_count,
+            "transcoded": transcoded_count,
+        }
 
     def _get_notes_json_path(self) -> str:
         os.makedirs(self._config_dir, exist_ok=True)
@@ -3145,7 +3394,92 @@ class BluePillEngine:
         self._atomic_write_json(path, serialized)
 
     @staticmethod
-    def _extract_utf8_note_body(zdata: bytes, fallback_snippet: str) -> str:
+    def _parse_protobuf_fields(data: bytes) -> List[Tuple[int, int, bytes]]:
+        fields: List[Tuple[int, int, bytes]] = []
+        idx = 0
+        n = len(data)
+        while idx < n:
+            shift = 0
+            key = 0
+            while idx < n:
+                b = data[idx]
+                idx += 1
+                key |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+            field_num = key >> 3
+            wire_type = key & 0x07
+            if wire_type == 0:  # varint
+                while idx < n:
+                    b = data[idx]
+                    idx += 1
+                    if not (b & 0x80):
+                        break
+                fields.append((field_num, wire_type, b""))
+            elif wire_type == 1:  # 64-bit
+                idx += 8
+                fields.append((field_num, wire_type, b""))
+            elif wire_type == 2:  # length-delimited
+                shift = 0
+                length = 0
+                while idx < n:
+                    b = data[idx]
+                    idx += 1
+                    length |= (b & 0x7F) << shift
+                    if not (b & 0x80):
+                        break
+                    shift += 7
+                val = data[idx : idx + length]
+                idx += length
+                fields.append((field_num, wire_type, val))
+            elif wire_type == 5:  # 32-bit
+                idx += 4
+                fields.append((field_num, wire_type, b""))
+            else:
+                break
+        return fields
+
+    @staticmethod
+    def _decode_notestore_protobuf_text(zdata: bytes, fallback_snippet: str = "") -> str:
+        if not zdata:
+            return fallback_snippet
+        try:
+            try:
+                decomp = zlib.decompress(zdata, 32 + zlib.MAX_WBITS)
+            except (zlib.error, OSError):
+                try:
+                    decomp = zlib.decompress(zdata)
+                except (zlib.error, OSError):
+                    decomp = gzip.decompress(zdata)
+
+            # 1. Parse top-level NoteStoreProto -> Document (field 2, wire_type 2)
+            top_fields = BluePillEngine._parse_protobuf_fields(decomp)
+            doc_bytes = None
+            for fnum, wtype, val in top_fields:
+                if fnum == 2 and wtype == 2:
+                    doc_bytes = val
+                    break
+            if doc_bytes:
+                # 2. Inside Document, find Note (field 3, wire_type 2)
+                doc_fields = BluePillEngine._parse_protobuf_fields(doc_bytes)
+                note_bytes = None
+                for fnum, wtype, val in doc_fields:
+                    if fnum == 3 and wtype == 2:
+                        note_bytes = val
+                        break
+                if note_bytes:
+                    # 3. Inside Note, find note_text (field 2, wire_type 2)
+                    note_fields = BluePillEngine._parse_protobuf_fields(note_bytes)
+                    for fnum, wtype, val in note_fields:
+                        if fnum == 2 and wtype == 2:
+                            text = val.decode("utf-8", errors="replace").replace("\ufffc", "")
+                            if text.strip():
+                                return text.strip()
+        except Exception:
+            pass
+
+        # Fallback to UTF-8 regex scan if structured protobuf unpack failed
         try:
             decomp = gzip.decompress(zdata)
             utf8_runs = re.findall(
@@ -3154,16 +3488,16 @@ class BluePillEngine:
             )
             text_parts = [s.decode("utf-8", errors="strict").strip() for s in utf8_runs if s.strip()]
             if text_parts:
-                candidate = "\n\n".join(text_parts).strip()
-                if fallback_snippet and any(ord(ch) > 127 for ch in fallback_snippet):
-                    missing_non_ascii = any(ord(ch) > 127 and ch not in candidate for ch in fallback_snippet)
-                    if missing_non_ascii:
-                        return fallback_snippet
+                candidate = "\n\n".join(text_parts).strip().replace("\ufffc", "")
                 if len(candidate) >= len(fallback_snippet):
                     return candidate
-        except (OSError, EOFError, UnicodeDecodeError, ValueError):
+        except Exception:
             pass
         return fallback_snippet
+
+    @staticmethod
+    def _extract_utf8_note_body(zdata: bytes, fallback_snippet: str = "") -> str:
+        return BluePillEngine._decode_notestore_protobuf_text(zdata, fallback_snippet)
 
     def query_icloud_notes(self) -> List[Dict[str, Any]]:
         with self._icloud_store_lock:
@@ -3245,7 +3579,7 @@ class BluePillEngine:
                             title = str(r["ZTITLE1"] or "").strip()
                             snippet = str(r["ZSNIPPET"] or "").strip()
                             zdata = r["ZDATA"]
-                            body = self._extract_utf8_note_body(bytes(zdata), snippet) if zdata else snippet
+                            body = self._decode_notestore_protobuf_text(bytes(zdata), snippet) if zdata else snippet
                             if nid not in notes_by_id or notes_by_id[nid].get("updatedAtMs", 0) < updated_ms:
                                 notes_by_id[nid] = {
                                     "id": nid,
@@ -3785,6 +4119,8 @@ class BluePillEngine:
             return self.get_chat_state()
         if method in ("icloud.photos", "api.icloud.photos"):
             return self.query_icloud_photos(int(params.get("limit", 48) or 48))
+        if method in ("icloud.photos.sync", "api.icloud.photos.sync"):
+            return self.sync_icloud_photos(int(params.get("limit", 100) or 100))
         if method in ("icloud.notes", "api.icloud.notes"):
             return self.query_icloud_notes()
         if method in ("icloud.note.save", "api.icloud.note.save"):
@@ -4260,7 +4596,10 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:860px;max-width:92vw;height:560px;display:flex;flex-direction:column;overflow:hidden;">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);">
         <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">☁️ iCloud Photos & Attachment Unpurge</span>
-        <button onclick="closePhotosModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button id="syncPhotosBtn" onclick="syncAllPhotos()" style="background:#1f6feb;color:#fff;border:none;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">⬇ Sync All Photos</button>
+          <button onclick="closePhotosModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
+        </div>
       </div>
       <div id="photosGrid" style="flex:1;overflow-y:auto;padding:14px;display:grid;grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));gap:12px;"></div>
     </div>
@@ -4641,8 +4980,12 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           card.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px;';
           const imgUrl = apiUrl('/api/v1/attachment/' + encodeURIComponent(p.guid) + '/live');
           const isEvicted = Boolean(p.isCloudEvicted);
+          const isPortrait = Boolean(p.isPortrait);
           const previewBox = document.createElement('div');
-          previewBox.style.cssText = 'width:100%;height:120px;border-radius:6px;background:#151b23;display:flex;align-items:center;justify-content:center;overflow:hidden;';
+          previewBox.style.cssText = 'width:100%;height:' + (isPortrait ? '210px' : '140px') + ';border-radius:6px;background:#151b23;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;cursor:pointer;';
+          previewBox.addEventListener('click', () => {
+            if (!isEvicted) window.open(imgUrl, '_blank');
+          });
           const fallbackIcon = document.createElement('div');
           fallbackIcon.style.cssText = 'color:var(--muted);font-size:24px;' + (isEvicted ? 'display:block;' : 'display:none;');
           fallbackIcon.textContent = '🖼';
@@ -4664,9 +5007,16 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
           const footerRow = document.createElement('div');
           footerRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
+          const badgesWrapper = document.createElement('div');
+          badgesWrapper.style.cssText = 'display:flex;align-items:center;gap:4px;';
           const badgeEl = document.createElement('span');
           badgeEl.style.cssText = 'font-size:10px;padding:1px 6px;border-radius:4px;' + (isEvicted ? 'background:#3d2c12;color:#d29922;' : 'background:#1c3322;color:#3fb950;');
           badgeEl.textContent = isEvicted ? '☁️ iCloud' : '✓ Local';
+          const orientBadge = document.createElement('span');
+          orientBadge.style.cssText = 'font-size:9px;padding:1px 5px;border-radius:4px;background:#161b22;color:var(--muted);border:1px solid var(--border);';
+          orientBadge.textContent = isPortrait ? '▯ Portrait' : '▭ Landscape';
+          badgesWrapper.appendChild(badgeEl);
+          badgesWrapper.appendChild(orientBadge);
           const liveBtn = document.createElement('button');
           const canUnpurge = p.canUnpurge !== false;
           liveBtn.style.cssText = 'background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:10px;' + ((isEvicted && !canUnpurge) ? 'opacity:0.5;cursor:not-allowed;' : 'cursor:pointer;');
@@ -4677,7 +5027,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
             liveBtn.textContent = isEvicted ? '☁️ Unpurge' : '⬇ Live';
             liveBtn.addEventListener('click', () => downloadAttachmentLive(p.guid));
           }
-          footerRow.appendChild(badgeEl);
+          footerRow.appendChild(badgesWrapper);
           footerRow.appendChild(liveBtn);
 
           card.appendChild(previewBox);
@@ -4687,6 +5037,23 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         }
       } catch (err) { console.error('Error loading photos:', err); }
     }
+    async function syncAllPhotos() {
+      const btn = document.getElementById('syncPhotosBtn');
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ Syncing...'; }
+      try {
+        await fetch(apiUrl('/api/v1/icloud/photos/sync'), {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({limit: 100})
+        });
+        await loadPhotos();
+      } catch (e) {
+        console.error('Photo sync error:', e);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '⬇ Sync All Photos'; }
+      }
+    }
+
     async function downloadAttachmentLive(guid) {
       await fetch(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/download'), { method: 'POST' });
       window.open(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/live'), '_blank');
@@ -5231,6 +5598,13 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(status_code, data, str(exc))
             return
 
+        if path == "/api/v1/icloud/photos/sync":
+            if not self._check_icloud_auth_and_transport(parsed):
+                return
+            limit = int(body.get("limit", 100) or 100)
+            self._send_json(200, self.engine.sync_icloud_photos(limit=limit))
+            return
+
         m_att_dl = re.match(r"^/api/v1/attachment/([^/]+)/download$", path)
         if m_att_dl:
             if not self._check_icloud_auth_and_transport(parsed):
@@ -5564,6 +5938,26 @@ def run_selftest(engine: BluePillEngine) -> int:
         rev_n2 = next(n for n in rev_notes2 if n.get("id") == "st-note-rev")
         assert rev_n2["title"] == "V2-ok" and rev_n2["revision"] > rev_n1["revision"]
         test_eng.delete_icloud_note("st-note-rev", raise_on_missing=True)
+
+        # Selftest: Verify pure-Python protobuf note decoder
+        # Construct a synthetic protobuf Document (field 2) -> Note (field 3) -> note_text (field 2)
+        sample_title_body = "Synthetic Note Title\nLine 2 content here\ufffc"
+        text_bytes = sample_title_body.encode("utf-8")
+        # Note field 2 (wire type 2): tag = (2 << 3) | 2 = 18
+        note_payload = bytes([18, len(text_bytes)]) + text_bytes
+        # Document field 3 (wire type 2): tag = (3 << 3) | 2 = 26
+        doc_payload = bytes([26, len(note_payload)]) + note_payload
+        # Top-level Document field 2 (wire type 2): tag = (2 << 3) | 2 = 18
+        top_payload = bytes([18, len(doc_payload)]) + doc_payload
+        # Gzip compressed
+        gz_data = zlib.compress(top_payload)
+        decoded_text = BluePillEngine._decode_notestore_protobuf_text(gz_data)
+        assert "Synthetic Note Title" in decoded_text, f"Decoded protobuf mismatch: {decoded_text}"
+        assert "￼" not in decoded_text, "Attachment placeholder was not stripped"
+
+        # Selftest: Verify sync_icloud_photos doesn't crash in test harness
+        sync_res = test_eng.sync_icloud_photos(limit=5)
+        assert isinstance(sync_res, dict) and "synced" in sync_res
     finally:
         srv.shutdown()
         srv.server_close()
@@ -5648,6 +6042,7 @@ def main() -> int:
     parser.add_argument("--tls-key", default=os.environ.get("BLUEPILL_TLS_KEY", ""), help="Optional TLS private key path for HTTPS listener")
     parser.add_argument("-n", "--lines", type=int, default=100, help="Number of log lines to display for 'logs'")
     parser.add_argument("--stdio", action="store_true", help="Run JSON-RPC over stdin/stdout (Direct SSH mode)")
+    parser.add_argument("--sync-icloud-photos", action="store_true", help="Download purged iCloud camera photos and cache as JPEGs")
     parser.add_argument("--selftest", action="store_true", help="Run built-in self-test suite and exit")
     parser.add_argument("--json", action="store_true", help="Format status/doctor/logs output as JSON")
     parser.add_argument("--version", action="store_true", help="Print version and exit")
@@ -5663,6 +6058,11 @@ def main() -> int:
         password=args.password,
         enable_background_daemons=is_serve,
     )
+
+    if args.sync_icloud_photos or args.command == "sync-icloud-photos":
+        res = engine.sync_icloud_photos(limit=250)
+        print(json.dumps(res, indent=2))
+        return 0
 
     if args.selftest or args.command == "selftest":
         return run_selftest(engine)

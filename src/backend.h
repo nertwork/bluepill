@@ -252,6 +252,7 @@ public:
     Q_INVOKABLE void deleteIcloudEvent(const QString &id);
     Q_INVOKABLE void fetchIcloudPhotos();
     Q_INVOKABLE void downloadCloudAttachment(const QString &attachmentGuid);
+    Q_INVOKABLE void syncIcloudPhotos();
     Q_INVOKABLE void shareIcloudPhotoToChat(const QString &chatGuid, const QString &attachmentGuid, const QString &fileName = QString());
     Q_INVOKABLE QString attachmentDownloadUrl(const QString &guid) const;
     bool isSecureOrLocalIcloudEndpoint() const;

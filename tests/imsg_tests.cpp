@@ -3613,14 +3613,34 @@ private slots:
         p1.insert(QStringLiteral("name"), QStringLiteral("vacation.heic"));
         p1.insert(QStringLiteral("mimeType"), QStringLiteral("image/heic"));
         p1.insert(QStringLiteral("isCloudEvicted"), true);
+        p1.insert(QStringLiteral("width"), 3024);
+        p1.insert(QStringLiteral("height"), 4032);
+        p1.insert(QStringLiteral("isPortrait"), true);
+
+        QVariantMap p2;
+        p2.insert(QStringLiteral("guid"), QStringLiteral("att_local_456"));
+        p2.insert(QStringLiteral("name"), QStringLiteral("landscape.jpg"));
+        p2.insert(QStringLiteral("mimeType"), QStringLiteral("image/jpeg"));
+        p2.insert(QStringLiteral("isCloudEvicted"), false);
+        p2.insert(QStringLiteral("width"), 1920);
+        p2.insert(QStringLiteral("height"), 1080);
+        p2.insert(QStringLiteral("isPortrait"), false);
+
         samplePhotos.append(p1);
+        samplePhotos.append(p2);
 
         backend.setIcloudPhotosForTest(samplePhotos);
-        QCOMPARE(backend.icloudPhotos().size(), 1);
+        QCOMPARE(backend.icloudPhotos().size(), 2);
         QVERIFY(backend.icloudPhotos().first().toMap().value(QStringLiteral("isCloudEvicted")).toBool());
+        QVERIFY(backend.icloudPhotos().first().toMap().value(QStringLiteral("isPortrait")).toBool());
+        QCOMPARE(backend.icloudPhotos().first().toMap().value(QStringLiteral("width")).toInt(), 3024);
+        QCOMPARE(backend.icloudPhotos().first().toMap().value(QStringLiteral("height")).toInt(), 4032);
 
-        // Trigger unpurge/download
+        QVERIFY(!backend.icloudPhotos().last().toMap().value(QStringLiteral("isPortrait")).toBool());
+
+        // Trigger unpurge/download and batch sync
         backend.downloadCloudAttachment(QStringLiteral("att_cloud_123"));
+        backend.syncIcloudPhotos();
         // Method should execute without crash even if offline
     }
 

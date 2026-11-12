@@ -5162,6 +5162,168 @@ ApplicationWindow {
         }
     }
 
+    // Dedicated Note Detail & Editor Window
+    Window {
+        id: noteDetailWindow
+        objectName: "noteDetailWindow"
+        title: (noteDetailTitleInput.text.trim().length > 0 ? noteDetailTitleInput.text.trim() : i18n.tr("Note Viewer")) + " - BluePill Notes"
+        width: 680
+        height: 560
+        minimumWidth: 480
+        minimumHeight: 380
+        color: theme.darkBackground
+
+        property string noteId: ""
+        property string noteSyncSource: "local_hub"
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 16
+            spacing: 12
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+
+                TextField {
+                    id: noteDetailTitleInput
+                    Layout.fillWidth: true
+                    placeholderText: i18n.tr("Note Title...")
+                    font.bold: true
+                    font.pixelSize: theme.fontSize + 4
+                    color: theme.brightForeground
+                    background: Rectangle {
+                        color: theme.background
+                        radius: 6
+                        border.color: noteDetailTitleInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                        border.width: 1
+                    }
+                }
+
+                TextField {
+                    id: noteDetailFolderInput
+                    Layout.preferredWidth: 140
+                    placeholderText: i18n.tr("Folder")
+                    font.pixelSize: theme.fontSize - 1
+                    color: theme.foreground
+                    background: Rectangle {
+                        color: theme.background
+                        radius: 6
+                        border.color: noteDetailFolderInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                        border.width: 1
+                    }
+                }
+
+                Rectangle {
+                    height: 26
+                    width: syncBadgeText.implicitWidth + 12
+                    radius: 13
+                    color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "#1f3322" : "#1c283d"
+                    border.color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "#3fb950" : "#58a6ff"
+                    border.width: 1
+                    Text {
+                        id: syncBadgeText
+                        anchors.centerIn: parent
+                        text: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "🍏 Apple Notes (iCloud)" : "📝 Local Hub Note"
+                        font.pixelSize: 10
+                        font.bold: true
+                        color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "#3fb950" : "#58a6ff"
+                    }
+                }
+            }
+
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+
+                TextArea {
+                    id: noteDetailBodyInput
+                    placeholderText: i18n.tr("Note content...")
+                    wrapMode: TextArea.Wrap
+                    font.pixelSize: theme.fontSize + 1
+                    color: theme.brightForeground
+                    selectByMouse: true
+                    background: Rectangle {
+                        color: theme.background
+                        radius: 8
+                        border.color: noteDetailBodyInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                        border.width: 1
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Button {
+                    text: noteDetailWindow.noteSyncSource === "apple_notes_ro"
+                          ? ("📋 " + i18n.tr("Copy to Local Hub"))
+                          : ("💾 " + i18n.tr("Save Note"))
+                    onClicked: {
+                        var targetId = noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "" : noteDetailWindow.noteId
+                        noteDetailWindow.noteId = backend.saveIcloudNote(targetId, noteDetailTitleInput.text, noteDetailBodyInput.text, noteDetailFolderInput.text)
+                        noteDetailWindow.noteSyncSource = "local_hub"
+                        noteTitleInput.text = noteDetailTitleInput.text
+                        noteBodyInput.text = noteDetailBodyInput.text
+                        noteFolderInput.text = noteDetailFolderInput.text
+                        icloudNotesPopup.selectedNoteId = noteDetailWindow.noteId
+                        icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                    }
+                }
+
+                Button {
+                    text: "📤 " + i18n.tr("Send to Chat")
+                    enabled: backend.selectedChatGuid !== "" && (noteDetailTitleInput.text.trim().length > 0 || noteDetailBodyInput.text.trim().length > 0)
+                    onClicked: {
+                        var textToSend = noteDetailTitleInput.text.trim()
+                        if (noteDetailBodyInput.text.trim().length > 0) {
+                            textToSend = (textToSend.length > 0 ? ("* " + textToSend + " *
+
+") : "") + noteDetailBodyInput.text.trim()
+                        }
+                        backend.sendMessage(backend.selectedChatGuid, textToSend, "")
+                    }
+                }
+
+                Button {
+                    text: "📋 " + i18n.tr("Copy Text")
+                    onClicked: {
+                        var textToCopy = noteDetailTitleInput.text.trim()
+                        if (noteDetailBodyInput.text.trim().length > 0) {
+                            textToCopy = (textToCopy.length > 0 ? (textToCopy + "
+
+") : "") + noteDetailBodyInput.text.trim()
+                        }
+                        backend.copyToClipboard(textToCopy)
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    text: "🗑 " + i18n.tr("Delete")
+                    enabled: noteDetailWindow.noteId !== "" && noteDetailWindow.noteSyncSource !== "apple_notes_ro"
+                    onClicked: {
+                        if (noteDetailWindow.noteSyncSource === "apple_notes_ro") return
+                        backend.deleteIcloudNote(noteDetailWindow.noteId)
+                        noteDetailWindow.noteId = ""
+                        noteDetailWindow.noteSyncSource = "local_hub"
+                        noteDetailTitleInput.text = ""
+                        noteDetailBodyInput.text = ""
+                        noteDetailWindow.close()
+                    }
+                }
+
+                Button {
+                    text: i18n.tr("Close")
+                    onClicked: noteDetailWindow.close()
+                }
+            }
+        }
+    }
+
     // iCloud Notes Popup
     Popup {
         id: icloudNotesPopup
@@ -5291,6 +5453,15 @@ ApplicationWindow {
                                     noteTitleInput.text = modelData.title || ""
                                     noteFolderInput.text = modelData.folder || "Notes"
                                     noteBodyInput.text = modelData.body || modelData.snippet || ""
+
+                                    noteDetailWindow.noteId = modelData.id || ""
+                                    noteDetailWindow.noteSyncSource = modelData.syncSource || "local_hub"
+                                    noteDetailTitleInput.text = modelData.title || ""
+                                    noteDetailFolderInput.text = modelData.folder || "Notes"
+                                    noteDetailBodyInput.text = modelData.body || modelData.snippet || ""
+                                    noteDetailWindow.show()
+                                    noteDetailWindow.raise()
+                                    noteDetailWindow.requestActivate()
                                 }
                             }
                         }
@@ -5588,6 +5759,10 @@ ApplicationWindow {
                 }
                 Item { Layout.fillWidth: true }
                 Button {
+                    text: "⬇ " + i18n.tr("Sync All Photos")
+                    onClicked: backend.syncIcloudPhotos()
+                }
+                Button {
                     text: "🔄 " + i18n.tr("Refresh")
                     onClicked: backend.fetchIcloudPhotos()
                 }
@@ -5602,13 +5777,13 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
-                cellWidth: 160
-                cellHeight: 180
+                cellWidth: 170
+                cellHeight: 250
                 model: backend.icloudPhotos
 
                 delegate: Rectangle {
-                    width: 150
-                    height: 170
+                    width: 160
+                    height: 240
                     radius: 8
                     color: theme.background
                     border.color: Qt.rgba(1, 1, 1, 0.1)
@@ -5621,14 +5796,18 @@ ApplicationWindow {
 
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 95
+                            Layout.preferredHeight: modelData.isPortrait ? 170 : 130
                             radius: 6
-                            color: theme.darkBackground
+                            color: "#151b23"
                             clip: true
 
                             Image {
+                                id: thumbImg
                                 anchors.fill: parent
-                                fillMode: Image.PreserveAspectCrop
+                                anchors.margins: 2
+                                fillMode: Image.PreserveAspectFit
+                                autoTransform: true
+                                smooth: true
                                 source: (modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : ""
                                 asynchronous: true
                             }
@@ -5637,22 +5816,54 @@ ApplicationWindow {
                                 anchors.centerIn: parent
                                 text: "🖼"
                                 font.pixelSize: 24
-                                visible: parent.children[0].status !== Image.Ready
+                                visible: thumbImg.status !== Image.Ready
                             }
 
-                            Rectangle {
+                            RowLayout {
                                 anchors.top: parent.top
                                 anchors.right: parent.right
                                 anchors.margins: 4
-                                width: 20
-                                height: 20
-                                radius: 10
-                                color: modelData.isCloudEvicted ? "#FF9500" : "#30D158"
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: modelData.isCloudEvicted ? "☁" : "✓"
-                                    font.pixelSize: 11
-                                    color: "#ffffff"
+                                spacing: 4
+
+                                Rectangle {
+                                    height: 18
+                                    width: orientText.implicitWidth + 8
+                                    radius: 4
+                                    color: "#cc161b22"
+                                    border.color: "#44ffffff"
+                                    border.width: 1
+                                    Text {
+                                        id: orientText
+                                        anchors.centerIn: parent
+                                        text: modelData.isPortrait ? "▯ Portrait" : "▭ Landscape"
+                                        font.pixelSize: 9
+                                        color: "#e6edf3"
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 18
+                                    height: 18
+                                    radius: 9
+                                    color: modelData.isCloudEvicted ? "#FF9500" : "#30D158"
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData.isCloudEvicted ? "☁" : "✓"
+                                        font.pixelSize: 10
+                                        color: "#ffffff"
+                                    }
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (modelData.guid && !modelData.isCloudEvicted) {
+                                        root.openPhotoViewer(backend.icloudPhotos, index)
+                                    } else if (modelData.guid && modelData.isCloudEvicted && modelData.canUnpurge !== false) {
+                                        backend.downloadCloudAttachment(modelData.guid)
+                                    }
                                 }
                             }
                         }
@@ -5679,7 +5890,7 @@ ApplicationWindow {
                                         if (modelData.canUnpurge === false) return
                                         backend.downloadCloudAttachment(modelData.guid)
                                     } else {
-                                        backend.openAttachment(modelData.guid, modelData.name || "photo.jpg")
+                                        root.openPhotoViewer(backend.icloudPhotos, index)
                                     }
                                 }
                             }
@@ -7138,7 +7349,7 @@ ApplicationWindow {
                 anchors.verticalCenterOffset: root.photoViewerPanY
                 width: Math.max(120, parent.width - (root.photoViewerItems.length > 1 ? 140 : 32))
                 height: Math.max(120, parent.height - 24)
-                source: photoViewerModal.currentPhoto.localUrl || ""
+                source: photoViewerModal.currentPhoto.localUrl || (photoViewerModal.currentPhoto.guid ? backend.attachmentDownloadUrl(photoViewerModal.currentPhoto.guid) : "")
                 asynchronous: true
                 cache: true
                 autoTransform: true

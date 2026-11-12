@@ -8795,6 +8795,25 @@ void Backend::fetchIcloudPhotos() {
     });
 }
 
+void Backend::syncIcloudPhotos() {
+    if (!isSecureOrLocalIcloudEndpoint()) return;
+    QJsonObject payload;
+    payload.insert(QStringLiteral("limit"), 100);
+    QNetworkReply *reply = m_mediaNam.post(makeRequest(QStringLiteral("/api/v1/icloud/photos/sync")), QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit toastMessage(QStringLiteral("iCloud Photos sync failed: ") + reply->errorString());
+            return;
+        }
+        const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
+        const QJsonObject data = doc.value(QStringLiteral("data")).toObject();
+        const int synced = data.value(QStringLiteral("synced")).toInt();
+        emit toastMessage(QStringLiteral("iCloud Photos sync complete: ") + QString::number(synced) + QStringLiteral(" processed"));
+        fetchIcloudPhotos();
+    });
+}
+
 void Backend::downloadCloudAttachment(const QString &attachmentGuid) {
     if (attachmentGuid.isEmpty()) return;
     if (isSecureOrLocalIcloudEndpoint()) {
