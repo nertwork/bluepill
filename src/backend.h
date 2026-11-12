@@ -261,7 +261,7 @@ public:
     Q_INVOKABLE QString attachmentDownloadUrl(const QString &guid) const;
     bool isSecureOrLocalIcloudEndpoint() const;
     void replayPendingIcloudMutations();
-    void reconcileRemoteIcloudNotesForTest(const QJsonArray &data) { applyRemoteIcloudNotes(data); }
+    void reconcileRemoteIcloudNotesForTest(const QJsonArray &data, const QString &acknowledgedNoteId = QString(), quint64 acknowledgedMutationSeq = 0) { applyRemoteIcloudNotes(data, acknowledgedNoteId, acknowledgedMutationSeq); }
     void reconcileRemoteIcloudEventsForTest(const QJsonArray &data, const QString &acknowledgedEventId = QString()) { applyRemoteIcloudEvents(data, acknowledgedEventId); }
     quint64 icloudNotesGenerationForTest() const { return m_icloudNotesGeneration; }
     quint64 icloudEventsGenerationForTest() const { return m_icloudEventsGeneration; }
@@ -409,7 +409,7 @@ private:
     void playNotificationSound();
     void handleNetworkFailure(const QString &context);
     void handleNetworkSuccess();
-    void applyRemoteIcloudNotes(const QJsonArray &data);
+    void applyRemoteIcloudNotes(const QJsonArray &data, const QString &acknowledgedNoteId = QString(), quint64 acknowledgedMutationSeq = 0);
     void applyRemoteIcloudEvents(const QJsonArray &data, const QString &acknowledgedEventId = QString());
     void scheduleIcloudMutationRetry(bool immediate);
     void recordIcloudMutationFailure(const QString &mutationKey);

@@ -3274,6 +3274,7 @@ private slots:
         QVERIFY(tempDir.isValid());
         Backend backend(false);
         backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_parts.json")));
+        backend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_parts.json")));
         backend.loadDemoData();
 
         const QVariantList chats = backend.chats();
@@ -3345,14 +3346,18 @@ private slots:
         Backend backend(false);
         QTemporaryDir tempDir;
         const QString statePath = tempDir.filePath(QStringLiteral("state_notes.json"));
+        backend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_notes_offline.json")));
         backend.setStateFilePath(statePath);
 
         QVERIFY(backend.icloudNotes().isEmpty());
 
-        // Create Note (including auto-generated ID return value)
+        // Create Note (including auto-generated ID return value) and verify never-sent local create + delete cancels cleanly
         const QString genId = backend.saveIcloudNote(QString(), QStringLiteral("Auto ID Note"), QStringLiteral("Body 0"), QStringLiteral("Notes"));
         QVERIFY(genId.startsWith(QStringLiteral("note_")));
+        QVERIFY(backend.hasPendingIcloudNoteSaveForTest(genId));
         backend.deleteIcloudNote(genId);
+        QVERIFY(!backend.hasPendingIcloudNoteSaveForTest(genId));
+        QVERIFY(!backend.hasPendingIcloudNoteDeleteForTest(genId));
 
         const QString savedId = backend.saveIcloudNote(QStringLiteral("note_test_1"), QStringLiteral("Meeting Notes"), QStringLiteral("Discuss Q3 sync and calendar items"), QStringLiteral("Work"));
         QCOMPARE(savedId, QStringLiteral("note_test_1"));
@@ -3449,13 +3454,15 @@ private slots:
                                      R"({"status":200,"data":[{"id":"note_restart_seq","title":"Newer Post-Restart Edit","body":"Body 2","folder":"Notes","revision":3}]})");
                         return;
                     }
-                    if (reqId == QStringLiteral("note_conc_a")) {
-                        noteACount++;
-                        const qint64 nowAttemptMs = QDateTime::currentMSecsSinceEpoch();
-                        if (noteACount == 1) {
-                            firstAttemptAMs = nowAttemptMs;
-                        } else if (noteACount == 2) {
-                            secondAttemptAMs = nowAttemptMs;
+                    if (reqId == QStringLiteral("note_conc_a") || bodyObj.value(QStringLiteral("title")).toString() == QStringLiteral("Lost Ack Auto Note")) {
+                        if (reqId == QStringLiteral("note_conc_a")) {
+                            noteACount++;
+                            const qint64 nowAttemptMs = QDateTime::currentMSecsSinceEpoch();
+                            if (noteACount == 1) {
+                                firstAttemptAMs = nowAttemptMs;
+                            } else if (noteACount == 2) {
+                                secondAttemptAMs = nowAttemptMs;
+                            }
                         }
                         sendHttpJson(sock, 503, "Service Unavailable",
                                      R"({"status":503,"message":"Transient upstream failure"})");
@@ -3531,11 +3538,13 @@ private slots:
         liveBackend.saveIcloudNote(QStringLiteral("note_conc_b"), QStringLiteral("Note B"), QStringLiteral("Body B"), QStringLiteral("Notes"));
         QTRY_COMPARE_WITH_TIMEOUT(noteBCount, 1, 1500);
         // Wait for client-side checkpoint confirming mutation B's HTTP 200 response was processed and applied
+        // along with its clientMutationSeq so consecutive edits in QML editors advance their revision
         QTRY_VERIFY_WITH_TIMEOUT([&]() {
             for (const QVariant &v : liveBackend.icloudNotes()) {
                 const QVariantMap m = v.toMap();
                 if (m.value(QStringLiteral("id")).toString() == QStringLiteral("note_conc_b") &&
-                    m.value(QStringLiteral("revision")).toLongLong() == 1) {
+                    m.value(QStringLiteral("revision")).toLongLong() == 1 &&
+                    m.value(QStringLiteral("clientMutationSeq")).toULongLong() > 0) {
                     return true;
                 }
             }
@@ -3558,6 +3567,31 @@ private slots:
         liveBackend.clearIcloudMutationRetryStateForTest(keyA);
         QCOMPARE(liveBackend.icloudMutationRetryCountForTest(keyA), 0);
         QVERIFY(!liveBackend.isIcloudMutationInBackoffForTest(keyA));
+
+        // Verify an auto-ID note create whose ACK was lost followed by a client restart without credentials
+        // retains its pending deletion when deleted after restart (since dispatchAttempted was durably persisted)
+        {
+            const QString lostAckNoteId = liveBackend.saveIcloudNote(QString(), QStringLiteral("Lost Ack Auto Note"), QStringLiteral("Body"), QStringLiteral("Notes"));
+            const QString lostAckMutKey = QStringLiteral("note_save:") + lostAckNoteId;
+            QTRY_VERIFY_WITH_TIMEOUT(liveBackend.isIcloudMutationInBackoffForTest(lostAckMutKey), 1500);
+            liveBackend.clearIcloudMutationRetryStateForTest(lostAckMutKey);
+
+            const QString copyNoteStatePath = tempDir.filePath(QStringLiteral("state_live_backoff_copy.json"));
+            QFile::remove(copyNoteStatePath);
+            QVERIFY(QFile::copy(tempDir.filePath(QStringLiteral("state_live_backoff.json")), copyNoteStatePath));
+            qunsetenv("BLUEBUBBLES_URL");
+            qunsetenv("BLUEBUBBLES_PASSWORD");
+            Backend offlineRestartNoteBackend(false);
+            offlineRestartNoteBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_notes_offline.json")));
+            offlineRestartNoteBackend.setStateFilePath(copyNoteStatePath);
+            QVERIFY(offlineRestartNoteBackend.hasPendingIcloudNoteSaveForTest(lostAckNoteId));
+            offlineRestartNoteBackend.deleteIcloudNote(lostAckNoteId);
+            QVERIFY(!offlineRestartNoteBackend.hasPendingIcloudNoteSaveForTest(lostAckNoteId));
+            QVERIFY(offlineRestartNoteBackend.hasPendingIcloudNoteDeleteForTest(lostAckNoteId));
+            qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(mockPort).toUtf8());
+            qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+            liveBackend.deleteIcloudNote(lostAckNoteId);
+        }
 
         // Verify dropped ACK followed by 409 replay with trailing whitespace in saved body is recognized as already-applied (not paused)
         const QString wsKey = QStringLiteral("note_save:note_ws_replay");
@@ -3582,8 +3616,14 @@ private slots:
     }
 
     void testIcloudCalendarEventsLifecycle() {
-        Backend backend(false);
+        const QByteArray prevUrl = qgetenv("BLUEBUBBLES_URL");
+        const QByteArray prevPass = qgetenv("BLUEBUBBLES_PASSWORD");
+        qunsetenv("BLUEBUBBLES_URL");
+        qunsetenv("BLUEBUBBLES_PASSWORD");
+
         QTemporaryDir tempDir;
+        Backend backend(false);
+        backend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_events_offline.json")));
         backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_events.json")));
 
         QVERIFY(backend.icloudEvents().isEmpty());
@@ -3665,8 +3705,6 @@ private slots:
 
         // Verify both 200 OK save and dropped-ACK -> 409 replay for far-future events outside the 250-event window
         // preserve both the 250th near-window event (evt_near_249) and cached intermediate out-of-window events (evt_mid_cached)
-        const QByteArray prevUrl = qgetenv("BLUEBUBBLES_URL");
-        const QByteArray prevPass = qgetenv("BLUEBUBBLES_PASSWORD");
         QTcpServer evtServer;
         QVERIFY(evtServer.listen(QHostAddress::LocalHost, 0));
         int evtRequestCount = 0;
@@ -3806,6 +3844,26 @@ private slots:
         const QString evtMutKey = QStringLiteral("evt_save:") + savedEvtId;
         QTRY_COMPARE_WITH_TIMEOUT(evtRequestCount, 2, 1500);
         QTRY_VERIFY_WITH_TIMEOUT(evtBackend.isIcloudMutationInBackoffForTest(evtMutKey), 1500);
+
+        // Verify that if a client restarts without credentials after a dropped event-create ACK,
+        // deleting the restored event preserves the pending deletion rather than cancelling it as never-sent
+        {
+            const QString copyStatePath = tempDir.filePath(QStringLiteral("state_events_lost_ack_copy.json"));
+            QFile::remove(copyStatePath);
+            QVERIFY(QFile::copy(tempDir.filePath(QStringLiteral("state_events_replay.json")), copyStatePath));
+            qunsetenv("BLUEBUBBLES_URL");
+            qunsetenv("BLUEBUBBLES_PASSWORD");
+            Backend offlineRestartEvtBackend(false);
+            offlineRestartEvtBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_events_offline.json")));
+            offlineRestartEvtBackend.setStateFilePath(copyStatePath);
+            QVERIFY(offlineRestartEvtBackend.hasPendingIcloudEventSaveForTest(savedEvtId));
+            offlineRestartEvtBackend.deleteIcloudEvent(savedEvtId);
+            QVERIFY(!offlineRestartEvtBackend.hasPendingIcloudEventSaveForTest(savedEvtId));
+            QVERIFY(offlineRestartEvtBackend.hasPendingIcloudEventDeleteForTest(savedEvtId));
+            qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(evtServer.serverPort()).toUtf8());
+            qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+        }
+
         evtBackend.clearIcloudMutationRetryStateForTest(evtMutKey);
         evtBackend.replayPendingIcloudMutations();
         QTRY_COMPARE_WITH_TIMEOUT(evtRequestCount, 3, 1500);

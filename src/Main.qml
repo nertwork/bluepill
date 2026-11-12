@@ -5220,6 +5220,11 @@ ApplicationWindow {
                             icloudNotesPopup.selectedNoteRevision = nRev
                         }
                     }
+                    if (n.id === icloudNotesPopup.editingNoteId) {
+                        if (nSeq > 0 && nSeq === icloudNotesPopup.selectedNoteMutationSeq && nRev > icloudNotesPopup.editingNoteRevision) {
+                            icloudNotesPopup.editingNoteRevision = nRev
+                        }
+                    }
                     if (n.id === noteDetailWindow.noteId) {
                         if (nSeq > 0 && nSeq === noteDetailWindow.noteMutationSeq && nRev > noteDetailWindow.noteRevision) {
                             noteDetailWindow.noteRevision = nRev

@@ -7813,9 +7813,15 @@ QString Backend::attachmentDownloadUrl(const QString &guid) const {
     return m_serverUrl + QStringLiteral("/api/v1/attachment/") + guid + QStringLiteral("/download?password=") + QString::fromUtf8(QUrl::toPercentEncoding(m_password));
 }
 
-void Backend::applyRemoteIcloudNotes(const QJsonArray &data) {
+void Backend::applyRemoteIcloudNotes(const QJsonArray &data, const QString &acknowledgedNoteId, quint64 acknowledgedMutationSeq) {
     QVariantList merged;
     QSet<QString> seenIds;
+    QHash<QString, QVariantMap> prevById;
+    for (const QVariant &existingVar : m_icloudNotes) {
+        const QVariantMap em = existingVar.toMap();
+        const QString eid = em.value(QStringLiteral("id")).toString();
+        if (!eid.isEmpty()) prevById.insert(eid, em);
+    }
 
     // Preserve unsynced local note saves ahead of or overriding stale remote versions
     for (auto it = m_pendingIcloudNoteSaves.begin(); it != m_pendingIcloudNoteSaves.end(); ++it) {
@@ -7828,11 +7834,26 @@ void Backend::applyRemoteIcloudNotes(const QJsonArray &data) {
 
     for (const QJsonValue &v : data) {
         if (!v.isObject()) continue;
-        const QVariantMap m = v.toObject().toVariantMap();
+        QVariantMap m = v.toObject().toVariantMap();
         const QString id = m.value(QStringLiteral("id")).toString();
         if (id.isEmpty()) continue;
         if (m_pendingIcloudNoteDeletes.contains(id)) continue;
         if (seenIds.contains(id)) continue;
+        const qint64 remoteRev = m.value(QStringLiteral("revision")).toLongLong();
+        if (remoteRev > 0 && !m.contains(QStringLiteral("baseRevision"))) {
+            m.insert(QStringLiteral("baseRevision"), remoteRev);
+        }
+        if (!acknowledgedNoteId.isEmpty() && id == acknowledgedNoteId && acknowledgedMutationSeq > 0) {
+            m.insert(QStringLiteral("clientMutationSeq"), QVariant::fromValue(acknowledgedMutationSeq));
+        } else if (prevById.contains(id)) {
+            const QVariantMap prevMap = prevById.value(id);
+            const quint64 prevSeq = prevMap.value(QStringLiteral("clientMutationSeq")).toULongLong();
+            const qint64 prevRev = qMax(prevMap.value(QStringLiteral("revision")).toLongLong(),
+                                        prevMap.value(QStringLiteral("baseRevision")).toLongLong());
+            if (prevSeq > 0 && (remoteRev == prevRev || prevRev <= 0)) {
+                m.insert(QStringLiteral("clientMutationSeq"), QVariant::fromValue(prevSeq));
+            }
+        }
         merged.append(m);
         seenIds.insert(id);
     }
@@ -8039,9 +8060,16 @@ void Backend::replayPendingIcloudMutations() {
             continue;
         }
         m_icloudMutationNextRetryMs.remove(mutKey);
-        const quint64 sentSeq = noteMap.value(QStringLiteral("clientMutationSeq")).toULongLong();
-        const qint64 sentUpdatedAt = noteMap.value(QStringLiteral("updatedAtMs")).toLongLong();
-        QJsonObject payload = QJsonObject::fromVariantMap(noteMap);
+        QVariantMap dispatchedNoteMap = noteMap;
+        dispatchedNoteMap.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
+        dispatchedNoteMap.insert(QStringLiteral("dispatchAttempted"), true);
+        m_pendingIcloudNoteSaves.insert(noteId, dispatchedNoteMap);
+        saveAppState();
+        const quint64 sentSeq = dispatchedNoteMap.value(QStringLiteral("clientMutationSeq")).toULongLong();
+        const qint64 sentUpdatedAt = dispatchedNoteMap.value(QStringLiteral("updatedAtMs")).toLongLong();
+        QJsonObject payload = QJsonObject::fromVariantMap(dispatchedNoteMap);
+        payload.remove(QStringLiteral("neverDispatchedLocalCreate"));
+        payload.remove(QStringLiteral("dispatchAttempted"));
         const quint64 gen = ++m_icloudNotesGeneration;
         QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/icloud/notes")), QJsonDocument(payload).toJson(QJsonDocument::Compact));
         m_inFlightIcloudNoteReplies.insert(noteId, reply);
@@ -8085,14 +8113,18 @@ void Backend::replayPendingIcloudMutations() {
                             if (uiMap.value(QStringLiteral("id")).toString() == noteId) {
                                 uiMap.insert(QStringLiteral("baseRevision"), ackRev);
                                 uiMap.insert(QStringLiteral("revision"), ackRev);
+                                if (sameMutation && sentSeq > 0) {
+                                    uiMap.insert(QStringLiteral("clientMutationSeq"), QVariant::fromValue(sentSeq));
+                                }
                                 m_icloudNotes[i] = uiMap;
                                 break;
                             }
                         }
                     }
                     if (gen == m_icloudNotesGeneration) {
-                        applyRemoteIcloudNotes(dataArr);
+                        applyRemoteIcloudNotes(dataArr, noteId, sameMutation ? sentSeq : 0);
                     } else {
+                        emit icloudNotesChanged();
                         saveAppState();
                     }
                     scheduleIcloudMutationRetry(true);
@@ -8104,11 +8136,28 @@ void Backend::replayPendingIcloudMutations() {
                 if (sameMutation && m_pendingIcloudNoteSaves.contains(noteId)) {
                     if (httpStatus == 409 && doc.value(QStringLiteral("data")).isArray() &&
                         isNoteReplayAlreadyApplied(doc.value(QStringLiteral("data")).toArray(), noteId, curPending)) {
+                        const QJsonArray dataArr = doc.value(QStringLiteral("data")).toArray();
+                        const qint64 ackRev = extractServerItemRevision(dataArr, noteId);
                         clearIcloudMutationRetryState(mutKey);
                         m_pendingIcloudNoteSaves.remove(noteId);
+                        if (ackRev > 0) {
+                            for (int i = 0; i < m_icloudNotes.size(); ++i) {
+                                QVariantMap uiMap = m_icloudNotes.at(i).toMap();
+                                if (uiMap.value(QStringLiteral("id")).toString() == noteId) {
+                                    uiMap.insert(QStringLiteral("baseRevision"), ackRev);
+                                    uiMap.insert(QStringLiteral("revision"), ackRev);
+                                    if (sentSeq > 0) {
+                                        uiMap.insert(QStringLiteral("clientMutationSeq"), QVariant::fromValue(sentSeq));
+                                    }
+                                    m_icloudNotes[i] = uiMap;
+                                    break;
+                                }
+                            }
+                        }
                         if (gen == m_icloudNotesGeneration) {
-                            applyRemoteIcloudNotes(doc.value(QStringLiteral("data")).toArray());
+                            applyRemoteIcloudNotes(dataArr, noteId, sentSeq);
                         } else {
+                            emit icloudNotesChanged();
                             saveAppState();
                         }
                         scheduleIcloudMutationRetry(true);
@@ -8237,10 +8286,17 @@ void Backend::replayPendingIcloudMutations() {
             continue;
         }
         m_icloudMutationNextRetryMs.remove(mutKey);
-        const quint64 sentSeq = evtMap.value(QStringLiteral("clientMutationSeq")).toULongLong();
-        const qint64 sentUpdatedAt = evtMap.value(QStringLiteral("updatedAtMs")).toLongLong();
-        QJsonObject payload = QJsonObject::fromVariantMap(evtMap);
-        payload.insert(QStringLiteral("calendarName"), evtMap.value(QStringLiteral("calendarTitle")).toString());
+        QVariantMap dispatchedEvtMap = evtMap;
+        dispatchedEvtMap.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
+        dispatchedEvtMap.insert(QStringLiteral("dispatchAttempted"), true);
+        m_pendingIcloudEventSaves.insert(evtId, dispatchedEvtMap);
+        saveAppState();
+        const quint64 sentSeq = dispatchedEvtMap.value(QStringLiteral("clientMutationSeq")).toULongLong();
+        const qint64 sentUpdatedAt = dispatchedEvtMap.value(QStringLiteral("updatedAtMs")).toLongLong();
+        QJsonObject payload = QJsonObject::fromVariantMap(dispatchedEvtMap);
+        payload.remove(QStringLiteral("neverDispatchedLocalCreate"));
+        payload.remove(QStringLiteral("dispatchAttempted"));
+        payload.insert(QStringLiteral("calendarName"), dispatchedEvtMap.value(QStringLiteral("calendarTitle")).toString());
         const quint64 gen = ++m_icloudEventsGeneration;
         QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/icloud/events")), QJsonDocument(payload).toJson(QJsonDocument::Compact));
         m_inFlightIcloudEventReplies.insert(evtId, reply);
@@ -8468,6 +8524,14 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
         }
     }
 
+    const QVariantMap prevPendNote = m_pendingIcloudNoteSaves.value(actualId);
+    const bool alreadyDispatched = prevPendNote.value(QStringLiteral("dispatchAttempted")).toBool(false);
+    const bool wasNeverDispatchedCreate = id.trimmed().isEmpty()
+                                              ? true
+                                              : (m_pendingIcloudNoteSaves.contains(actualId) &&
+                                                 prevPendNote.value(QStringLiteral("neverDispatchedLocalCreate")).toBool(false) &&
+                                                 !alreadyDispatched);
+
     QVariantMap noteMap;
     noteMap.insert(QStringLiteral("id"), actualId);
     noteMap.insert(QStringLiteral("title"), title);
@@ -8476,6 +8540,10 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
     noteMap.insert(QStringLiteral("syncSource"), QStringLiteral("local_hub"));
     noteMap.insert(QStringLiteral("updatedAtMs"), now);
     noteMap.insert(QStringLiteral("clientMutationSeq"), QVariant::fromValue(gen));
+    noteMap.insert(QStringLiteral("neverDispatchedLocalCreate"), wasNeverDispatchedCreate && !alreadyDispatched && baseRev <= 0);
+    if (alreadyDispatched) {
+        noteMap.insert(QStringLiteral("dispatchAttempted"), true);
+    }
     if (baseRev > 0) {
         noteMap.insert(QStringLiteral("baseRevision"), baseRev);
         noteMap.insert(QStringLiteral("revision"), baseRev);
@@ -8503,6 +8571,11 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
 
     // Queue behind any already in-flight HTTP request for this noteId instead of dispatching concurrently
     if (isSecureOrLocalIcloudEndpoint() && !m_inFlightIcloudNoteReplies.value(actualId)) {
+        noteMap.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
+        noteMap.insert(QStringLiteral("dispatchAttempted"), true);
+        m_pendingIcloudNoteSaves.insert(actualId, noteMap);
+        saveAppState();
+
         QJsonObject payload;
         payload.insert(QStringLiteral("id"), actualId);
         payload.insert(QStringLiteral("title"), title);
@@ -8560,14 +8633,18 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
                             if (uiMap.value(QStringLiteral("id")).toString() == actualId) {
                                 uiMap.insert(QStringLiteral("baseRevision"), ackRev);
                                 uiMap.insert(QStringLiteral("revision"), ackRev);
+                                if (sameMutation) {
+                                    uiMap.insert(QStringLiteral("clientMutationSeq"), QVariant::fromValue(gen));
+                                }
                                 m_icloudNotes[i] = uiMap;
                                 break;
                             }
                         }
                     }
                     if (gen == m_icloudNotesGeneration) {
-                        applyRemoteIcloudNotes(dataArr);
+                        applyRemoteIcloudNotes(dataArr, actualId, sameMutation ? gen : 0);
                     } else {
+                        emit icloudNotesChanged();
                         saveAppState();
                     }
                     scheduleIcloudMutationRetry(true);
@@ -8595,11 +8672,26 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
                             break;
                         }
                         if (alreadyApplied) {
+                            const QJsonArray dataArr = dataVal.toArray();
+                            const qint64 ackRev = extractRev(dataArr);
                             clearIcloudMutationRetryState(mutKey);
                             m_pendingIcloudNoteSaves.remove(actualId);
+                            if (ackRev > 0) {
+                                for (int i = 0; i < m_icloudNotes.size(); ++i) {
+                                    QVariantMap uiMap = m_icloudNotes.at(i).toMap();
+                                    if (uiMap.value(QStringLiteral("id")).toString() == actualId) {
+                                        uiMap.insert(QStringLiteral("baseRevision"), ackRev);
+                                        uiMap.insert(QStringLiteral("revision"), ackRev);
+                                        uiMap.insert(QStringLiteral("clientMutationSeq"), QVariant::fromValue(gen));
+                                        m_icloudNotes[i] = uiMap;
+                                        break;
+                                    }
+                                }
+                            }
                             if (gen == m_icloudNotesGeneration) {
-                                applyRemoteIcloudNotes(dataVal.toArray());
+                                applyRemoteIcloudNotes(dataArr, actualId, gen);
                             } else {
+                                emit icloudNotesChanged();
                                 saveAppState();
                             }
                             scheduleIcloudMutationRetry(true);
@@ -8645,6 +8737,8 @@ void Backend::deleteIcloudNote(const QString &id) {
     const QString saveKey = QStringLiteral("note_save:") + id;
     const QVariantMap pendSave = m_pendingIcloudNoteSaves.value(id);
     const bool neverSentLocalCreate = m_pendingIcloudNoteSaves.contains(id) &&
+                                      pendSave.value(QStringLiteral("neverDispatchedLocalCreate")).toBool(false) &&
+                                      !pendSave.value(QStringLiteral("dispatchAttempted")).toBool(false) &&
                                       pendSave.value(QStringLiteral("baseRevision")).toLongLong() <= 0 &&
                                       pendSave.value(QStringLiteral("revision")).toLongLong() <= 0 &&
                                       !m_inFlightIcloudNoteReplies.value(id) &&
@@ -8789,6 +8883,7 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
     evtMap.insert(QStringLiteral("notes"), notes);
     evtMap.insert(QStringLiteral("updatedAtMs"), now);
     evtMap.insert(QStringLiteral("clientMutationSeq"), QVariant::fromValue(gen));
+    evtMap.insert(QStringLiteral("neverDispatchedLocalCreate"), true);
 
     const QString mutKey = QStringLiteral("evt_save:") + id;
     clearIcloudMutationRetryState(mutKey);
@@ -8802,6 +8897,11 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
 
     // Queue behind any already in-flight HTTP request for this evtId instead of dispatching concurrently
     if (isSecureOrLocalIcloudEndpoint() && !m_inFlightIcloudEventReplies.value(id)) {
+        evtMap.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
+        evtMap.insert(QStringLiteral("dispatchAttempted"), true);
+        m_pendingIcloudEventSaves.insert(id, evtMap);
+        saveAppState();
+
         QJsonObject payload;
         payload.insert(QStringLiteral("id"), id);
         payload.insert(QStringLiteral("title"), title);
@@ -8953,6 +9053,8 @@ void Backend::deleteIcloudEvent(const QString &id) {
     const QString saveKey = QStringLiteral("evt_save:") + id;
     const QVariantMap pendSave = m_pendingIcloudEventSaves.value(id);
     const bool neverSentLocalCreate = m_pendingIcloudEventSaves.contains(id) &&
+                                      pendSave.value(QStringLiteral("neverDispatchedLocalCreate")).toBool(false) &&
+                                      !pendSave.value(QStringLiteral("dispatchAttempted")).toBool(false) &&
                                       pendSave.value(QStringLiteral("baseRevision")).toLongLong() <= 0 &&
                                       pendSave.value(QStringLiteral("revision")).toLongLong() <= 0 &&
                                       !m_inFlightIcloudEventReplies.value(id) &&
