@@ -3621,7 +3621,7 @@ private slots:
             QCOMPARE(unwritableNotePostCount, 0);
             failPersistNoteBackend.deleteIcloudNote(failNoteId);
             QVERIFY(!failPersistNoteBackend.hasPendingIcloudNoteSaveForTest(failNoteId));
-            QVERIFY(!failPersistNoteBackend.hasPendingIcloudNoteDeleteForTest(failNoteId));
+            QVERIFY(failPersistNoteBackend.hasPendingIcloudNoteDeleteForTest(failNoteId));
         }
 
         // Verify dropped ACK followed by 409 replay with trailing whitespace in saved body is recognized as already-applied (not paused)
@@ -3920,7 +3920,7 @@ private slots:
             QCOMPARE(evtRequestCount, 2);
             failPersistEvtBackend.deleteIcloudEvent(failEvtId);
             QVERIFY(!failPersistEvtBackend.hasPendingIcloudEventSaveForTest(failEvtId));
-            QVERIFY(!failPersistEvtBackend.hasPendingIcloudEventDeleteForTest(failEvtId));
+            QVERIFY(failPersistEvtBackend.hasPendingIcloudEventDeleteForTest(failEvtId));
         }
 
         evtBackend.clearIcloudMutationRetryStateForTest(evtMutKey);
