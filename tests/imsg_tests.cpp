@@ -3338,15 +3338,24 @@ private slots:
     }
 
     void testIcloudNotesLifecycle() {
-        const QByteArray prevUrl = qgetenv("BLUEBUBBLES_URL");
-        const QByteArray prevPass = qgetenv("BLUEBUBBLES_PASSWORD");
-        qunsetenv("BLUEBUBBLES_URL");
-        qunsetenv("BLUEBUBBLES_PASSWORD");
+        const char *credVars[] = {
+            "BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+            "BLUEPILL_SECONDARY_URL", "IMSG_SECONDARY_URL", "BLUEBUBBLES_SECONDARY_URL",
+            "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"
+        };
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) {
+                savedEnv.insert(QByteArray(k), qgetenv(k));
+            }
+            qunsetenv(k);
+        }
 
         Backend backend(false);
         QTemporaryDir tempDir;
         const QString statePath = tempDir.filePath(QStringLiteral("state_notes.json"));
         backend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_notes_offline.json")));
+        backend.loadCredentials();
         backend.setStateFilePath(statePath);
 
         QVERIFY(backend.icloudNotes().isEmpty());
@@ -3596,6 +3605,7 @@ private slots:
             qunsetenv("BLUEBUBBLES_PASSWORD");
             Backend offlineRestartNoteBackend(false);
             offlineRestartNoteBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_notes_offline.json")));
+            offlineRestartNoteBackend.loadCredentials();
             offlineRestartNoteBackend.setStateFilePath(copyNoteStatePath);
             QVERIFY(offlineRestartNoteBackend.hasPendingIcloudNoteSaveForTest(lostAckNoteId));
             offlineRestartNoteBackend.deleteIcloudNote(lostAckNoteId);
@@ -3635,26 +3645,50 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_ws_replay")), 1500);
         QVERIFY(!liveBackend.isIcloudMutationPausedForTest(wsKey));
 
-        // Verify a genuine 409 conflict with a different server body still pauses the pending mutation
+        // Verify a genuine 409 conflict with a different server body still pauses the pending mutation,
+        // keeps the pause when saved again with a stale revision, and recovers via reloadConflictedIcloudNoteServerVersion
         const QString conflictKey = QStringLiteral("note_save:note_real_conflict");
         liveBackend.saveIcloudNote(QStringLiteral("note_real_conflict"), QStringLiteral("Conflict Note"), QStringLiteral("Local Draft\n"), QStringLiteral("Notes"));
         QTRY_COMPARE_WITH_TIMEOUT(noteRealConflictCount, 1, 1500);
         QTRY_VERIFY_WITH_TIMEOUT(liveBackend.isIcloudMutationPausedForTest(conflictKey), 1500);
         QVERIFY(liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_real_conflict")));
 
-        if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
-        if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);
+        // Saving with a stale baseRevision (< 6) preserves the draft and keeps the conflict paused without re-submitting
+        liveBackend.saveIcloudNote(QStringLiteral("note_real_conflict"), QStringLiteral("Conflict Note Edited"), QStringLiteral("Updated Draft"), QStringLiteral("Notes"), 1);
+        QCoreApplication::processEvents();
+        QCOMPARE(noteRealConflictCount, 1);
+        QVERIFY(liveBackend.isIcloudMutationPausedForTest(conflictKey));
+        QVERIFY(liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_real_conflict")));
+
+        // Explicit reload recovery adopts the server version (revision 6) and clears the paused conflict
+        QVERIFY(liveBackend.reloadConflictedIcloudNoteServerVersion(QStringLiteral("note_real_conflict")));
+        QVERIFY(!liveBackend.isIcloudMutationPausedForTest(conflictKey));
+        QVERIFY(!liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_real_conflict")));
+
+        for (const char *k : credVars) {
+            const QByteArray key(k);
+            if (savedEnv.contains(key)) qputenv(k, savedEnv.value(key)); else qunsetenv(k);
+        }
     }
 
     void testIcloudCalendarEventsLifecycle() {
-        const QByteArray prevUrl = qgetenv("BLUEBUBBLES_URL");
-        const QByteArray prevPass = qgetenv("BLUEBUBBLES_PASSWORD");
-        qunsetenv("BLUEBUBBLES_URL");
-        qunsetenv("BLUEBUBBLES_PASSWORD");
+        const char *credVars[] = {
+            "BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+            "BLUEPILL_SECONDARY_URL", "IMSG_SECONDARY_URL", "BLUEBUBBLES_SECONDARY_URL",
+            "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"
+        };
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) {
+                savedEnv.insert(QByteArray(k), qgetenv(k));
+            }
+            qunsetenv(k);
+        }
 
         QTemporaryDir tempDir;
         Backend backend(false);
         backend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_events_offline.json")));
+        backend.loadCredentials();
         backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_events.json")));
 
         QVERIFY(backend.icloudEvents().isEmpty());
@@ -3890,6 +3924,7 @@ private slots:
             qunsetenv("BLUEBUBBLES_PASSWORD");
             Backend offlineRestartEvtBackend(false);
             offlineRestartEvtBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_events_offline.json")));
+            offlineRestartEvtBackend.loadCredentials();
             offlineRestartEvtBackend.setStateFilePath(copyStatePath);
             QVERIFY(offlineRestartEvtBackend.hasPendingIcloudEventSaveForTest(savedEvtId));
             offlineRestartEvtBackend.deleteIcloudEvent(savedEvtId);
@@ -3931,8 +3966,10 @@ private slots:
         QVERIFY(hasCachedEventId(QStringLiteral("evt_near_249")));
         QVERIFY(hasCachedEventId(QStringLiteral("evt_mid_cached")));
         QVERIFY(hasCachedEventId(savedEvtId));
-        if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
-        if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);
+        for (const char *k : credVars) {
+            const QByteArray key(k);
+            if (savedEnv.contains(key)) qputenv(k, savedEnv.value(key)); else qunsetenv(k);
+        }
     }
 
     void testIcloudPhotosAndUnpurge() {

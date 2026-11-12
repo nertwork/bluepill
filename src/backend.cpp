@@ -8187,11 +8187,41 @@ void Backend::replayPendingIcloudMutations() {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
                     if (httpStatus == 409 && doc.value(QStringLiteral("data")).isArray()) {
-                        const qint64 srvRev = extractServerItemRevision(doc.value(QStringLiteral("data")).toArray(), noteId);
+                        const QJsonArray conflictArr = doc.value(QStringLiteral("data")).toArray();
+                        const qint64 srvRev = extractServerItemRevision(conflictArr, noteId);
+                        QString srvTitle;
+                        QString srvBody;
+                        QString srvFolder = QStringLiteral("Notes");
+                        for (const QJsonValue &cv : conflictArr) {
+                            if (cv.isObject() && cv.toObject().value(QStringLiteral("id")).toString() == noteId) {
+                                const QJsonObject co = cv.toObject();
+                                srvTitle = co.value(QStringLiteral("title")).toString();
+                                srvBody = co.value(QStringLiteral("body")).toString();
+                                srvFolder = co.value(QStringLiteral("folder")).toString(QStringLiteral("Notes"));
+                                break;
+                            }
+                        }
                         if (srvRev > 0) {
                             QVariantMap pend = m_pendingIcloudNoteSaves.value(noteId);
                             pend.insert(QStringLiteral("conflictServerRevision"), srvRev);
+                            pend.insert(QStringLiteral("conflictServerTitle"), srvTitle);
+                            pend.insert(QStringLiteral("conflictServerBody"), srvBody);
+                            pend.insert(QStringLiteral("conflictServerFolder"), srvFolder);
+                            pend.insert(QStringLiteral("hasServerConflict"), true);
                             m_pendingIcloudNoteSaves.insert(noteId, pend);
+                            for (int i = 0; i < m_icloudNotes.size(); ++i) {
+                                QVariantMap uiMap = m_icloudNotes.at(i).toMap();
+                                if (uiMap.value(QStringLiteral("id")).toString() == noteId) {
+                                    uiMap.insert(QStringLiteral("conflictServerRevision"), srvRev);
+                                    uiMap.insert(QStringLiteral("conflictServerTitle"), srvTitle);
+                                    uiMap.insert(QStringLiteral("conflictServerBody"), srvBody);
+                                    uiMap.insert(QStringLiteral("conflictServerFolder"), srvFolder);
+                                    uiMap.insert(QStringLiteral("hasServerConflict"), true);
+                                    m_icloudNotes[i] = uiMap;
+                                    break;
+                                }
+                            }
+                            emit icloudNotesChanged();
                         }
                         emit toastMessage(QStringLiteral("Note revision conflict on server; your local draft is preserved."));
                     } else if (httpStatus == 401 || httpStatus == 403) {
@@ -8549,6 +8579,28 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
     }
 
     const QVariantMap prevPendNote = m_pendingIcloudNoteSaves.value(actualId);
+    const qint64 conflictSrvRev = prevPendNote.value(QStringLiteral("conflictServerRevision")).toLongLong();
+    if (!id.trimmed().isEmpty() && conflictSrvRev > 0 && baseRev < conflictSrvRev) {
+        QVariantMap updatedPend = prevPendNote;
+        updatedPend.insert(QStringLiteral("title"), title);
+        updatedPend.insert(QStringLiteral("body"), body);
+        updatedPend.insert(QStringLiteral("folder"), folder.isEmpty() ? QStringLiteral("Notes") : folder);
+        updatedPend.insert(QStringLiteral("updatedAtMs"), now);
+        m_pendingIcloudNoteSaves.insert(actualId, updatedPend);
+        for (int i = 0; i < m_icloudNotes.size(); ++i) {
+            if (m_icloudNotes.at(i).toMap().value(QStringLiteral("id")).toString() == actualId) {
+                m_icloudNotes[i] = updatedPend;
+                break;
+            }
+        }
+        const QString pausedKey = QStringLiteral("note_save:") + actualId;
+        m_icloudMutationPausedKeys.insert(pausedKey);
+        m_icloudMutationNextRetryMs.remove(pausedKey);
+        emit icloudNotesChanged();
+        saveAppState();
+        emit toastMessage(QStringLiteral("Note conflict is paused. Choose Reload Server Version, Save as Copy, or Overwrite Server."));
+        return actualId;
+    }
     const bool alreadyDispatched = prevPendNote.value(QStringLiteral("dispatchAttempted")).toBool();
     const bool wasNeverDispatchedCreate = id.trimmed().isEmpty()
                                               ? true
@@ -8733,11 +8785,41 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
                     if (httpStatus == 409 && dataVal.isArray()) {
-                        const qint64 srvRev = extractRev(dataVal.toArray());
+                        const QJsonArray conflictArr = dataVal.toArray();
+                        const qint64 srvRev = extractRev(conflictArr);
+                        QString srvTitle;
+                        QString srvBody;
+                        QString srvFolder = QStringLiteral("Notes");
+                        for (const QJsonValue &cv : conflictArr) {
+                            if (cv.isObject() && cv.toObject().value(QStringLiteral("id")).toString() == actualId) {
+                                const QJsonObject co = cv.toObject();
+                                srvTitle = co.value(QStringLiteral("title")).toString();
+                                srvBody = co.value(QStringLiteral("body")).toString();
+                                srvFolder = co.value(QStringLiteral("folder")).toString(QStringLiteral("Notes"));
+                                break;
+                            }
+                        }
                         if (srvRev > 0) {
                             QVariantMap pend = m_pendingIcloudNoteSaves.value(actualId);
                             pend.insert(QStringLiteral("conflictServerRevision"), srvRev);
+                            pend.insert(QStringLiteral("conflictServerTitle"), srvTitle);
+                            pend.insert(QStringLiteral("conflictServerBody"), srvBody);
+                            pend.insert(QStringLiteral("conflictServerFolder"), srvFolder);
+                            pend.insert(QStringLiteral("hasServerConflict"), true);
                             m_pendingIcloudNoteSaves.insert(actualId, pend);
+                            for (int i = 0; i < m_icloudNotes.size(); ++i) {
+                                QVariantMap uiMap = m_icloudNotes.at(i).toMap();
+                                if (uiMap.value(QStringLiteral("id")).toString() == actualId) {
+                                    uiMap.insert(QStringLiteral("conflictServerRevision"), srvRev);
+                                    uiMap.insert(QStringLiteral("conflictServerTitle"), srvTitle);
+                                    uiMap.insert(QStringLiteral("conflictServerBody"), srvBody);
+                                    uiMap.insert(QStringLiteral("conflictServerFolder"), srvFolder);
+                                    uiMap.insert(QStringLiteral("hasServerConflict"), true);
+                                    m_icloudNotes[i] = uiMap;
+                                    break;
+                                }
+                            }
+                            emit icloudNotesChanged();
                         }
                         emit toastMessage(QStringLiteral("Note revision conflict on server; your local draft is preserved."));
                     } else if (httpStatus == 401 || httpStatus == 403) {
@@ -8761,6 +8843,40 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
         });
     }
     return actualId;
+}
+
+bool Backend::reloadConflictedIcloudNoteServerVersion(const QString &id) {
+    const QString cleanId = id.trimmed();
+    if (cleanId.isEmpty()) return false;
+    const QVariantMap pend = m_pendingIcloudNoteSaves.value(cleanId);
+    const qint64 srvRev = pend.value(QStringLiteral("conflictServerRevision")).toLongLong();
+    clearIcloudMutationRetryState(QStringLiteral("note_save:") + cleanId);
+    m_pendingIcloudNoteSaves.remove(cleanId);
+    const quint64 gen = ++m_icloudNotesGeneration;
+    if (srvRev > 0) {
+        for (int i = 0; i < m_icloudNotes.size(); ++i) {
+            QVariantMap uiMap = m_icloudNotes.at(i).toMap();
+            if (uiMap.value(QStringLiteral("id")).toString() == cleanId) {
+                uiMap.insert(QStringLiteral("title"), pend.value(QStringLiteral("conflictServerTitle")).toString());
+                uiMap.insert(QStringLiteral("body"), pend.value(QStringLiteral("conflictServerBody")).toString());
+                uiMap.insert(QStringLiteral("folder"), pend.value(QStringLiteral("conflictServerFolder"), QStringLiteral("Notes")).toString());
+                uiMap.insert(QStringLiteral("revision"), srvRev);
+                uiMap.insert(QStringLiteral("baseRevision"), srvRev);
+                uiMap.insert(QStringLiteral("clientMutationSeq"), QVariant::fromValue(gen));
+                uiMap.remove(QStringLiteral("conflictServerRevision"));
+                uiMap.remove(QStringLiteral("conflictServerTitle"));
+                uiMap.remove(QStringLiteral("conflictServerBody"));
+                uiMap.remove(QStringLiteral("conflictServerFolder"));
+                uiMap.remove(QStringLiteral("hasServerConflict"));
+                m_icloudNotes[i] = uiMap;
+                break;
+            }
+        }
+    }
+    emit icloudNotesChanged();
+    saveAppState();
+    fetchIcloudNotes();
+    return true;
 }
 
 void Backend::deleteIcloudNote(const QString &id) {
