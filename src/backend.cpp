@@ -7698,7 +7698,7 @@ void Backend::applyRemoteIcloudEvents(const QJsonArray &data) {
         QVariantMap m = v.toObject().toVariantMap();
         const QString id = m.value(QStringLiteral("id")).toString();
         if (id.isEmpty()) continue;
-        const qint64 sMs = m.value(QStringLiteral("startMs")).toVariant().toLongLong();
+        const qint64 sMs = m.value(QStringLiteral("startMs")).toLongLong();
         if (sMs < minRemoteStartMs) minRemoteStartMs = sMs;
         if (sMs > maxRemoteStartMs) maxRemoteStartMs = sMs;
         if (m_pendingIcloudEventDeletes.contains(id)) continue;
@@ -7721,7 +7721,7 @@ void Backend::applyRemoteIcloudEvents(const QJsonArray &data) {
             if (existingId.isEmpty() || seenIds.contains(existingId) || m_pendingIcloudEventDeletes.contains(existingId)) {
                 continue;
             }
-            const qint64 existingStartMs = existingMap.value(QStringLiteral("startMs")).toVariant().toLongLong();
+            const qint64 existingStartMs = existingMap.value(QStringLiteral("startMs")).toLongLong();
             if (existingStartMs < minRemoteStartMs || existingStartMs > maxRemoteStartMs) {
                 merged.append(existingMap);
                 seenIds.insert(existingId);
