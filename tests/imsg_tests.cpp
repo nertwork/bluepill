@@ -3389,12 +3389,17 @@ private slots:
 
         QVERIFY(backend.icloudEvents().isEmpty());
 
-        // Create Event
+        // Create Event (and verify unique IDs even within the same millisecond)
         const QString evtId = backend.saveIcloudEvent(QStringLiteral("BluePill Architecture Review"), 1700000000000, 1700003600000, QStringLiteral("Work"), QStringLiteral("Discuss iCloud Hub sync"));
-        QCOMPARE(backend.icloudEvents().size(), 1);
+        const QString evtId2 = backend.saveIcloudEvent(QStringLiteral("BluePill Architecture Review 2"), 1700000000000, 1700003600000, QStringLiteral("Work"), QStringLiteral("Discuss iCloud Hub sync 2"));
         QVERIFY(!evtId.isEmpty());
+        QVERIFY(!evtId2.isEmpty());
+        QVERIFY(evtId != evtId2);
+        backend.deleteIcloudEvent(evtId2);
+        QCOMPARE(backend.icloudEvents().size(), 1);
         QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("BluePill Architecture Review"));
         QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("calendarTitle")).toString(), QStringLiteral("Work"));
+        QVERIFY(backend.icloudEvents().first().toMap().value(QStringLiteral("clientMutationSeq")).toULongLong() > 0);
 
         // Offline pending event survives remote snapshot reconciliation and normalizes calendarName -> calendarTitle
         QJsonObject remoteEvt;

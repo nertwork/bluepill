@@ -1261,13 +1261,57 @@ ApplicationWindow {
                             anchors.fill: parent
                             spacing: 6
 
+                            Shortcut {
+                                sequence: "Ctrl+Shift+N"
+                                onActivated: {
+                                    if (icloudHubBar.visible) {
+                                        backend.fetchIcloudNotes()
+                                        icloudNotesPopup.open()
+                                    }
+                                }
+                            }
+                            Shortcut {
+                                sequence: "Ctrl+Shift+C"
+                                onActivated: {
+                                    if (icloudHubBar.visible) {
+                                        backend.fetchIcloudEvents()
+                                        icloudCalendarPopup.open()
+                                    }
+                                }
+                            }
+                            Shortcut {
+                                sequence: "Ctrl+Shift+P"
+                                onActivated: {
+                                    if (icloudHubBar.visible) {
+                                        backend.fetchIcloudPhotos()
+                                        icloudPhotosPopup.open()
+                                    }
+                                }
+                            }
+
                             Rectangle {
+                                id: notesHubTile
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 radius: 6
-                                color: notesHover.containsMouse ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
-                                border.color: notesHover.containsMouse ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
-                                border.width: 1
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Open iCloud Notes"
+                                color: (notesHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
+                                border.color: (notesHover.containsMouse || activeFocus) ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                border.width: activeFocus ? 2 : 1
+                                Keys.onReturnPressed: {
+                                    backend.fetchIcloudNotes()
+                                    icloudNotesPopup.open()
+                                }
+                                Keys.onEnterPressed: {
+                                    backend.fetchIcloudNotes()
+                                    icloudNotesPopup.open()
+                                }
+                                Keys.onSpacePressed: {
+                                    backend.fetchIcloudNotes()
+                                    icloudNotesPopup.open()
+                                }
 
                                 RowLayout {
                                     anchors.centerIn: parent
@@ -1290,6 +1334,7 @@ ApplicationWindow {
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {
+                                        notesHubTile.forceActiveFocus()
                                         backend.fetchIcloudNotes()
                                         icloudNotesPopup.open()
                                     }
@@ -1297,12 +1342,28 @@ ApplicationWindow {
                             }
 
                             Rectangle {
+                                id: calHubTile
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 radius: 6
-                                color: calHover.containsMouse ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
-                                border.color: calHover.containsMouse ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
-                                border.width: 1
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Open iCloud Calendar"
+                                color: (calHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
+                                border.color: (calHover.containsMouse || activeFocus) ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                border.width: activeFocus ? 2 : 1
+                                Keys.onReturnPressed: {
+                                    backend.fetchIcloudEvents()
+                                    icloudCalendarPopup.open()
+                                }
+                                Keys.onEnterPressed: {
+                                    backend.fetchIcloudEvents()
+                                    icloudCalendarPopup.open()
+                                }
+                                Keys.onSpacePressed: {
+                                    backend.fetchIcloudEvents()
+                                    icloudCalendarPopup.open()
+                                }
 
                                 RowLayout {
                                     anchors.centerIn: parent
@@ -1325,6 +1386,7 @@ ApplicationWindow {
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {
+                                        calHubTile.forceActiveFocus()
                                         backend.fetchIcloudEvents()
                                         icloudCalendarPopup.open()
                                     }
@@ -1332,12 +1394,28 @@ ApplicationWindow {
                             }
 
                             Rectangle {
+                                id: photosHubTile
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 radius: 6
-                                color: photosHover.containsMouse ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
-                                border.color: photosHover.containsMouse ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
-                                border.width: 1
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Open iCloud Photos"
+                                color: (photosHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
+                                border.color: (photosHover.containsMouse || activeFocus) ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                border.width: activeFocus ? 2 : 1
+                                Keys.onReturnPressed: {
+                                    backend.fetchIcloudPhotos()
+                                    icloudPhotosPopup.open()
+                                }
+                                Keys.onEnterPressed: {
+                                    backend.fetchIcloudPhotos()
+                                    icloudPhotosPopup.open()
+                                }
+                                Keys.onSpacePressed: {
+                                    backend.fetchIcloudPhotos()
+                                    icloudPhotosPopup.open()
+                                }
 
                                 RowLayout {
                                     anchors.centerIn: parent
@@ -1360,6 +1438,7 @@ ApplicationWindow {
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {
+                                        photosHubTile.forceActiveFocus()
                                         backend.fetchIcloudPhotos()
                                         icloudPhotosPopup.open()
                                     }

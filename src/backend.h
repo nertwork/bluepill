@@ -392,6 +392,7 @@ private:
     void handleNetworkSuccess();
     void applyRemoteIcloudNotes(const QJsonArray &data);
     void applyRemoteIcloudEvents(const QJsonArray &data);
+    void scheduleIcloudMutationRetry(bool immediate);
 
     QNetworkAccessManager m_nam;
     QNetworkAccessManager m_sendNam;
@@ -505,4 +506,6 @@ private:
     QSet<QString> m_pendingIcloudEventDeletes;
     QHash<QString, QPointer<QNetworkReply>> m_inFlightIcloudNoteReplies;
     QHash<QString, QPointer<QNetworkReply>> m_inFlightIcloudEventReplies;
+    int m_icloudMutationRetryCount = 0;
+    bool m_icloudMutationRetryScheduled = false;
 };

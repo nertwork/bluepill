@@ -3065,8 +3065,38 @@ class BluePillEngine:
             self.logger.debug("[icloud] deleted map read warning (%s): %s", path, exc)
         return out
 
-    def _write_deleted_map(self, path: str, del_map: Dict[str, int]) -> None:
-        serialized = [{"id": k, "deletedAtMs": int(v)} for k, v in del_map.items() if k]
+    def _read_deleted_revs_strict(self, path: str) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        if not os.path.exists(path):
+            return out
+        try:
+            raw_list = self._read_json_list_strict(path)
+            for entry in raw_list:
+                if isinstance(entry, dict):
+                    item_id = str(entry.get("id") or "").strip()
+                    rev = int(entry.get("revision") or 1)
+                    if item_id:
+                        out[item_id] = max(out.get(item_id, 0), rev)
+                elif entry is not None:
+                    item_id = str(entry).strip()
+                    if item_id:
+                        out.setdefault(item_id, 1)
+        except (OSError, ValueError) as exc:
+            self.logger.debug("[icloud] deleted revs read warning (%s): %s", path, exc)
+        return out
+
+    def _write_deleted_map(
+        self,
+        path: str,
+        del_map: Dict[str, int],
+        rev_map: Optional[Dict[str, int]] = None,
+    ) -> None:
+        revs = rev_map or {}
+        serialized = [
+            {"id": k, "deletedAtMs": int(v), "revision": int(revs.get(k, 1))}
+            for k, v in del_map.items()
+            if k
+        ]
         self._atomic_write_json(path, serialized)
 
     @staticmethod
@@ -3112,6 +3142,7 @@ class BluePillEngine:
                     "folder": "Notes",
                     "syncSource": "local_hub",
                     "updatedAtMs": int(time.time() * 1000),
+                    "revision": 1,
                 }
                 local_notes = [welcome]
                 try:
@@ -3169,39 +3200,60 @@ class BluePillEngine:
             sorted_notes = sorted(notes_by_id.values(), key=lambda x: x.get("updatedAtMs", 0), reverse=True)
             return sorted_notes
 
-    def save_icloud_note(self, note: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def save_icloud_note(self, note: Dict[str, Any], raise_on_conflict: bool = False) -> List[Dict[str, Any]]:
         nid = str(note.get("id") or f"note-{uuid.uuid4()}").strip()
         title = str(note.get("title") or "Untitled Note").strip()
         body = str(note.get("body") or "").strip()
         folder = str(note.get("folder") or "Notes").strip()
-        explicit_ts = note.get("updatedAtMs")
-        updated_at = int(explicit_ts) if explicit_ts is not None else int(time.time() * 1000)
+        now_server_ms = int(time.time() * 1000)
+        base_rev_raw = note.get("baseRevision") if "baseRevision" in note else note.get("expectedRevision")
+        base_rev: Optional[int] = int(base_rev_raw) if base_rev_raw is not None else None
+        allow_recreate = bool(note.get("allowRecreate"))
 
         with self._icloud_store_lock:
             deleted_path = self._get_deleted_notes_json_path()
             del_map = self._read_deleted_map_strict(deleted_path)
-            if nid in del_map:
-                if explicit_ts is not None and updated_at <= del_map[nid]:
-                    return self.query_icloud_notes()
-                del del_map[nid]
-                try:
-                    self._write_deleted_map(deleted_path, del_map)
-                except OSError as exc:
-                    self.logger.debug("[notes] deleted_notes update skipped: %s", exc)
-
+            del_revs = self._read_deleted_revs_strict(deleted_path)
             notes_path = self._get_notes_json_path()
             notes = self._read_json_list_strict(notes_path)
+
+            max_rev = max(
+                [int(n.get("revision") or 0) for n in notes if isinstance(n, dict)]
+                + list(del_revs.values())
+                + [0]
+            )
+
+            if nid in del_map:
+                del_rev = int(del_revs.get(nid, 1))
+                if not allow_recreate and (base_rev is None or base_rev < del_rev):
+                    if raise_on_conflict:
+                        raise ValueError(f"Conflict: note '{nid}' was deleted (revision {del_rev})")
+                    return self.query_icloud_notes()
+                del del_map[nid]
+                del_revs.pop(nid, None)
+                try:
+                    self._write_deleted_map(deleted_path, del_map, del_revs)
+                except OSError as exc:
+                    self.logger.debug("[notes] deleted_notes update skipped: %s", exc)
 
             found = False
             for item in notes:
                 if isinstance(item, dict) and item.get("id") == nid:
-                    if explicit_ts is not None and int(item.get("updatedAtMs") or 0) > updated_at:
+                    existing_rev = int(item.get("revision") or 1)
+                    existing_ts = int(item.get("updatedAtMs") or 0)
+                    if base_rev is not None and base_rev < existing_rev:
+                        if raise_on_conflict:
+                            raise ValueError(
+                                f"Conflict: stale baseRevision {base_rev} < current revision {existing_rev} for note '{nid}'"
+                            )
                         return self.query_icloud_notes()
+                    next_rev = max(max_rev, existing_rev) + 1
                     item["title"] = title
                     item["body"] = body
                     item["folder"] = folder
                     item["syncSource"] = "local_hub"
-                    item["updatedAtMs"] = updated_at
+                    item["updatedAtMs"] = max(now_server_ms, existing_ts + 1)
+                    item["revision"] = next_rev
                     found = True
                     break
             if not found:
@@ -3211,30 +3263,45 @@ class BluePillEngine:
                     "body": body,
                     "folder": folder,
                     "syncSource": "local_hub",
-                    "updatedAtMs": updated_at,
+                    "updatedAtMs": now_server_ms,
+                    "revision": max_rev + 1,
                 })
 
             self._atomic_write_json(notes_path, notes)
             return self.query_icloud_notes()
 
-    def delete_icloud_note(self, note_id: str) -> List[Dict[str, Any]]:
+    def delete_icloud_note(self, note_id: str, raise_on_missing: bool = False) -> List[Dict[str, Any]]:
         clean_id = str(note_id).strip()
         with self._icloud_store_lock:
             notes_path = self._get_notes_json_path()
+            deleted_path = self._get_deleted_notes_json_path()
+            del_map = self._read_deleted_map_strict(deleted_path)
+            del_revs = self._read_deleted_revs_strict(deleted_path)
+
+            existing = self._read_json_list_strict(notes_path) if os.path.exists(notes_path) else []
+            found_local = False
             max_existing_ts = 0
-            if os.path.exists(notes_path):
-                existing = self._read_json_list_strict(notes_path)
-                for n in existing:
-                    if isinstance(n, dict) and n.get("id") == clean_id:
+            max_existing_rev = max(list(del_revs.values()) + [0])
+            for n in existing:
+                if isinstance(n, dict):
+                    max_existing_rev = max(max_existing_rev, int(n.get("revision") or 1))
+                    if n.get("id") == clean_id:
+                        found_local = True
                         max_existing_ts = max(max_existing_ts, int(n.get("updatedAtMs") or 0))
+
+            if not found_local and clean_id not in del_map:
+                if raise_on_missing:
+                    raise PermissionError(f"Cannot delete read-only or non-local note: {clean_id}")
+                return self.query_icloud_notes()
+
+            if found_local:
                 notes = [n for n in existing if isinstance(n, dict) and n.get("id") != clean_id]
                 self._atomic_write_json(notes_path, notes)
 
-            deleted_path = self._get_deleted_notes_json_path()
-            del_map = self._read_deleted_map_strict(deleted_path)
             deleted_at = max(int(time.time() * 1000), max_existing_ts + 1)
             del_map[clean_id] = max(del_map.get(clean_id, 0), deleted_at)
-            self._write_deleted_map(deleted_path, del_map)
+            del_revs[clean_id] = max(del_revs.get(clean_id, 0), max_existing_rev + 1)
+            self._write_deleted_map(deleted_path, del_map, del_revs)
 
             return self.query_icloud_notes()
 
@@ -3322,18 +3389,22 @@ class BluePillEngine:
                             }
                         except sqlite3.Error:
                             occ_cols = set()
-                        has_occ_cache = "calendar_item_id" in occ_cols and "occurrence_date" in occ_cols
+                        has_occ_cache = "event_id" in occ_cols and "occurrence_date" in occ_cols
                         if has_occ_cache:
                             rows = conn.execute(
                                 """
                                 SELECT ci.ROWID, ci.summary, ci.description,
-                                       COALESCE(MIN(oc.occurrence_date), ci.start_date) AS effective_start_date,
+                                       COALESCE(
+                                         MIN(CASE WHEN oc.occurrence_date >= ? THEN oc.occurrence_date END),
+                                         MAX(oc.occurrence_date),
+                                         ci.start_date
+                                       ) AS effective_start_date,
                                        ci.start_date, ci.end_date, ci.all_day, ci.calendar_id, ci.unique_identifier,
                                        c.title as calendar_title, c.color as calendar_color
                                 FROM CalendarItem ci
                                 LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
                                 LEFT JOIN OccurrenceCache oc
-                                  ON oc.calendar_item_id = ci.ROWID
+                                  ON oc.event_id = ci.ROWID
                                   AND oc.occurrence_date >= ? AND oc.occurrence_date <= ?
                                 WHERE ci.summary IS NOT NULL
                                   AND (
@@ -3341,11 +3412,12 @@ class BluePillEngine:
                                     OR oc.occurrence_date IS NOT NULL
                                   )
                                 GROUP BY ci.ROWID
-                                ORDER BY CASE WHEN COALESCE(MIN(oc.occurrence_date), ci.start_date) >= ? THEN 0 ELSE 1 END ASC,
-                                         ABS(COALESCE(MIN(oc.occurrence_date), ci.start_date) - ?) ASC
+                                ORDER BY CASE WHEN effective_start_date >= ? THEN 0 ELSE 1 END ASC,
+                                         ABS(effective_start_date - ?) ASC
                                 LIMIT ?
                                 """,
                                 (
+                                    now_apple_ts - 86400.0,
                                     window_start,
                                     window_end,
                                     window_start,
@@ -3418,7 +3490,7 @@ class BluePillEngine:
             selected.sort(key=lambda x: int(x.get("startMs", 0)))
             return selected
 
-    def save_icloud_event(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def save_icloud_event(self, event: Dict[str, Any], raise_on_conflict: bool = False) -> List[Dict[str, Any]]:
         eid = str(event.get("id") or f"evt-{uuid.uuid4()}").strip()
         title = str(event.get("title") or "New Event").strip()
         cal_name = str(event.get("calendarName") or event.get("calendarTitle") or "Home").strip()
@@ -3427,23 +3499,36 @@ class BluePillEngine:
         location = str(event.get("location") or "").strip()
         notes = str(event.get("notes") or "").strip()
         all_day = bool(event.get("allDay", False))
-        explicit_ts = event.get("updatedAtMs")
-        updated_at = int(explicit_ts) if explicit_ts is not None else int(time.time() * 1000)
+        now_server_ms = int(time.time() * 1000)
+        base_rev_raw = event.get("baseRevision") if "baseRevision" in event else event.get("expectedRevision")
+        base_rev: Optional[int] = int(base_rev_raw) if base_rev_raw is not None else None
+        allow_recreate = bool(event.get("allowRecreate"))
 
         with self._icloud_store_lock:
             deleted_path = self._get_deleted_events_json_path()
             del_map = self._read_deleted_map_strict(deleted_path)
-            if eid in del_map:
-                if explicit_ts is not None and updated_at <= del_map[eid]:
-                    return self.query_icloud_events()
-                del del_map[eid]
-                try:
-                    self._write_deleted_map(deleted_path, del_map)
-                except OSError as exc:
-                    self.logger.debug("[calendar] deleted_events update skipped: %s", exc)
-
+            del_revs = self._read_deleted_revs_strict(deleted_path)
             events_path = self._get_calendar_events_json_path()
             events = self._read_json_list_strict(events_path)
+
+            max_rev = max(
+                [int(e.get("revision") or 0) for e in events if isinstance(e, dict)]
+                + list(del_revs.values())
+                + [0]
+            )
+
+            if eid in del_map:
+                del_rev = int(del_revs.get(eid, 1))
+                if not allow_recreate and (base_rev is None or base_rev < del_rev):
+                    if raise_on_conflict:
+                        raise ValueError(f"Conflict: event '{eid}' was deleted (revision {del_rev})")
+                    return self.query_icloud_events()
+                del del_map[eid]
+                del_revs.pop(eid, None)
+                try:
+                    self._write_deleted_map(deleted_path, del_map, del_revs)
+                except OSError as exc:
+                    self.logger.debug("[calendar] deleted_events update skipped: %s", exc)
 
             found = False
             new_item = {
@@ -3457,12 +3542,21 @@ class BluePillEngine:
                 "notes": notes,
                 "allDay": all_day,
                 "syncSource": "local_hub",
-                "updatedAtMs": updated_at,
+                "updatedAtMs": now_server_ms,
+                "revision": max_rev + 1,
             }
             for i, item in enumerate(events):
                 if isinstance(item, dict) and item.get("id") == eid:
-                    if explicit_ts is not None and int(item.get("updatedAtMs") or 0) > updated_at:
+                    existing_rev = int(item.get("revision") or 1)
+                    existing_ts = int(item.get("updatedAtMs") or 0)
+                    if base_rev is not None and base_rev < existing_rev:
+                        if raise_on_conflict:
+                            raise ValueError(
+                                f"Conflict: stale baseRevision {base_rev} < current revision {existing_rev} for event '{eid}'"
+                            )
                         return self.query_icloud_events()
+                    new_item["updatedAtMs"] = max(now_server_ms, existing_ts + 1)
+                    new_item["revision"] = max(max_rev, existing_rev) + 1
                     events[i] = new_item
                     found = True
                     break
@@ -3472,24 +3566,38 @@ class BluePillEngine:
             self._atomic_write_json(events_path, events)
             return self.query_icloud_events()
 
-    def delete_icloud_event(self, event_id: str) -> List[Dict[str, Any]]:
+    def delete_icloud_event(self, event_id: str, raise_on_missing: bool = False) -> List[Dict[str, Any]]:
         clean_id = str(event_id).strip()
         with self._icloud_store_lock:
             events_path = self._get_calendar_events_json_path()
+            deleted_path = self._get_deleted_events_json_path()
+            del_map = self._read_deleted_map_strict(deleted_path)
+            del_revs = self._read_deleted_revs_strict(deleted_path)
+
+            existing = self._read_json_list_strict(events_path) if os.path.exists(events_path) else []
+            found_local = False
             max_existing_ts = 0
-            if os.path.exists(events_path):
-                existing = self._read_json_list_strict(events_path)
-                for e in existing:
-                    if isinstance(e, dict) and e.get("id") == clean_id:
+            max_existing_rev = max(list(del_revs.values()) + [0])
+            for e in existing:
+                if isinstance(e, dict):
+                    max_existing_rev = max(max_existing_rev, int(e.get("revision") or 1))
+                    if e.get("id") == clean_id:
+                        found_local = True
                         max_existing_ts = max(max_existing_ts, int(e.get("updatedAtMs") or 0))
+
+            if not found_local and clean_id not in del_map:
+                if raise_on_missing:
+                    raise PermissionError(f"Cannot delete read-only or non-local event: {clean_id}")
+                return self.query_icloud_events()
+
+            if found_local:
                 events = [e for e in existing if isinstance(e, dict) and e.get("id") != clean_id]
                 self._atomic_write_json(events_path, events)
 
-            deleted_path = self._get_deleted_events_json_path()
-            del_map = self._read_deleted_map_strict(deleted_path)
             deleted_at = max(int(time.time() * 1000), max_existing_ts + 1)
             del_map[clean_id] = max(del_map.get(clean_id, 0), deleted_at)
-            self._write_deleted_map(deleted_path, del_map)
+            del_revs[clean_id] = max(del_revs.get(clean_id, 0), max_existing_rev + 1)
+            self._write_deleted_map(deleted_path, del_map, del_revs)
 
             return self.query_icloud_events()
 
@@ -4012,7 +4120,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
               <button onclick="saveCurrentNote()" style="background:var(--green);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-weight:600;font-size:12px;cursor:pointer;">💾 Save</button>
               <button onclick="sendNoteToChat()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;">📤 Send to Chat</button>
             </div>
-            <button onclick="deleteCurrentNote()" style="background:#212832;color:#f85149;border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;">🗑 Delete</button>
+            <button id="deleteNoteBtn" onclick="deleteCurrentNote()" style="background:#212832;color:#f85149;border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;">🗑 Delete</button>
           </div>
         </div>
       </div>
@@ -4053,6 +4161,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
   <script>
     let allNotes = [];
     let selectedNoteId = null;
+    let selectedNoteRevision = null;
     let allEvents = [];
 
     function openNotesModal() {
@@ -4095,18 +4204,27 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     function selectNote(id) {
       selectedNoteId = id;
       const n = allNotes.find(item => item.id === id);
+      selectedNoteRevision = (n && typeof n.revision === 'number') ? n.revision : null;
       if (n) {
         document.getElementById('noteTitleInput').value = n.title || '';
         document.getElementById('noteFolderInput').value = n.folder || 'Notes';
         document.getElementById('noteBodyInput').value = n.body || '';
       }
+      const delBtn = document.getElementById('deleteNoteBtn');
+      if (delBtn) {
+        const isLocal = Boolean(n && (!n.syncSource || n.syncSource === 'local_hub'));
+        delBtn.style.display = isLocal ? 'inline-block' : 'none';
+      }
       renderNotesList();
     }
     function newNote() {
       selectedNoteId = 'note-' + Date.now();
+      selectedNoteRevision = 0;
       document.getElementById('noteTitleInput').value = '';
       document.getElementById('noteFolderInput').value = 'Notes';
       document.getElementById('noteBodyInput').value = '';
+      const delBtn = document.getElementById('deleteNoteBtn');
+      if (delBtn) delBtn.style.display = 'none';
       document.getElementById('noteTitleInput').focus();
     }
     async function saveCurrentNote() {
@@ -4114,19 +4232,28 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const folder = document.getElementById('noteFolderInput').value.trim() || 'Notes';
       const body = document.getElementById('noteBodyInput').value;
       const nid = selectedNoteId || ('note-' + Date.now());
+      const reqBody = {id: nid, title, folder, body, updatedAtMs: Date.now()};
+      if (selectedNoteRevision !== null) reqBody.baseRevision = selectedNoteRevision;
       const resp = await fetch(apiUrl('/api/v1/icloud/notes'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({id: nid, title, folder, body, updatedAtMs: Date.now()})
+        body: JSON.stringify(reqBody)
       });
       const j = await resp.json();
-      allNotes = j.data || [];
-      selectNote(nid);
+      allNotes = j.data || allNotes;
+      if (resp.ok && j.status === 200) {
+        selectNote(nid);
+      } else {
+        renderNotesList();
+      }
     }
     async function deleteCurrentNote() {
       if (!selectedNoteId) return;
+      const n = allNotes.find(item => item.id === selectedNoteId);
+      if (!n || (n.syncSource && n.syncSource !== 'local_hub')) return;
       const resp = await fetch(apiUrl('/api/v1/icloud/notes/' + encodeURIComponent(selectedNoteId)), { method: 'DELETE' });
       const j = await resp.json();
+      if (!resp.ok || j.status !== 200) return;
       allNotes = j.data || [];
       selectedNoteId = allNotes.length > 0 ? allNotes[0].id : null;
       if (selectedNoteId) selectNote(selectedNoteId); else newNote();
@@ -4188,12 +4315,14 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         shareBtn.style.cssText = 'background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;';
         shareBtn.textContent = '📤 Share';
         shareBtn.addEventListener('click', () => shareEvent(ev.id));
-        const delBtn = document.createElement('button');
-        delBtn.style.cssText = 'background:#212832;color:#f85149;border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;';
-        delBtn.textContent = '🗑';
-        delBtn.addEventListener('click', () => deleteEvent(ev.id));
         btnGroup.appendChild(shareBtn);
-        btnGroup.appendChild(delBtn);
+        if (!ev.syncSource || ev.syncSource === 'local_hub') {
+          const delBtn = document.createElement('button');
+          delBtn.style.cssText = 'background:#212832;color:#f85149;border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;';
+          delBtn.textContent = '🗑';
+          delBtn.addEventListener('click', () => deleteEvent(ev.id));
+          btnGroup.appendChild(delBtn);
+        }
 
         item.appendChild(infoCol);
         item.appendChild(btnGroup);
@@ -4218,8 +4347,11 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       renderEventsList();
     }
     async function deleteEvent(id) {
+      const ev = allEvents.find(e => e.id === id);
+      if (!ev || (ev.syncSource && ev.syncSource !== 'local_hub')) return;
       const resp = await fetch(apiUrl('/api/v1/icloud/events/' + encodeURIComponent(id)), { method: 'DELETE' });
       const j = await resp.json();
+      if (!resp.ok || j.status !== 200) return;
       allEvents = j.data || [];
       renderEventsList();
     }
@@ -4316,6 +4448,7 @@ class FastThreadingHTTPServer(ThreadingHTTPServer):
     """Avoid reverse-DNS getfqdn() stall inside HTTPServer.server_bind() on macOS."""
 
     allow_reuse_address = True
+    ssl_context: Optional[ssl.SSLContext] = None
 
     def server_bind(self) -> None:
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -4323,6 +4456,25 @@ class FastThreadingHTTPServer(ThreadingHTTPServer):
         self.server_address = self.socket.getsockname()[:2]
         self.server_name = str(self.server_address[0])
         self.server_port = int(self.server_address[1])
+
+    def finish_request(self, request: Any, client_address: Any) -> None:
+        if self.ssl_context is not None:
+            try:
+                request.settimeout(10.0)
+                tls_conn = self.ssl_context.wrap_socket(
+                    request,
+                    server_side=True,
+                    do_handshake_on_connect=False,
+                )
+                tls_conn.do_handshake()
+                request = tls_conn
+            except (ssl.SSLError, OSError):
+                try:
+                    request.close()
+                except OSError:
+                    pass
+                return
+        super().finish_request(request, client_address)
 
 
 class BluePillHTTPHandler(BaseHTTPRequestHandler):
@@ -4806,13 +4958,19 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/icloud/notes":
             if not self._check_icloud_auth_and_transport(parsed):
                 return
-            self._send_json(200, self.engine.save_icloud_note(body))
+            try:
+                self._send_json(200, self.engine.save_icloud_note(body, raise_on_conflict=True))
+            except ValueError as exc:
+                self._send_json(409, self.engine.query_icloud_notes(), str(exc))
             return
 
         if path == "/api/v1/icloud/events":
             if not self._check_icloud_auth_and_transport(parsed):
                 return
-            self._send_json(200, self.engine.save_icloud_event(body))
+            try:
+                self._send_json(200, self.engine.save_icloud_event(body, raise_on_conflict=True))
+            except ValueError as exc:
+                self._send_json(409, self.engine.query_icloud_events(), str(exc))
             return
 
         m_att_dl = re.match(r"^/api/v1/attachment/([^/]+)/download$", path)
@@ -4885,7 +5043,10 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             if not self._check_icloud_auth_and_transport(parsed):
                 return
             note_id = urllib.parse.unquote(m_note.group(1))
-            self._send_json(200, self.engine.delete_icloud_note(note_id))
+            try:
+                self._send_json(200, self.engine.delete_icloud_note(note_id, raise_on_missing=True))
+            except PermissionError as exc:
+                self._send_json(403, self.engine.query_icloud_notes(), str(exc))
             return
 
         m_evt = re.match(r"^/api/v1/icloud/events/([^/]+)$", path)
@@ -4893,7 +5054,10 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             if not self._check_icloud_auth_and_transport(parsed):
                 return
             evt_id = urllib.parse.unquote(m_evt.group(1))
-            self._send_json(200, self.engine.delete_icloud_event(evt_id))
+            try:
+                self._send_json(200, self.engine.delete_icloud_event(evt_id, raise_on_missing=True))
+            except PermissionError as exc:
+                self._send_json(403, self.engine.query_icloud_events(), str(exc))
             return
 
         self._send_json(200, {"deleted": True})
@@ -5217,7 +5381,7 @@ def main() -> int:
     if args.tls_cert and args.tls_key:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(certfile=args.tls_cert, keyfile=args.tls_key)
-        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        httpd.ssl_context = ctx
         scheme = "https"
     engine.logger.info("BluePill Server v%s listening on %s://%s:%d", VERSION, scheme, args.host, args.port)
     print(
