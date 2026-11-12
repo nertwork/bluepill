@@ -1712,6 +1712,27 @@ void Backend::handleNetworkSuccess() {
             loadChatMessages(m_selectedChatGuid);
         }
         startSocketIoClient();
+        QSet<QString> conflictPausedKeys;
+        for (const QString &key : std::as_const(m_icloudMutationPausedKeys)) {
+            if (key.startsWith(QStringLiteral("note_save:"))) {
+                const QString id = key.mid(10);
+                const QVariantMap pend = m_pendingIcloudNoteSaves.value(id);
+                if (pend.value(QStringLiteral("conflictServerRevision")).toLongLong() >
+                    pend.value(QStringLiteral("baseRevision")).toLongLong()) {
+                    conflictPausedKeys.insert(key);
+                }
+            } else if (key.startsWith(QStringLiteral("evt_save:"))) {
+                const QString id = key.mid(9);
+                const QVariantMap pend = m_pendingIcloudEventSaves.value(id);
+                if (pend.value(QStringLiteral("conflictServerRevision")).toLongLong() >
+                    pend.value(QStringLiteral("baseRevision")).toLongLong()) {
+                    conflictPausedKeys.insert(key);
+                }
+            }
+        }
+        m_icloudMutationPausedKeys = conflictPausedKeys;
+        m_icloudMutationRetryCounts.clear();
+        m_icloudMutationNextRetryMs.clear();
         replayPendingIcloudMutations();
     }
 }
@@ -1941,6 +1962,12 @@ void Backend::refreshAll() {
                 pend.value(QStringLiteral("baseRevision")).toLongLong()) {
                 conflictPausedKeys.insert(key);
             }
+        }
+    }
+    for (const QString &key : std::as_const(m_icloudMutationPausedKeys)) {
+        if (!conflictPausedKeys.contains(key)) {
+            m_icloudMutationRetryCounts.remove(key);
+            m_icloudMutationNextRetryMs.remove(key);
         }
     }
     m_icloudMutationPausedKeys = conflictPausedKeys;

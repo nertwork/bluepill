@@ -80,6 +80,8 @@ class _CrossProcessStoreLock:
                     except OSError:
                         pass
                     self._fd = None
+                self._rlock.release()
+                raise
         self._depth += 1
         return self
 
@@ -3292,7 +3294,7 @@ class BluePillEngine:
 
             if nid in del_map:
                 del_rev = int(del_revs.get(nid, 1))
-                if not allow_recreate and not (force_overwrite and base_rev == del_rev) and (base_rev is None or base_rev < del_rev):
+                if not allow_recreate and not (force_overwrite and base_rev == del_rev):
                     if raise_on_conflict:
                         raise ValueError(f"Conflict: note '{nid}' was deleted (revision {del_rev})")
                     return self.query_icloud_notes()
@@ -3610,7 +3612,7 @@ class BluePillEngine:
 
             if eid in del_map:
                 del_rev = int(del_revs.get(eid, 1))
-                if not allow_recreate and not (force_overwrite and base_rev == del_rev) and (base_rev is None or base_rev < del_rev):
+                if not allow_recreate and not (force_overwrite and base_rev == del_rev):
                     if raise_on_conflict:
                         raise ValueError(f"Conflict: event '{eid}' was deleted (revision {del_rev})")
                     return self.query_icloud_events()
@@ -4270,9 +4272,11 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     let selectedNoteRevision = null;
     let noteSelectionToken = 0;
     let noteDraftToken = 0;
+    let noteSaveAttemptSeq = 0;
     let conflictServerRevision = null;
     let conflictNoteId = null;
     let conflictSelectionToken = 0;
+    let conflictSaveAttemptSeq = 0;
     let conflictNoteDeleted = false;
     let allEvents = [];
 
@@ -4322,6 +4326,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       conflictServerRevision = null;
       conflictNoteId = null;
       conflictSelectionToken = 0;
+      conflictSaveAttemptSeq = 0;
       conflictNoteDeleted = false;
       const banner = document.getElementById('noteConflictBanner');
       if (banner) banner.style.display = 'none';
@@ -4347,6 +4352,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       conflictServerRevision = null;
       conflictNoteId = null;
       conflictSelectionToken = 0;
+      conflictSaveAttemptSeq = 0;
       conflictNoteDeleted = false;
       const banner = document.getElementById('noteConflictBanner');
       if (banner) banner.style.display = 'none';
@@ -4379,6 +4385,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       } else if (selectedNoteRevision !== null) {
         reqBody.baseRevision = selectedNoteRevision;
       }
+      const reqAttemptSeq = ++noteSaveAttemptSeq;
       const resp = await fetch(apiUrl('/api/v1/icloud/notes'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -4402,56 +4409,82 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         renderNotesList();
         return;
       }
-      if (Array.isArray(j.data)) allNotes = j.data;
+      if (Array.isArray(j.data)) {
+        if (reqAttemptSeq >= noteSaveAttemptSeq) {
+          allNotes = j.data;
+        } else {
+          for (const item of j.data) {
+            if (!item || !item.id) continue;
+            const idx = allNotes.findIndex(existing => existing && existing.id === item.id);
+            if (idx >= 0) {
+              const curRev = typeof allNotes[idx].revision === 'number' ? allNotes[idx].revision : 0;
+              const newRev = typeof item.revision === 'number' ? item.revision : 0;
+              if (newRev >= curRev) allNotes[idx] = item;
+            } else {
+              allNotes.unshift(item);
+            }
+          }
+        }
+      }
       const banner = document.getElementById('noteConflictBanner');
       const errBanner = document.getElementById('noteErrorBanner');
       if (resp.ok && j.status === 200) {
-        if (banner) banner.style.display = 'none';
         if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
-        conflictServerRevision = null;
-        conflictNoteId = null;
-        conflictSelectionToken = 0;
-        conflictNoteDeleted = false;
-        if (reqDraftToken === noteDraftToken) {
+        const canClearConflict = (reqAttemptSeq >= conflictSaveAttemptSeq);
+        if (canClearConflict) {
+          if (banner) banner.style.display = 'none';
+          conflictServerRevision = null;
+          conflictNoteId = null;
+          conflictSelectionToken = 0;
+          conflictSaveAttemptSeq = 0;
+          conflictNoteDeleted = false;
+        }
+        if (reqDraftToken === noteDraftToken && canClearConflict) {
           selectNote(nid);
         } else {
           const savedNote = allNotes.find(item => item.id === nid);
           if (savedNote && typeof savedNote.revision === 'number') {
-            selectedNoteRevision = savedNote.revision;
+            selectedNoteRevision = Math.max(selectedNoteRevision || 0, savedNote.revision);
           }
           const delBtn = document.getElementById('deleteNoteBtn');
           if (delBtn) delBtn.style.display = 'inline-block';
           renderNotesList();
         }
       } else if (j.status === 409) {
-        if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
-        const srvNote = allNotes.find(item => item.id === nid);
-        const conflictText = document.getElementById('noteConflictText');
-        const overwriteBtn = document.getElementById('noteConflictOverwriteBtn');
-        const reloadBtn = document.getElementById('noteConflictReloadBtn');
-        conflictNoteId = nid;
-        conflictSelectionToken = reqToken;
-        if (srvNote && typeof srvNote.revision === 'number') {
-          conflictServerRevision = srvNote.revision;
-          conflictNoteDeleted = false;
-          if (conflictText) conflictText.textContent = '⚠ Revision conflict: this note was updated elsewhere. Your draft is preserved.';
-          if (overwriteBtn) overwriteBtn.textContent = 'Overwrite with Draft';
-          if (reloadBtn) reloadBtn.style.display = 'inline-block';
-        } else {
-          conflictServerRevision = null;
-          conflictNoteDeleted = true;
-          if (conflictText) conflictText.textContent = '⚠ This note was deleted on the server. Your draft is preserved.';
-          if (overwriteBtn) overwriteBtn.textContent = 'Recreate Note';
-          if (reloadBtn) reloadBtn.style.display = 'none';
+        if (reqAttemptSeq >= conflictSaveAttemptSeq) {
+          if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
+          const srvNote = allNotes.find(item => item.id === nid);
+          const conflictText = document.getElementById('noteConflictText');
+          const overwriteBtn = document.getElementById('noteConflictOverwriteBtn');
+          const reloadBtn = document.getElementById('noteConflictReloadBtn');
+          conflictNoteId = nid;
+          conflictSelectionToken = reqToken;
+          conflictSaveAttemptSeq = reqAttemptSeq;
+          if (srvNote && typeof srvNote.revision === 'number') {
+            conflictServerRevision = srvNote.revision;
+            conflictNoteDeleted = false;
+            if (conflictText) conflictText.textContent = '⚠ Revision conflict: this note was updated elsewhere. Your draft is preserved.';
+            if (overwriteBtn) overwriteBtn.textContent = 'Overwrite with Draft';
+            if (reloadBtn) reloadBtn.style.display = 'inline-block';
+          } else {
+            conflictServerRevision = null;
+            conflictNoteDeleted = true;
+            if (conflictText) conflictText.textContent = '⚠ This note was deleted on the server. Your draft is preserved.';
+            if (overwriteBtn) overwriteBtn.textContent = 'Recreate Note';
+            if (reloadBtn) reloadBtn.style.display = 'none';
+          }
+          if (banner) banner.style.display = 'flex';
         }
-        if (banner) banner.style.display = 'flex';
         renderNotesList();
       } else {
-        if (banner) banner.style.display = 'none';
-        conflictServerRevision = null;
-        conflictNoteId = null;
-        conflictSelectionToken = 0;
-        conflictNoteDeleted = false;
+        if (reqAttemptSeq >= conflictSaveAttemptSeq) {
+          if (banner) banner.style.display = 'none';
+          conflictServerRevision = null;
+          conflictNoteId = null;
+          conflictSelectionToken = 0;
+          conflictSaveAttemptSeq = 0;
+          conflictNoteDeleted = false;
+        }
         if (errBanner) {
           errBanner.textContent = j.message || ('Save failed (HTTP ' + (j.status || resp.status) + ')');
           errBanner.style.display = 'block';
@@ -5225,7 +5258,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 status_code = 409 if str(exc).startswith("Conflict:") else 400
                 self._send_json(status_code, {"id": req_id, "data": None}, str(exc))
-            except Exception as exc:
+            except (KeyError, TypeError, OSError, RuntimeError, sqlite3.Error) as exc:
                 self._send_json(500, {"id": req_id, "data": None}, str(exc))
             return
 
@@ -5301,8 +5334,9 @@ def run_stdio_loop(engine: BluePillEngine) -> int:
         req_id = None
         try:
             req = json.loads(line)
-            if isinstance(req, dict):
-                req_id = req.get("id")
+            if not isinstance(req, dict):
+                raise ValueError("Invalid JSON-RPC request: expected JSON object")
+            req_id = req.get("id")
             method = str(req.get("method") or "")
             params = req.get("params") if isinstance(req.get("params"), dict) else {}
             data = engine.handle_rpc(method, params)
