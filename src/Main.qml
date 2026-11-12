@@ -1271,7 +1271,7 @@ ApplicationWindow {
                                 }
                             }
                             Shortcut {
-                                sequence: "Ctrl+Shift+C"
+                                sequence: "Ctrl+Shift+E"
                                 onActivated: {
                                     if (icloudHubBar.visible) {
                                         backend.fetchIcloudEvents()

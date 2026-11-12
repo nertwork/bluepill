@@ -3151,12 +3151,21 @@ class BluePillEngine:
                     self.logger.debug("[notes] initial welcome write skipped: %s", exc)
 
             notes_by_id: Dict[str, Dict[str, Any]] = {}
+            dirty_revs = False
             for n in local_notes:
                 if not isinstance(n, dict):
                     continue
+                if not isinstance(n.get("revision"), int) or int(n.get("revision") or 0) < 1:
+                    n["revision"] = 1
+                    dirty_revs = True
                 nid = str(n.get("id") or "").strip()
                 if nid and nid not in deleted_ids:
                     notes_by_id[nid] = n
+            if dirty_revs:
+                try:
+                    self._atomic_write_json(notes_path, local_notes)
+                except OSError as exc:
+                    self.logger.debug("[notes] revision backfill write skipped: %s", exc)
 
             macos_notes_db = os.path.expanduser("~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")
             if os.path.exists(macos_notes_db):
@@ -3191,6 +3200,7 @@ class BluePillEngine:
                                     "folder": "Notes",
                                     "syncSource": "apple_notes_ro",
                                     "updatedAtMs": updated_ms,
+                                    "revision": 1,
                                 }
                     finally:
                         conn.close()
@@ -3209,6 +3219,7 @@ class BluePillEngine:
         base_rev_raw = note.get("baseRevision") if "baseRevision" in note else note.get("expectedRevision")
         base_rev: Optional[int] = int(base_rev_raw) if base_rev_raw is not None else None
         allow_recreate = bool(note.get("allowRecreate"))
+        force_overwrite = bool(note.get("forceOverwrite"))
 
         with self._icloud_store_lock:
             deleted_path = self._get_deleted_notes_json_path()
@@ -3225,7 +3236,7 @@ class BluePillEngine:
 
             if nid in del_map:
                 del_rev = int(del_revs.get(nid, 1))
-                if not allow_recreate and (base_rev is None or base_rev < del_rev):
+                if not allow_recreate and not force_overwrite and (base_rev is None or base_rev < del_rev):
                     if raise_on_conflict:
                         raise ValueError(f"Conflict: note '{nid}' was deleted (revision {del_rev})")
                     return self.query_icloud_notes()
@@ -3239,12 +3250,12 @@ class BluePillEngine:
             found = False
             for item in notes:
                 if isinstance(item, dict) and item.get("id") == nid:
-                    existing_rev = int(item.get("revision") or 1)
+                    existing_rev = max(1, int(item.get("revision") or 1))
                     existing_ts = int(item.get("updatedAtMs") or 0)
-                    if base_rev is not None and base_rev < existing_rev:
+                    if not force_overwrite and (base_rev is None or base_rev != existing_rev):
                         if raise_on_conflict:
                             raise ValueError(
-                                f"Conflict: stale baseRevision {base_rev} < current revision {existing_rev} for note '{nid}'"
+                                f"Conflict: baseRevision {base_rev} does not match current revision {existing_rev} for note '{nid}'"
                             )
                         return self.query_icloud_notes()
                     next_rev = max(max_rev, existing_rev) + 1
@@ -3358,15 +3369,24 @@ class BluePillEngine:
             if os.path.exists(events_path):
                 try:
                     local_evts = self._read_json_list_strict(events_path)
+                    dirty_evt_revs = False
                     for ev in local_evts:
                         if not isinstance(ev, dict):
                             continue
+                        if not isinstance(ev.get("revision"), int) or int(ev.get("revision") or 0) < 1:
+                            ev["revision"] = 1
+                            dirty_evt_revs = True
                         eid = str(ev.get("id") or "").strip()
                         if eid and eid not in deleted_ids:
                             cal_label = str(ev.get("calendarName") or ev.get("calendarTitle") or "Home")
                             ev["calendarName"] = cal_label
                             ev["calendarTitle"] = cal_label
                             events_by_id[eid] = ev
+                    if dirty_evt_revs:
+                        try:
+                            self._atomic_write_json(events_path, local_evts)
+                        except OSError as exc:
+                            self.logger.debug("[calendar] revision backfill write skipped: %s", exc)
                 except (OSError, ValueError) as exc:
                     self.logger.warning("[calendar] calendar_events.json read error: %s", exc)
 
@@ -3472,6 +3492,7 @@ class BluePillEngine:
                                     "calendarColor": str(r["calendar_color"] or "#0A84FF"),
                                     "syncSource": "apple_calendar_ro",
                                     "location": "",
+                                    "revision": 1,
                                 }
                     finally:
                         conn.close()
@@ -3503,6 +3524,7 @@ class BluePillEngine:
         base_rev_raw = event.get("baseRevision") if "baseRevision" in event else event.get("expectedRevision")
         base_rev: Optional[int] = int(base_rev_raw) if base_rev_raw is not None else None
         allow_recreate = bool(event.get("allowRecreate"))
+        force_overwrite = bool(event.get("forceOverwrite"))
 
         with self._icloud_store_lock:
             deleted_path = self._get_deleted_events_json_path()
@@ -3519,7 +3541,7 @@ class BluePillEngine:
 
             if eid in del_map:
                 del_rev = int(del_revs.get(eid, 1))
-                if not allow_recreate and (base_rev is None or base_rev < del_rev):
+                if not allow_recreate and not force_overwrite and (base_rev is None or base_rev < del_rev):
                     if raise_on_conflict:
                         raise ValueError(f"Conflict: event '{eid}' was deleted (revision {del_rev})")
                     return self.query_icloud_events()
@@ -3547,12 +3569,12 @@ class BluePillEngine:
             }
             for i, item in enumerate(events):
                 if isinstance(item, dict) and item.get("id") == eid:
-                    existing_rev = int(item.get("revision") or 1)
+                    existing_rev = max(1, int(item.get("revision") or 1))
                     existing_ts = int(item.get("updatedAtMs") or 0)
-                    if base_rev is not None and base_rev < existing_rev:
+                    if not force_overwrite and (base_rev is None or base_rev != existing_rev):
                         if raise_on_conflict:
                             raise ValueError(
-                                f"Conflict: stale baseRevision {base_rev} < current revision {existing_rev} for event '{eid}'"
+                                f"Conflict: baseRevision {base_rev} does not match current revision {existing_rev} for event '{eid}'"
                             )
                         return self.query_icloud_events()
                     new_item["updatedAtMs"] = max(now_server_ms, existing_ts + 1)
@@ -3694,17 +3716,23 @@ class BluePillEngine:
         if method in ("icloud.notes", "api.icloud.notes"):
             return self.query_icloud_notes()
         if method in ("icloud.note.save", "api.icloud.note.save"):
-            return self.save_icloud_note(params)
+            return self.save_icloud_note(params, raise_on_conflict=True)
         if method in ("icloud.note.delete", "api.icloud.note.delete"):
-            return self.delete_icloud_note(str(params.get("id") or params.get("noteId") or ""))
+            return self.delete_icloud_note(
+                str(params.get("id") or params.get("noteId") or ""),
+                raise_on_missing=True,
+            )
         if method in ("icloud.calendars", "api.icloud.calendars"):
             return self.query_icloud_calendars()
         if method in ("icloud.events", "api.icloud.events"):
             return self.query_icloud_events(int(params.get("limit", 250) or 250))
         if method in ("icloud.event.save", "api.icloud.event.save"):
-            return self.save_icloud_event(params)
+            return self.save_icloud_event(params, raise_on_conflict=True)
         if method in ("icloud.event.delete", "api.icloud.event.delete"):
-            return self.delete_icloud_event(str(params.get("id") or params.get("eventId") or ""))
+            return self.delete_icloud_event(
+                str(params.get("id") or params.get("eventId") or ""),
+                raise_on_missing=True,
+            )
         if method in ("attachment.download", "api.attachment.download"):
             return self.download_cloud_attachment(str(params.get("guid") or params.get("attachmentGuid") or ""))
         raise ValueError(f"Unknown RPC method: {method}")
@@ -4112,6 +4140,13 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           <div id="notesList" style="flex:1;overflow-y:auto;padding:6px;"></div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;padding:14px;gap:10px;">
+          <div id="noteConflictBanner" style="display:none;background:#3d2c12;border:1px solid #d29922;border-radius:6px;padding:8px 10px;font-size:12px;color:#f0f6fc;align-items:center;justify-content:space-between;gap:8px;">
+            <span>⚠ Revision conflict: this note was updated elsewhere. Your draft is preserved.</span>
+            <div style="display:flex;gap:6px;">
+              <button onclick="resolveNoteConflictOverwrite()" style="background:#d29922;color:#0d1117;border:none;border-radius:4px;padding:4px 8px;font-weight:600;font-size:11px;cursor:pointer;">Overwrite with Draft</button>
+              <button onclick="resolveNoteConflictReload()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;">Load Server Version</button>
+            </div>
+          </div>
           <input id="noteTitleInput" placeholder="Note Title" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:14px;font-weight:600;" />
           <input id="noteFolderInput" placeholder="Folder (e.g. Notes, Work)" value="Notes" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--muted);font-size:12px;" />
           <textarea id="noteBodyInput" placeholder="Write note content..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--text);font-size:13px;resize:none;font-family:inherit;"></textarea>
@@ -4162,6 +4197,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     let allNotes = [];
     let selectedNoteId = null;
     let selectedNoteRevision = null;
+    let conflictServerRevision = null;
     let allEvents = [];
 
     function openNotesModal() {
@@ -4204,7 +4240,10 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     function selectNote(id) {
       selectedNoteId = id;
       const n = allNotes.find(item => item.id === id);
-      selectedNoteRevision = (n && typeof n.revision === 'number') ? n.revision : null;
+      selectedNoteRevision = (n && typeof n.revision === 'number') ? n.revision : 1;
+      conflictServerRevision = null;
+      const banner = document.getElementById('noteConflictBanner');
+      if (banner) banner.style.display = 'none';
       if (n) {
         document.getElementById('noteTitleInput').value = n.title || '';
         document.getElementById('noteFolderInput').value = n.folder || 'Notes';
@@ -4220,6 +4259,9 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     function newNote() {
       selectedNoteId = 'note-' + Date.now();
       selectedNoteRevision = 0;
+      conflictServerRevision = null;
+      const banner = document.getElementById('noteConflictBanner');
+      if (banner) banner.style.display = 'none';
       document.getElementById('noteTitleInput').value = '';
       document.getElementById('noteFolderInput').value = 'Notes';
       document.getElementById('noteBodyInput').value = '';
@@ -4227,13 +4269,18 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       if (delBtn) delBtn.style.display = 'none';
       document.getElementById('noteTitleInput').focus();
     }
-    async function saveCurrentNote() {
+    async function saveCurrentNote(forceOverwrite = false) {
       const title = document.getElementById('noteTitleInput').value.trim() || 'Untitled Note';
       const folder = document.getElementById('noteFolderInput').value.trim() || 'Notes';
       const body = document.getElementById('noteBodyInput').value;
       const nid = selectedNoteId || ('note-' + Date.now());
       const reqBody = {id: nid, title, folder, body, updatedAtMs: Date.now()};
-      if (selectedNoteRevision !== null) reqBody.baseRevision = selectedNoteRevision;
+      if (forceOverwrite === true) {
+        if (conflictServerRevision !== null) reqBody.baseRevision = conflictServerRevision;
+        reqBody.forceOverwrite = true;
+      } else if (selectedNoteRevision !== null) {
+        reqBody.baseRevision = selectedNoteRevision;
+      }
       const resp = await fetch(apiUrl('/api/v1/icloud/notes'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -4241,11 +4288,23 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       });
       const j = await resp.json();
       allNotes = j.data || allNotes;
+      const banner = document.getElementById('noteConflictBanner');
       if (resp.ok && j.status === 200) {
+        if (banner) banner.style.display = 'none';
+        conflictServerRevision = null;
         selectNote(nid);
       } else {
+        const srvNote = allNotes.find(item => item.id === nid);
+        conflictServerRevision = (srvNote && typeof srvNote.revision === 'number') ? srvNote.revision : null;
+        if (banner) banner.style.display = 'flex';
         renderNotesList();
       }
+    }
+    async function resolveNoteConflictOverwrite() {
+      await saveCurrentNote(true);
+    }
+    function resolveNoteConflictReload() {
+      if (selectedNoteId) selectNote(selectedNoteId);
     }
     async function deleteCurrentNote() {
       if (!selectedNoteId) return;
@@ -4995,6 +5054,11 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             try:
                 data = self.engine.handle_rpc(method, params)
                 self._send_json(200, {"id": req_id, "data": data})
+            except PermissionError as exc:
+                self._send_json(403, None, str(exc))
+            except ValueError as exc:
+                status_code = 409 if str(exc).startswith("Conflict:") else 400
+                self._send_json(status_code, None, str(exc))
             except Exception as exc:
                 self._send_json(500, None, str(exc))
             return
@@ -5075,6 +5139,11 @@ def run_stdio_loop(engine: BluePillEngine) -> int:
             params = req.get("params") if isinstance(req.get("params"), dict) else {}
             data = engine.handle_rpc(method, params)
             resp = {"id": req_id, "status": 200, "data": data}
+        except PermissionError as exc:
+            resp = {"id": req_id if "req_id" in locals() else None, "status": 403, "message": str(exc), "data": None}
+        except ValueError as exc:
+            status_code = 409 if str(exc).startswith("Conflict:") else 400
+            resp = {"id": req_id if "req_id" in locals() else None, "status": status_code, "message": str(exc), "data": None}
         except Exception as exc:
             resp = {"id": None, "status": 500, "message": str(exc), "data": None}
         sys.stdout.write(json.dumps(resp) + "\n")
@@ -5259,10 +5328,40 @@ def run_selftest(engine: BluePillEngine) -> int:
         # RPC checks
         rpc_notes = test_eng.handle_rpc("icloud.notes", {})
         assert isinstance(rpc_notes, list), "RPC icloud.notes failed"
+        assert all(isinstance(n.get("revision"), int) and n["revision"] >= 1 for n in rpc_notes), "All returned notes must have revision >= 1"
         rpc_evts = test_eng.handle_rpc("icloud.events", {})
         assert isinstance(rpc_evts, list), "RPC icloud.events failed"
         rpc_photos = test_eng.handle_rpc("icloud.photos", {})
         assert isinstance(rpc_photos, list), "RPC icloud.photos failed"
+
+        # Verify read-only/non-local RPC delete raises PermissionError
+        try:
+            test_eng.handle_rpc("icloud.note.delete", {"id": "readonly-nonexistent-note"})
+            assert False, "RPC icloud.note.delete on non-local note should have raised PermissionError"
+        except PermissionError:
+            pass
+        try:
+            test_eng.handle_rpc("icloud.event.delete", {"id": "readonly-nonexistent-event"})
+            assert False, "RPC icloud.event.delete on non-local event should have raised PermissionError"
+        except PermissionError:
+            pass
+
+        # Verify existing-record updates require matching baseRevision
+        rev_notes = test_eng.save_icloud_note({"id": "st-note-rev", "title": "V1", "body": "B1"}, raise_on_conflict=True)
+        rev_n1 = next(n for n in rev_notes if n.get("id") == "st-note-rev")
+        assert isinstance(rev_n1.get("revision"), int) and rev_n1["revision"] >= 1
+        try:
+            test_eng.save_icloud_note({"id": "st-note-rev", "title": "V2-no-rev", "body": "B2"}, raise_on_conflict=True)
+            assert False, "Updating existing note without baseRevision should raise ValueError"
+        except ValueError:
+            pass
+        rev_notes2 = test_eng.save_icloud_note(
+            {"id": "st-note-rev", "title": "V2-ok", "body": "B2", "baseRevision": rev_n1["revision"]},
+            raise_on_conflict=True,
+        )
+        rev_n2 = next(n for n in rev_notes2 if n.get("id") == "st-note-rev")
+        assert rev_n2["title"] == "V2-ok" and rev_n2["revision"] > rev_n1["revision"]
+        test_eng.delete_icloud_note("st-note-rev", raise_on_missing=True)
     finally:
         srv.shutdown()
         srv.server_close()

@@ -3380,6 +3380,30 @@ private slots:
         staleNote.insert(QStringLiteral("title"), QStringLiteral("Stale Remote Title"));
         backend.reconcileRemoteIcloudNotesForTest(QJsonArray{staleNote});
         QCOMPARE(backend.icloudNotes().size(), 0);
+
+        // Save another note so pending mutation sequence is persisted, then verify a fresh Backend restores
+        // icloudNotesGeneration above all restored clientMutationSeq values across restarts
+        backend.saveIcloudNote(QStringLiteral("note_restart_seq"), QStringLiteral("Restart Seq Note"), QStringLiteral("Body"), QStringLiteral("Notes"));
+        const quint64 preRestartGen = backend.icloudNotesGenerationForTest();
+        QVERIFY(preRestartGen > 0);
+        Backend restartedBackend(false);
+        restartedBackend.setStateFilePath(statePath);
+        QVERIFY(restartedBackend.icloudNotesGenerationForTest() >= preRestartGen);
+        const QString postRestartId = restartedBackend.saveIcloudNote(QString(), QStringLiteral("Post-Restart Note"), QStringLiteral("Body 2"), QStringLiteral("Notes"));
+        QVERIFY(!postRestartId.isEmpty());
+        QVERIFY(restartedBackend.icloudNotesGenerationForTest() > preRestartGen);
+
+        // Verify per-mutation exponential backoff is preserved when a different mutation succeeds and triggers scheduleIcloudMutationRetry(true)
+        const QString failKey = QStringLiteral("note_save:note_backoff_a");
+        backend.recordIcloudMutationFailureForTest(failKey);
+        QCOMPARE(backend.icloudMutationRetryCountForTest(failKey), 1);
+        QVERIFY(backend.isIcloudMutationInBackoffForTest(failKey));
+        backend.scheduleIcloudMutationRetryForTest(true);
+        QCOMPARE(backend.icloudMutationRetryCountForTest(failKey), 1);
+        QVERIFY(backend.isIcloudMutationInBackoffForTest(failKey));
+        backend.clearIcloudMutationRetryStateForTest(failKey);
+        QCOMPARE(backend.icloudMutationRetryCountForTest(failKey), 0);
+        QVERIFY(!backend.isIcloudMutationInBackoffForTest(failKey));
     }
 
     void testIcloudCalendarEventsLifecycle() {

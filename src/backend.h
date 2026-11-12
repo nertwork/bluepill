@@ -258,6 +258,13 @@ public:
     void replayPendingIcloudMutations();
     void reconcileRemoteIcloudNotesForTest(const QJsonArray &data) { applyRemoteIcloudNotes(data); }
     void reconcileRemoteIcloudEventsForTest(const QJsonArray &data) { applyRemoteIcloudEvents(data); }
+    quint64 icloudNotesGenerationForTest() const { return m_icloudNotesGeneration; }
+    quint64 icloudEventsGenerationForTest() const { return m_icloudEventsGeneration; }
+    void recordIcloudMutationFailureForTest(const QString &mutationKey) { recordIcloudMutationFailure(mutationKey); }
+    void clearIcloudMutationRetryStateForTest(const QString &mutationKey) { clearIcloudMutationRetryState(mutationKey); }
+    bool isIcloudMutationInBackoffForTest(const QString &mutationKey) const;
+    int icloudMutationRetryCountForTest(const QString &mutationKey) const { return m_icloudMutationRetryCounts.value(mutationKey, 0); }
+    void scheduleIcloudMutationRetryForTest(bool immediate) { scheduleIcloudMutationRetry(immediate); }
 
     // Network & Failover state
     QString currentServerUrl() const { return m_serverUrl; }
@@ -393,6 +400,8 @@ private:
     void applyRemoteIcloudNotes(const QJsonArray &data);
     void applyRemoteIcloudEvents(const QJsonArray &data);
     void scheduleIcloudMutationRetry(bool immediate);
+    void recordIcloudMutationFailure(const QString &mutationKey);
+    void clearIcloudMutationRetryState(const QString &mutationKey);
 
     QNetworkAccessManager m_nam;
     QNetworkAccessManager m_sendNam;
@@ -506,6 +515,8 @@ private:
     QSet<QString> m_pendingIcloudEventDeletes;
     QHash<QString, QPointer<QNetworkReply>> m_inFlightIcloudNoteReplies;
     QHash<QString, QPointer<QNetworkReply>> m_inFlightIcloudEventReplies;
-    int m_icloudMutationRetryCount = 0;
+    QHash<QString, int> m_icloudMutationRetryCounts;
+    QHash<QString, qint64> m_icloudMutationNextRetryMs;
+    QSet<QString> m_icloudMutationPausedKeys;
     bool m_icloudMutationRetryScheduled = false;
 };
