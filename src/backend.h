@@ -503,4 +503,6 @@ private:
     QSet<QString> m_pendingIcloudNoteDeletes;
     QHash<QString, QVariantMap> m_pendingIcloudEventSaves;
     QSet<QString> m_pendingIcloudEventDeletes;
+    QHash<QString, QPointer<QNetworkReply>> m_inFlightIcloudNoteReplies;
+    QHash<QString, QPointer<QNetworkReply>> m_inFlightIcloudEventReplies;
 };

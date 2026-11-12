@@ -5102,6 +5102,7 @@ ApplicationWindow {
 
         property string selectedNoteId: ""
         property string selectedNoteFolder: "Notes"
+        property string selectedNoteSyncSource: "local_hub"
 
         contentItem: ColumnLayout {
             anchors.fill: parent
@@ -5121,6 +5122,7 @@ ApplicationWindow {
                     text: "+ " + i18n.tr("New Note")
                     onClicked: {
                         icloudNotesPopup.selectedNoteId = ""
+                        icloudNotesPopup.selectedNoteSyncSource = "local_hub"
                         noteTitleInput.text = ""
                         noteFolderInput.text = "Notes"
                         noteBodyInput.text = ""
@@ -5206,6 +5208,7 @@ ApplicationWindow {
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
                                     icloudNotesPopup.selectedNoteId = modelData.id || ""
+                                    icloudNotesPopup.selectedNoteSyncSource = modelData.syncSource || "local_hub"
                                     noteTitleInput.text = modelData.title || ""
                                     noteFolderInput.text = modelData.folder || "Notes"
                                     noteBodyInput.text = modelData.body || modelData.snippet || ""
@@ -5265,9 +5268,13 @@ ApplicationWindow {
                             spacing: 8
 
                             Button {
-                                text: "💾 " + i18n.tr("Save")
+                                text: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro"
+                                      ? ("📋 " + i18n.tr("Copy to Local Hub"))
+                                      : ("💾 " + i18n.tr("Save"))
                                 onClicked: {
-                                    icloudNotesPopup.selectedNoteId = backend.saveIcloudNote(icloudNotesPopup.selectedNoteId, noteTitleInput.text, noteBodyInput.text, noteFolderInput.text)
+                                    var targetId = icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro" ? "" : icloudNotesPopup.selectedNoteId
+                                    icloudNotesPopup.selectedNoteId = backend.saveIcloudNote(targetId, noteTitleInput.text, noteBodyInput.text, noteFolderInput.text)
+                                    icloudNotesPopup.selectedNoteSyncSource = "local_hub"
                                 }
                             }
 
@@ -5292,6 +5299,7 @@ ApplicationWindow {
                                 onClicked: {
                                     backend.deleteIcloudNote(icloudNotesPopup.selectedNoteId)
                                     icloudNotesPopup.selectedNoteId = ""
+                                    icloudNotesPopup.selectedNoteSyncSource = "local_hub"
                                     noteTitleInput.text = ""
                                     noteBodyInput.text = ""
                                 }
@@ -5595,9 +5603,9 @@ ApplicationWindow {
 
                             Button {
                                 text: "📤"
-                                enabled: backend.selectedChatGuid !== "" && !!modelData.guid
+                                enabled: backend.selectedChatGuid !== "" && !!modelData.guid && !modelData.isCloudEvicted
                                 onClicked: {
-                                    if (modelData.guid) {
+                                    if (modelData.guid && !modelData.isCloudEvicted) {
                                         backend.shareIcloudPhotoToChat(backend.selectedChatGuid, modelData.guid, modelData.name || "photo.jpg")
                                         icloudPhotosPopup.close()
                                     }

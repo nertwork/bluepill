@@ -3396,12 +3396,20 @@ private slots:
         QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("BluePill Architecture Review"));
         QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("calendarTitle")).toString(), QStringLiteral("Work"));
 
-        // Offline pending event survives remote snapshot reconciliation
-        backend.reconcileRemoteIcloudEventsForTest(QJsonArray());
-        QCOMPARE(backend.icloudEvents().size(), 1);
+        // Offline pending event survives remote snapshot reconciliation and normalizes calendarName -> calendarTitle
+        QJsonObject remoteEvt;
+        remoteEvt.insert(QStringLiteral("id"), QStringLiteral("evt_remote_99"));
+        remoteEvt.insert(QStringLiteral("title"), QStringLiteral("Remote Standup"));
+        remoteEvt.insert(QStringLiteral("calendarName"), QStringLiteral("Work"));
+        remoteEvt.insert(QStringLiteral("startMs"), 1700007200000LL);
+        remoteEvt.insert(QStringLiteral("endMs"), 1700010800000LL);
+        backend.reconcileRemoteIcloudEventsForTest(QJsonArray{remoteEvt});
+        QCOMPARE(backend.icloudEvents().size(), 2);
+        QCOMPARE(backend.icloudEvents().last().toMap().value(QStringLiteral("calendarTitle")).toString(), QStringLiteral("Work"));
 
-        // Delete Event
+        // Delete Events
         backend.deleteIcloudEvent(evtId);
+        backend.deleteIcloudEvent(QStringLiteral("evt_remote_99"));
         QCOMPARE(backend.icloudEvents().size(), 0);
     }
 

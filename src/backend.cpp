@@ -1637,6 +1637,7 @@ void Backend::handleNetworkSuccess() {
             loadChatMessages(m_selectedChatGuid);
         }
         startSocketIoClient();
+        replayPendingIcloudMutations();
     }
 }
 
@@ -7674,20 +7675,45 @@ void Backend::applyRemoteIcloudEvents(const QJsonArray &data) {
     for (auto it = m_pendingIcloudEventSaves.begin(); it != m_pendingIcloudEventSaves.end(); ++it) {
         const QString id = it.key();
         if (!id.isEmpty() && !m_pendingIcloudEventDeletes.contains(id)) {
-            merged.append(it.value());
+            QVariantMap m = it.value();
+            const QString calTitle = m.value(QStringLiteral("calendarTitle")).toString().trimmed();
+            const QString calName = m.value(QStringLiteral("calendarName")).toString().trimmed();
+            const QString normCal = !calTitle.isEmpty() ? calTitle : (!calName.isEmpty() ? calName : QStringLiteral("Home"));
+            m.insert(QStringLiteral("calendarTitle"), normCal);
+            m.insert(QStringLiteral("calendarName"), normCal);
+            merged.append(m);
             seenIds.insert(id);
         }
     }
 
     for (const QJsonValue &v : data) {
         if (!v.isObject()) continue;
-        const QVariantMap m = v.toObject().toVariantMap();
+        QVariantMap m = v.toObject().toVariantMap();
         const QString id = m.value(QStringLiteral("id")).toString();
         if (id.isEmpty()) continue;
         if (m_pendingIcloudEventDeletes.contains(id)) continue;
         if (seenIds.contains(id)) continue;
+        const QString calTitle = m.value(QStringLiteral("calendarTitle")).toString().trimmed();
+        const QString calName = m.value(QStringLiteral("calendarName")).toString().trimmed();
+        const QString normCal = !calTitle.isEmpty() ? calTitle : (!calName.isEmpty() ? calName : QStringLiteral("Home"));
+        m.insert(QStringLiteral("calendarTitle"), normCal);
+        m.insert(QStringLiteral("calendarName"), normCal);
         merged.append(m);
         seenIds.insert(id);
+    }
+
+    // If the relay response was capped at its 250-event window, preserve locally known events
+    // that fall outside the returned window unless they have a pending delete.
+    if (data.size() >= 250) {
+        for (const QVariant &existingVar : m_icloudEvents) {
+            const QVariantMap existingMap = existingVar.toMap();
+            const QString existingId = existingMap.value(QStringLiteral("id")).toString();
+            if (existingId.isEmpty() || seenIds.contains(existingId) || m_pendingIcloudEventDeletes.contains(existingId)) {
+                continue;
+            }
+            merged.append(existingMap);
+            seenIds.insert(existingId);
+        }
     }
 
     m_icloudEvents = merged;
@@ -7701,13 +7727,20 @@ void Backend::replayPendingIcloudMutations() {
     const auto noteSaves = m_pendingIcloudNoteSaves;
     for (auto it = noteSaves.begin(); it != noteSaves.end(); ++it) {
         const QString noteId = it.key();
+        if (m_pendingIcloudNoteDeletes.contains(noteId)) continue;
+        if (m_inFlightIcloudNoteReplies.value(noteId)) continue;
         const QVariantMap noteMap = it.value();
         QJsonObject payload = QJsonObject::fromVariantMap(noteMap);
         const quint64 gen = ++m_icloudNotesGeneration;
         QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/icloud/notes")), QJsonDocument(payload).toJson(QJsonDocument::Compact));
+        m_inFlightIcloudNoteReplies.insert(noteId, reply);
         connect(reply, &QNetworkReply::finished, this, [this, reply, noteId, noteMap, gen]() {
+            if (m_inFlightIcloudNoteReplies.value(noteId) == reply) {
+                m_inFlightIcloudNoteReplies.remove(noteId);
+            }
             reply->deleteLater();
-            if (reply->error() == QNetworkReply::NoError) {
+            if (reply->error() == QNetworkReply::OperationCanceledError) return;
+            if (reply->error() == QNetworkReply::NoError && !m_pendingIcloudNoteDeletes.contains(noteId)) {
                 const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && doc.value(QStringLiteral("data")).isArray()) {
                     if (m_pendingIcloudNoteSaves.value(noteId).value(QStringLiteral("updatedAtMs")) == noteMap.value(QStringLiteral("updatedAtMs"))) {
@@ -7725,12 +7758,18 @@ void Backend::replayPendingIcloudMutations() {
 
     const QSet<QString> noteDeletes = m_pendingIcloudNoteDeletes;
     for (const QString &noteId : noteDeletes) {
+        if (m_inFlightIcloudNoteReplies.value(noteId)) continue;
         const quint64 gen = ++m_icloudNotesGeneration;
         const QString encodedId = QString::fromUtf8(QUrl::toPercentEncoding(noteId));
         QNetworkReply *reply = m_nam.deleteResource(makeRequest(QStringLiteral("/api/v1/icloud/notes/") + encodedId));
+        m_inFlightIcloudNoteReplies.insert(noteId, reply);
         connect(reply, &QNetworkReply::finished, this, [this, reply, noteId, gen]() {
+            if (m_inFlightIcloudNoteReplies.value(noteId) == reply) {
+                m_inFlightIcloudNoteReplies.remove(noteId);
+            }
             reply->deleteLater();
-            if (reply->error() == QNetworkReply::NoError) {
+            if (reply->error() == QNetworkReply::OperationCanceledError) return;
+            if (reply->error() == QNetworkReply::NoError && !m_pendingIcloudNoteSaves.contains(noteId)) {
                 const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && doc.value(QStringLiteral("data")).isArray()) {
                     m_pendingIcloudNoteDeletes.remove(noteId);
@@ -7747,14 +7786,21 @@ void Backend::replayPendingIcloudMutations() {
     const auto eventSaves = m_pendingIcloudEventSaves;
     for (auto it = eventSaves.begin(); it != eventSaves.end(); ++it) {
         const QString evtId = it.key();
+        if (m_pendingIcloudEventDeletes.contains(evtId)) continue;
+        if (m_inFlightIcloudEventReplies.value(evtId)) continue;
         const QVariantMap evtMap = it.value();
         QJsonObject payload = QJsonObject::fromVariantMap(evtMap);
         payload.insert(QStringLiteral("calendarName"), evtMap.value(QStringLiteral("calendarTitle")).toString());
         const quint64 gen = ++m_icloudEventsGeneration;
         QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/icloud/events")), QJsonDocument(payload).toJson(QJsonDocument::Compact));
+        m_inFlightIcloudEventReplies.insert(evtId, reply);
         connect(reply, &QNetworkReply::finished, this, [this, reply, evtId, gen]() {
+            if (m_inFlightIcloudEventReplies.value(evtId) == reply) {
+                m_inFlightIcloudEventReplies.remove(evtId);
+            }
             reply->deleteLater();
-            if (reply->error() == QNetworkReply::NoError) {
+            if (reply->error() == QNetworkReply::OperationCanceledError) return;
+            if (reply->error() == QNetworkReply::NoError && !m_pendingIcloudEventDeletes.contains(evtId)) {
                 const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && doc.value(QStringLiteral("data")).isArray()) {
                     m_pendingIcloudEventSaves.remove(evtId);
@@ -7770,12 +7816,18 @@ void Backend::replayPendingIcloudMutations() {
 
     const QSet<QString> eventDeletes = m_pendingIcloudEventDeletes;
     for (const QString &evtId : eventDeletes) {
+        if (m_inFlightIcloudEventReplies.value(evtId)) continue;
         const quint64 gen = ++m_icloudEventsGeneration;
         const QString encodedId = QString::fromUtf8(QUrl::toPercentEncoding(evtId));
         QNetworkReply *reply = m_nam.deleteResource(makeRequest(QStringLiteral("/api/v1/icloud/events/") + encodedId));
+        m_inFlightIcloudEventReplies.insert(evtId, reply);
         connect(reply, &QNetworkReply::finished, this, [this, reply, evtId, gen]() {
+            if (m_inFlightIcloudEventReplies.value(evtId) == reply) {
+                m_inFlightIcloudEventReplies.remove(evtId);
+            }
             reply->deleteLater();
-            if (reply->error() == QNetworkReply::NoError) {
+            if (reply->error() == QNetworkReply::OperationCanceledError) return;
+            if (reply->error() == QNetworkReply::NoError && !m_pendingIcloudEventSaves.contains(evtId)) {
                 const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && doc.value(QStringLiteral("data")).isArray()) {
                     m_pendingIcloudEventDeletes.remove(evtId);
@@ -7819,8 +7871,12 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
     noteMap.insert(QStringLiteral("title"), title);
     noteMap.insert(QStringLiteral("body"), body);
     noteMap.insert(QStringLiteral("folder"), folder.isEmpty() ? QStringLiteral("Notes") : folder);
+    noteMap.insert(QStringLiteral("syncSource"), QStringLiteral("local_hub"));
     noteMap.insert(QStringLiteral("updatedAtMs"), now);
 
+    if (QNetworkReply *prev = m_inFlightIcloudNoteReplies.take(actualId)) {
+        prev->abort();
+    }
     m_pendingIcloudNoteDeletes.remove(actualId);
     m_pendingIcloudNoteSaves.insert(actualId, noteMap);
     const quint64 gen = ++m_icloudNotesGeneration;
@@ -7848,9 +7904,14 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
         payload.insert(QStringLiteral("updatedAtMs"), now);
 
         QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/icloud/notes")), QJsonDocument(payload).toJson(QJsonDocument::Compact));
+        m_inFlightIcloudNoteReplies.insert(actualId, reply);
         connect(reply, &QNetworkReply::finished, this, [this, reply, actualId, now, gen]() {
+            if (m_inFlightIcloudNoteReplies.value(actualId) == reply) {
+                m_inFlightIcloudNoteReplies.remove(actualId);
+            }
             reply->deleteLater();
-            if (reply->error() == QNetworkReply::NoError) {
+            if (reply->error() == QNetworkReply::OperationCanceledError) return;
+            if (reply->error() == QNetworkReply::NoError && !m_pendingIcloudNoteDeletes.contains(actualId)) {
                 const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
                 const QJsonValue dataVal = doc.value(QStringLiteral("data"));
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && dataVal.isArray()) {
@@ -7871,6 +7932,9 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
 
 void Backend::deleteIcloudNote(const QString &id) {
     if (id.isEmpty()) return;
+    if (QNetworkReply *prev = m_inFlightIcloudNoteReplies.take(id)) {
+        prev->abort();
+    }
     m_pendingIcloudNoteSaves.remove(id);
     m_pendingIcloudNoteDeletes.insert(id);
     const quint64 gen = ++m_icloudNotesGeneration;
@@ -7887,9 +7951,14 @@ void Backend::deleteIcloudNote(const QString &id) {
     if (isSecureOrLocalIcloudEndpoint()) {
         const QString encodedId = QString::fromUtf8(QUrl::toPercentEncoding(id));
         QNetworkReply *reply = m_nam.deleteResource(makeRequest(QStringLiteral("/api/v1/icloud/notes/") + encodedId));
+        m_inFlightIcloudNoteReplies.insert(id, reply);
         connect(reply, &QNetworkReply::finished, this, [this, reply, id, gen]() {
+            if (m_inFlightIcloudNoteReplies.value(id) == reply) {
+                m_inFlightIcloudNoteReplies.remove(id);
+            }
             reply->deleteLater();
-            if (reply->error() == QNetworkReply::NoError) {
+            if (reply->error() == QNetworkReply::OperationCanceledError) return;
+            if (reply->error() == QNetworkReply::NoError && !m_pendingIcloudNoteSaves.contains(id)) {
                 const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
                 const QJsonValue dataVal = doc.value(QStringLiteral("data"));
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && dataVal.isArray()) {
@@ -7941,14 +8010,19 @@ void Backend::fetchIcloudEvents() {
 
 QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 endMs, const QString &calendarName, const QString &notes) {
     const QString id = QStringLiteral("evt_") + QString::number(QDateTime::currentMSecsSinceEpoch());
+    const QString calLabel = calendarName.isEmpty() ? QStringLiteral("Home") : calendarName;
     QVariantMap evtMap;
     evtMap.insert(QStringLiteral("id"), id);
     evtMap.insert(QStringLiteral("title"), title);
-    evtMap.insert(QStringLiteral("calendarTitle"), calendarName.isEmpty() ? QStringLiteral("Home") : calendarName);
+    evtMap.insert(QStringLiteral("calendarTitle"), calLabel);
+    evtMap.insert(QStringLiteral("calendarName"), calLabel);
     evtMap.insert(QStringLiteral("startMs"), startMs);
     evtMap.insert(QStringLiteral("endMs"), endMs);
     evtMap.insert(QStringLiteral("notes"), notes);
 
+    if (QNetworkReply *prev = m_inFlightIcloudEventReplies.take(id)) {
+        prev->abort();
+    }
     m_pendingIcloudEventDeletes.remove(id);
     m_pendingIcloudEventSaves.insert(id, evtMap);
     const quint64 gen = ++m_icloudEventsGeneration;
@@ -7961,15 +8035,21 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
         QJsonObject payload;
         payload.insert(QStringLiteral("id"), id);
         payload.insert(QStringLiteral("title"), title);
-        payload.insert(QStringLiteral("calendarName"), calendarName.isEmpty() ? QStringLiteral("Home") : calendarName);
+        payload.insert(QStringLiteral("calendarName"), calLabel);
+        payload.insert(QStringLiteral("calendarTitle"), calLabel);
         payload.insert(QStringLiteral("startMs"), startMs);
         payload.insert(QStringLiteral("endMs"), endMs);
         payload.insert(QStringLiteral("notes"), notes);
 
         QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/icloud/events")), QJsonDocument(payload).toJson(QJsonDocument::Compact));
+        m_inFlightIcloudEventReplies.insert(id, reply);
         connect(reply, &QNetworkReply::finished, this, [this, reply, id, gen]() {
+            if (m_inFlightIcloudEventReplies.value(id) == reply) {
+                m_inFlightIcloudEventReplies.remove(id);
+            }
             reply->deleteLater();
-            if (reply->error() == QNetworkReply::NoError) {
+            if (reply->error() == QNetworkReply::OperationCanceledError) return;
+            if (reply->error() == QNetworkReply::NoError && !m_pendingIcloudEventDeletes.contains(id)) {
                 const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
                 const QJsonValue dataVal = doc.value(QStringLiteral("data"));
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && dataVal.isArray()) {
@@ -7988,6 +8068,9 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
 
 void Backend::deleteIcloudEvent(const QString &id) {
     if (id.isEmpty()) return;
+    if (QNetworkReply *prev = m_inFlightIcloudEventReplies.take(id)) {
+        prev->abort();
+    }
     m_pendingIcloudEventSaves.remove(id);
     m_pendingIcloudEventDeletes.insert(id);
     const quint64 gen = ++m_icloudEventsGeneration;
@@ -8004,9 +8087,14 @@ void Backend::deleteIcloudEvent(const QString &id) {
     if (isSecureOrLocalIcloudEndpoint()) {
         const QString encodedId = QString::fromUtf8(QUrl::toPercentEncoding(id));
         QNetworkReply *reply = m_nam.deleteResource(makeRequest(QStringLiteral("/api/v1/icloud/events/") + encodedId));
+        m_inFlightIcloudEventReplies.insert(id, reply);
         connect(reply, &QNetworkReply::finished, this, [this, reply, id, gen]() {
+            if (m_inFlightIcloudEventReplies.value(id) == reply) {
+                m_inFlightIcloudEventReplies.remove(id);
+            }
             reply->deleteLater();
-            if (reply->error() == QNetworkReply::NoError) {
+            if (reply->error() == QNetworkReply::OperationCanceledError) return;
+            if (reply->error() == QNetworkReply::NoError && !m_pendingIcloudEventSaves.contains(id)) {
                 const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
                 const QJsonValue dataVal = doc.value(QStringLiteral("data"));
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && dataVal.isArray()) {
@@ -8058,7 +8146,13 @@ void Backend::downloadCloudAttachment(const QString &attachmentGuid) {
             if (dataObj.value(QStringLiteral("downloaded")).toBool()) {
                 fetchIcloudPhotos();
             } else {
-                const QString msg = dataObj.value(QStringLiteral("message")).toString(QStringLiteral("Attachment still downloading from iCloud"));
+                QString msg = dataObj.value(QStringLiteral("error")).toString().trimmed();
+                if (msg.isEmpty()) {
+                    msg = dataObj.value(QStringLiteral("message")).toString().trimmed();
+                }
+                if (msg.isEmpty()) {
+                    msg = QStringLiteral("Attachment still downloading from iCloud");
+                }
                 emit toastMessage(msg);
             }
         });
@@ -8070,7 +8164,7 @@ void Backend::shareIcloudPhotoToChat(const QString &chatGuid, const QString &att
     const QString cachedUrl = m_attachmentPaths.value(attachmentGuid);
     if (!cachedUrl.isEmpty()) {
         const QString localPath = QUrl(cachedUrl).isLocalFile() ? QUrl(cachedUrl).toLocalFile() : cachedUrl;
-        if (QFileInfo::exists(localPath)) {
+        if (QFileInfo::exists(localPath) && (m_demoMode || isSecureOrLocalIcloudEndpoint())) {
             sendAttachment(chatGuid, localPath);
             return;
         }

@@ -1541,28 +1541,87 @@ class BluePillEngine:
             return cached_wav, "audio/wav"
         return None
 
+    def _postprocess_resolved_attachment(
+        self,
+        real_path: str,
+        mime: str,
+        convert_heic: bool = False,
+        resize: Optional[int] = None,
+        transcode_audio: bool = False,
+    ) -> Tuple[str, str]:
+        lower_ext = os.path.splitext(real_path)[1].lower()
+        if (
+            sys.platform == "darwin"
+            and (convert_heic or resize)
+            and lower_ext in (".heic", ".heif", ".tiff", ".tif")
+            and os.path.exists("/usr/bin/sips")
+        ):
+            cache_dir = os.path.expanduser("~/.cache/bluepill/attachments")
+            os.makedirs(cache_dir, exist_ok=True)
+            digest = hashlib.sha256(f"{real_path}:{resize or 0}".encode("utf-8")).hexdigest()[:24]
+            cached_jpg = os.path.join(cache_dir, f"{digest}.jpg")
+            if not os.path.exists(cached_jpg):
+                cmd = ["/usr/bin/sips", "-s", "format", "jpeg"]
+                if resize and resize > 0:
+                    cmd.extend(["-Z", str(int(resize))])
+                cmd.extend([real_path, "--out", cached_jpg])
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10.0,
+                    check=False,
+                )
+            if os.path.exists(cached_jpg):
+                return cached_jpg, "image/jpeg"
+        if transcode_audio and lower_ext == ".caf":
+            tc = self._transcode_caf_if_needed(real_path)
+            if tc:
+                return tc
+        return real_path, mime
+
     def resolve_attachment_file(
         self,
         guid: str,
         convert_heic: bool = False,
         resize: Optional[int] = None,
         transcode_audio: bool = False,
+        allow_photos_library: bool = True,
     ) -> Optional[Tuple[str, str]]:
         clean_guid = urllib.parse.unquote(guid).strip()
         if clean_guid in self._outbound_attachments:
             cached_path, cached_mime = self._outbound_attachments[clean_guid]
             if os.path.exists(cached_path):
-                if transcode_audio and cached_path.lower().endswith(".caf"):
-                    tc = self._transcode_caf_if_needed(cached_path)
-                    if tc:
-                        return tc
-                return cached_path, cached_mime
-        if clean_guid in self._photos_library_assets:
+                return self._postprocess_resolved_attachment(
+                    cached_path,
+                    cached_mime,
+                    convert_heic=convert_heic,
+                    resize=resize,
+                    transcode_audio=transcode_audio,
+                )
+        if allow_photos_library and clean_guid in self._photos_library_assets:
             p_path, p_mime = self._photos_library_assets[clean_guid]
             if os.path.exists(p_path):
-                return p_path, p_mime
+                return self._postprocess_resolved_attachment(
+                    p_path,
+                    p_mime,
+                    convert_heic=convert_heic,
+                    resize=resize,
+                    transcode_audio=transcode_audio,
+                )
         if not os.path.exists(self.db_path):
-            return self._resolve_photos_library_asset(clean_guid)
+            if not allow_photos_library:
+                return None
+            photos_resolved = self._resolve_photos_library_asset(clean_guid)
+            if not photos_resolved:
+                return None
+            return self._postprocess_resolved_attachment(
+                photos_resolved[0],
+                photos_resolved[1],
+                convert_heic=convert_heic,
+                resize=resize,
+                transcode_audio=transcode_audio,
+            )
         conn = self._open_chat_db()
         try:
             suffix_uuid = clean_guid.split("_")[-1] if "_" in clean_guid else clean_guid
@@ -1576,7 +1635,18 @@ class BluePillEngine:
                 (clean_guid, clean_guid, f"%{suffix_uuid}"),
             ).fetchone()
             if not row:
-                return self._resolve_photos_library_asset(clean_guid)
+                if not allow_photos_library:
+                    return None
+                photos_resolved = self._resolve_photos_library_asset(clean_guid)
+                if not photos_resolved:
+                    return None
+                return self._postprocess_resolved_attachment(
+                    photos_resolved[0],
+                    photos_resolved[1],
+                    convert_heic=convert_heic,
+                    resize=resize,
+                    transcode_audio=transcode_audio,
+                )
             raw_path = os.path.expanduser(str(row["filename"] or ""))
             real_path = os.path.realpath(raw_path) if raw_path else ""
             if not real_path or not os.path.exists(real_path):
@@ -1586,36 +1656,13 @@ class BluePillEngine:
                 or mimetypes.guess_type(real_path)[0]
                 or "application/octet-stream"
             )
-            lower_ext = os.path.splitext(real_path)[1].lower()
-            if (
-                sys.platform == "darwin"
-                and (convert_heic or resize)
-                and lower_ext in (".heic", ".heif", ".tiff", ".tif")
-                and os.path.exists("/usr/bin/sips")
-            ):
-                cache_dir = os.path.expanduser("~/.cache/bluepill/attachments")
-                os.makedirs(cache_dir, exist_ok=True)
-                digest = hashlib.sha256(f"{real_path}:{resize or 0}".encode("utf-8")).hexdigest()[:24]
-                cached_jpg = os.path.join(cache_dir, f"{digest}.jpg")
-                if not os.path.exists(cached_jpg):
-                    cmd = ["/usr/bin/sips", "-s", "format", "jpeg"]
-                    if resize and resize > 0:
-                        cmd.extend(["-Z", str(int(resize))])
-                    cmd.extend([real_path, "--out", cached_jpg])
-                    subprocess.run(
-                        cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=10.0,
-                        check=False,
-                    )
-                if os.path.exists(cached_jpg):
-                    return cached_jpg, "image/jpeg"
-            if transcode_audio and lower_ext == ".caf":
-                tc = self._transcode_caf_if_needed(real_path)
-                if tc:
-                    return tc
-            return real_path, mime
+            return self._postprocess_resolved_attachment(
+                real_path,
+                mime,
+                convert_heic=convert_heic,
+                resize=resize,
+                transcode_audio=transcode_audio,
+            )
         finally:
             conn.close()
 
@@ -2734,8 +2781,9 @@ class BluePillEngine:
                         (clean_guid, clean_guid, f"%{suffix_uuid}"),
                     ).fetchone()
                     if row and row["filename"]:
-                        raw_p = os.path.expanduser(str(row["filename"]))
-                        if os.path.exists("/usr/bin/brctl"):
+                        raw_p = os.path.realpath(os.path.expanduser(str(row["filename"])))
+                        att_root = os.path.realpath(os.path.expanduser("~/Library/Messages/Attachments"))
+                        if raw_p.startswith(att_root + os.sep) and os.path.exists("/usr/bin/brctl"):
                             res = subprocess.run(
                                 ["/usr/bin/brctl", "download", raw_p],
                                 stdout=subprocess.DEVNULL,
@@ -2774,8 +2822,12 @@ class BluePillEngine:
 
     def query_icloud_photos(self, limit: int = 48) -> List[Dict[str, Any]]:
         clamped_limit = max(1, min(int(limit or 48), 100))
-        photos: List[Dict[str, Any]] = []
+        photos_lib = os.path.expanduser("~/Pictures/Photos Library.photoslibrary")
+        photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
+        has_photos_db = os.path.exists(photos_db)
         seen_guids: set[str] = set()
+        chat_photos: List[Dict[str, Any]] = []
+        lib_photos: List[Dict[str, Any]] = []
 
         # 1. Query chat.db image attachments
         if os.path.exists(self.db_path):
@@ -2807,7 +2859,7 @@ class BluePillEngine:
                             or (os.path.basename(real_p) if real_p else "")
                             or f"photo_{g[:8]}.jpg"
                         )
-                        photos.append({
+                        chat_photos.append({
                             "guid": g,
                             "name": name,
                             "mimeType": str(r["mime_type"] or "image/jpeg"),
@@ -2821,11 +2873,8 @@ class BluePillEngine:
             except sqlite3.Error as exc:
                 self.logger.warning("[photos] chat.db image query failed: %s", exc)
 
-        # 2. Check Photos.sqlite if present on macOS
-        photos_lib = os.path.expanduser("~/Pictures/Photos Library.photoslibrary")
-        photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
-        if os.path.exists(photos_db) and len(photos) < clamped_limit:
-            remaining = clamped_limit - len(photos)
+        # 2. Query Photos.sqlite with reserved capacity so chat attachments never starve Photos library assets
+        if has_photos_db:
             try:
                 pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
                 try:
@@ -2839,7 +2888,7 @@ class BluePillEngine:
                             WHERE ZFILENAME IS NOT NULL
                             ORDER BY ZDATECREATED DESC LIMIT ?
                             """,
-                            (remaining,),
+                            (clamped_limit,),
                         ).fetchall()
                         for ar in rows:
                             zuuid = str(ar["ZUUID"] or "").strip()
@@ -2869,7 +2918,7 @@ class BluePillEngine:
                                 except OSError:
                                     size_bytes = 0
                             seen_guids.add(zuuid)
-                            photos.append({
+                            lib_photos.append({
                                 "guid": zuuid,
                                 "name": zfn,
                                 "mimeType": mime,
@@ -2883,6 +2932,18 @@ class BluePillEngine:
             except sqlite3.Error as exc:
                 self.logger.debug("[photos] Photos.sqlite check: %s", exc)
 
+        if not lib_photos:
+            return chat_photos[:clamped_limit]
+        if not chat_photos:
+            return lib_photos[:clamped_limit]
+
+        # Reserve up to half the quota for each source and fill any unused capacity from the other
+        reserved_lib = min(len(lib_photos), max(1, clamped_limit // 2))
+        reserved_chat = min(len(chat_photos), clamped_limit - reserved_lib)
+        if reserved_chat + reserved_lib < clamped_limit:
+            extra_lib = min(len(lib_photos) - reserved_lib, clamped_limit - (reserved_chat + reserved_lib))
+            reserved_lib += extra_lib
+        photos = chat_photos[:reserved_chat] + lib_photos[:reserved_lib]
         return photos[:clamped_limit]
 
     def _get_notes_json_path(self) -> str:
@@ -2913,9 +2974,13 @@ class BluePillEngine:
             raise
 
     def _read_json_list_strict(self, path: str) -> List[Any]:
-        if not os.path.exists(path):
+        real_cfg = os.path.realpath(self._config_dir)
+        real_target = os.path.realpath(path)
+        if not (real_target == real_cfg or real_target.startswith(real_cfg + os.sep)):
+            raise ValueError("Refusing to read JSON outside config directory")
+        if not os.path.exists(real_target):
             return []
-        with open(path, "r", encoding="utf-8") as f:
+        with open(real_target, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, list) else []
 
@@ -3123,8 +3188,9 @@ class BluePillEngine:
                 self.logger.debug("[calendar] Calendar query failed: %s", exc)
         return calendars
 
-    def query_icloud_events(self, limit: int = 250) -> List[Dict[str, Any]]:
-        clamped_limit = max(1, min(int(limit or 250), 250))
+    def query_icloud_events(self, limit: int = 250, max_limit: int = 250) -> List[Dict[str, Any]]:
+        effective_cap = max(1, min(int(max_limit or 250), 5000))
+        clamped_limit = max(1, min(int(limit or 250), effective_cap))
         with self._icloud_store_lock:
             events_path = self._get_calendar_events_json_path()
             deleted_path = self._get_deleted_events_json_path()
@@ -3145,6 +3211,9 @@ class BluePillEngine:
                             continue
                         eid = str(ev.get("id") or "").strip()
                         if eid and eid not in deleted_ids:
+                            cal_label = str(ev.get("calendarName") or ev.get("calendarTitle") or "Home")
+                            ev["calendarName"] = cal_label
+                            ev["calendarTitle"] = cal_label
                             events_by_id[eid] = ev
                 except (OSError, ValueError) as exc:
                     self.logger.warning("[calendar] calendar_events.json read error: %s", exc)
@@ -3157,14 +3226,19 @@ class BluePillEngine:
                     conn = sqlite3.connect(f"file:{cal_db}?mode=ro", uri=True)
                     try:
                         conn.row_factory = sqlite3.Row
+                        now_apple_ts = time.time() - 978307200.0
+                        window_start = now_apple_ts - (30 * 86400.0)
+                        window_end = now_apple_ts + (365 * 86400.0)
                         rows = conn.execute(
                             """
                             SELECT ci.ROWID, ci.summary, ci.description, ci.start_date, ci.end_date, ci.all_day, ci.calendar_id, ci.unique_identifier, c.title as calendar_title, c.color as calendar_color
                             FROM CalendarItem ci
                             LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
-                            WHERE ci.summary IS NOT NULL
-                            ORDER BY ci.start_date DESC LIMIT 150
-                            """
+                            WHERE ci.summary IS NOT NULL AND ci.start_date >= ? AND ci.start_date <= ?
+                            ORDER BY CASE WHEN ci.start_date >= ? THEN 0 ELSE 1 END ASC, ABS(ci.start_date - ?) ASC
+                            LIMIT ?
+                            """,
+                            (window_start, window_end, now_apple_ts - 86400.0, now_apple_ts, max(150, clamped_limit)),
                         ).fetchall()
                         for r in rows:
                             eid = str(r["unique_identifier"] or r["ROWID"]).strip()
@@ -3174,6 +3248,7 @@ class BluePillEngine:
                             end_date = float(r["end_date"] or start_date + 3600)
                             start_ms = int((start_date + 978307200) * 1000)
                             end_ms = int((end_date + 978307200) * 1000)
+                            cal_title = str(r["calendar_title"] or "Home")
                             if eid not in events_by_id:
                                 events_by_id[eid] = {
                                     "id": eid,
@@ -3182,7 +3257,8 @@ class BluePillEngine:
                                     "startMs": start_ms,
                                     "endMs": end_ms,
                                     "allDay": bool(r["all_day"]),
-                                    "calendarName": str(r["calendar_title"] or "Home"),
+                                    "calendarName": cal_title,
+                                    "calendarTitle": cal_title,
                                     "calendarColor": str(r["calendar_color"] or "#0A84FF"),
                                     "syncSource": "apple_calendar_ro",
                                     "location": "",
@@ -3199,7 +3275,7 @@ class BluePillEngine:
     def save_icloud_event(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
         eid = str(event.get("id") or f"evt-{uuid.uuid4()}").strip()
         title = str(event.get("title") or "New Event").strip()
-        cal_name = str(event.get("calendarName") or "Home").strip()
+        cal_name = str(event.get("calendarName") or event.get("calendarTitle") or "Home").strip()
         start_ms = int(event.get("startMs") or int(time.time() * 1000))
         end_ms = int(event.get("endMs") or (start_ms + 3600000))
         location = str(event.get("location") or "").strip()
@@ -3215,6 +3291,7 @@ class BluePillEngine:
                 "id": eid,
                 "title": title,
                 "calendarName": cal_name,
+                "calendarTitle": cal_name,
                 "startMs": start_ms,
                 "endMs": end_ms,
                 "location": location,
@@ -3261,7 +3338,7 @@ class BluePillEngine:
             return self.query_icloud_events()
 
     def generate_calendar_ics(self) -> str:
-        events = self.query_icloud_events(limit=500)
+        events = self.query_icloud_events(limit=500, max_limit=500)
         lines = [
             "BEGIN:VCALENDAR",
             "VERSION:2.0",
@@ -3901,7 +3978,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     function sendNoteToChat() {
       const title = document.getElementById('noteTitleInput').value;
       const body = document.getElementById('noteBodyInput').value;
-      const fullText = (title ? title + '\\n' : '') + body;
+      const fullText = (title ? title + '\n' : '') + body;
       if (!fullText) return;
       const inp = document.getElementById('msgInput');
       if (inp) { inp.value = fullText; inp.focus(); }
@@ -4330,9 +4407,23 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                     att_guid,
                     convert_heic=not original_flag,
                     resize=resize_val,
+                    allow_photos_library=False,
                 )
             except FileNotFoundError:
                 resolved = None
+            if not resolved:
+                # Photos-library assets require iCloud Hub authentication & transport security
+                if not self._check_icloud_auth_and_transport(parsed):
+                    return
+                try:
+                    resolved = self.engine.resolve_attachment_file(
+                        att_guid,
+                        convert_heic=not original_flag,
+                        resize=resize_val,
+                        allow_photos_library=True,
+                    )
+                except FileNotFoundError:
+                    resolved = None
             if not resolved:
                 self._send_json(404, None, "Attachment not found")
                 return
@@ -4344,6 +4435,10 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", mime)
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if mime.lower().startswith("image/svg") or file_path.lower().endswith(".svg"):
+                self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+                self.send_header("Content-Disposition", 'attachment; filename="attachment.svg"')
             self.end_headers()
             self.wfile.write(raw)
             return
@@ -4570,6 +4665,13 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             req_id = body.get("id")
             method = str(body.get("method") or "")
             params = body.get("params") if isinstance(body.get("params"), dict) else {}
+            if (
+                method.startswith("icloud.")
+                or method.startswith("api.icloud.")
+                or method in ("attachment.download", "api.attachment.download")
+            ):
+                if not self._check_icloud_auth_and_transport(parsed):
+                    return
             try:
                 data = self.engine.handle_rpc(method, params)
                 self._send_json(200, {"id": req_id, "data": data})
