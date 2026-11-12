@@ -5197,6 +5197,12 @@ ApplicationWindow {
                     noteDetailWindow.noteSendInFlight = false
                 }
             }
+            function onSelectedChatChanged() {
+                if (noteDetailWindow.targetChatGuid === "" && backend.selectedChatGuid !== "") {
+                    noteDetailWindow.targetChatGuid = backend.selectedChatGuid
+                    noteDetailWindow.targetChatTitle = backend.selectedChatTitle
+                }
+            }
         }
 
         onVisibleChanged: {
@@ -7396,7 +7402,7 @@ ApplicationWindow {
                 anchors.verticalCenterOffset: root.photoViewerPanY
                 width: Math.max(120, parent.width - (root.photoViewerItems.length > 1 ? 140 : 32))
                 height: Math.max(120, parent.height - 24)
-                source: photoViewerModal.currentPhoto.localUrl || (photoViewerModal.currentPhoto.guid ? backend.attachmentDownloadUrl(photoViewerModal.currentPhoto.guid) : "")
+                source: photoViewerModal.currentPhoto.localUrl || ""
                 asynchronous: true
                 cache: true
                 autoTransform: true
@@ -7584,6 +7590,10 @@ ApplicationWindow {
                                 root.photoViewerZoom = 1.0
                                 root.photoViewerPanX = 0
                                 root.photoViewerPanY = 0
+                                var cur = root.photoViewerItems[index]
+                                if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0) {
+                                    backend.openAttachment(cur.guid, cur.name || "")
+                                }
                             }
                         }
                     }

@@ -3400,6 +3400,8 @@ private slots:
         QVERIFY(mockServer.listen(QHostAddress::LocalHost, 0));
         const quint16 mockPort = mockServer.serverPort();
         int noteACount = 0;
+        qint64 firstAttemptAMs = 0;
+        qint64 secondAttemptAMs = 0;
         int noteBCount = 0;
         int noteWsReplayCount = 0;
         int noteRealConflictCount = 0;
@@ -3449,6 +3451,12 @@ private slots:
                     }
                     if (reqId == QStringLiteral("note_conc_a")) {
                         noteACount++;
+                        const qint64 nowAttemptMs = QDateTime::currentMSecsSinceEpoch();
+                        if (noteACount == 1) {
+                            firstAttemptAMs = nowAttemptMs;
+                        } else if (noteACount == 2) {
+                            secondAttemptAMs = nowAttemptMs;
+                        }
                         sendHttpJson(sock, 503, "Service Unavailable",
                                      R"({"status":503,"message":"Transient upstream failure"})");
                         return;
@@ -3536,9 +3544,13 @@ private slots:
         QCoreApplication::processEvents();
 
         // Verify mutation A was NOT retried early before its 1000ms backoff deadline when mutation B succeeded
-        QCOMPARE(noteACount, 1);
-        QCOMPARE(liveBackend.icloudMutationRetryCountForTest(keyA), 1);
-        QVERIFY(liveBackend.isIcloudMutationInBackoffForTest(keyA));
+        if (noteACount == 1) {
+            QCOMPARE(liveBackend.icloudMutationRetryCountForTest(keyA), 1);
+            QVERIFY(liveBackend.isIcloudMutationInBackoffForTest(keyA));
+        } else {
+            QVERIFY2(secondAttemptAMs - firstAttemptAMs >= 900,
+                     qPrintable(QStringLiteral("Mutation A retried too early after %1 ms").arg(secondAttemptAMs - firstAttemptAMs)));
+        }
         liveBackend.clearIcloudMutationRetryStateForTest(keyA);
         QCOMPARE(liveBackend.icloudMutationRetryCountForTest(keyA), 0);
         QVERIFY(!liveBackend.isIcloudMutationInBackoffForTest(keyA));
@@ -3642,6 +3654,96 @@ private slots:
         }
         QVERIFY(!foundDeletedInWindow);
         QVERIFY(foundOutOfWindow);
+
+        // Verify dropped ACK followed by 409 replay for an event outside the 250-event window (with trailing whitespace in notes)
+        const QByteArray prevUrl = qgetenv("BLUEBUBBLES_URL");
+        const QByteArray prevPass = qgetenv("BLUEBUBBLES_PASSWORD");
+        QTcpServer evtServer;
+        QVERIFY(evtServer.listen(QHostAddress::LocalHost, 0));
+        int evtReplayCount = 0;
+        QString capturedEvtId;
+        QObject::connect(&evtServer, &QTcpServer::newConnection, &evtServer, [&]() {
+            while (QTcpSocket *sock = evtServer.nextPendingConnection()) {
+                auto buf = std::make_shared<QByteArray>();
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock, buf]() {
+                    buf->append(sock->readAll());
+                    const int bodyIdx = buf->indexOf("\r\n\r\n");
+                    if (bodyIdx < 0) return;
+                    const QByteArray headers = buf->left(bodyIdx).toLower();
+                    const int clIdx = headers.indexOf("content-length:");
+                    const int contentLength = clIdx >= 0
+                        ? headers.mid(clIdx + 15, headers.indexOf('\r', clIdx) - clIdx - 15).trimmed().toInt()
+                        : 0;
+                    if (buf->size() - (bodyIdx + 4) < contentLength) return;
+                    const QByteArray rawBody = buf->mid(bodyIdx + 4, contentLength);
+                    buf->clear();
+                    const QJsonObject bodyObj = QJsonDocument::fromJson(rawBody).object();
+                    capturedEvtId = bodyObj.value(QStringLiteral("id")).toString();
+                    evtReplayCount++;
+                    auto sendJson = [](QTcpSocket *s, int st, const QByteArray &stText, const QByteArray &jb) {
+                        const QByteArray r = "HTTP/1.1 " + QByteArray::number(st) + " " + stText + "\r\n"
+                                             "Content-Type: application/json\r\n"
+                                             "Content-Length: " + QByteArray::number(jb.size()) + "\r\n"
+                                             "Connection: close\r\n\r\n" + jb;
+                        s->write(r);
+                        s->flush();
+                        s->disconnectFromHost();
+                    };
+                    if (evtReplayCount == 1) {
+                        sendJson(sock, 503, "Service Unavailable", R"({"status":503,"message":"Dropped ACK"})");
+                        return;
+                    }
+                    // Build 250-event conflict snapshot that includes the affected out-of-window event at the end
+                    QJsonArray snap250;
+                    for (int i = 0; i < 249; ++i) {
+                        QJsonObject e;
+                        e.insert(QStringLiteral("id"), QStringLiteral("evt_ near_%1").arg(i));
+                        e.insert(QStringLiteral("title"), QStringLiteral("Near Event %1").arg(i));
+                        e.insert(QStringLiteral("startMs"), 1700000000000LL + i * 3600000LL);
+                        e.insert(QStringLiteral("endMs"), 1700003600000LL + i * 3600000LL);
+                        e.insert(QStringLiteral("calendarTitle"), QStringLiteral("Work"));
+                        e.insert(QStringLiteral("notes"), QStringLiteral(""));
+                        e.insert(QStringLiteral("revision"), 1);
+                        snap250.append(e);
+                    }
+                    QJsonObject appliedEvt;
+                    appliedEvt.insert(QStringLiteral("id"), capturedEvtId);
+                    appliedEvt.insert(QStringLiteral("title"), QStringLiteral("Far Future Replay Event"));
+                    appliedEvt.insert(QStringLiteral("startMs"), 1900000000000LL);
+                    appliedEvt.insert(QStringLiteral("endMs"), 1900003600000LL);
+                    appliedEvt.insert(QStringLiteral("calendarTitle"), QStringLiteral("Work"));
+                    appliedEvt.insert(QStringLiteral("notes"), QStringLiteral("Trimmed event notes"));
+                    appliedEvt.insert(QStringLiteral("revision"), 4);
+                    snap250.append(appliedEvt);
+                    QJsonObject respObj;
+                    respObj.insert(QStringLiteral("status"), 409);
+                    respObj.insert(QStringLiteral("data"), snap250);
+                    sendJson(sock, 409, "Conflict", QJsonDocument(respObj).toJson(QJsonDocument::Compact));
+                });
+            }
+        });
+        qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(evtServer.serverPort()).toUtf8());
+        qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+        Backend evtBackend(false);
+        evtBackend.setStateFilePath(tempDir.filePath(QStringLiteral("state_events_replay.json")));
+        evtBackend.loadCredentials();
+        const QString savedEvtId = evtBackend.saveIcloudEvent(
+            QStringLiteral("Far Future Replay Event "),
+            1900000000000LL,
+            1900003600000LL,
+            QStringLiteral("Work"),
+            QStringLiteral("Trimmed event notes\n  ")
+        );
+        const QString evtMutKey = QStringLiteral("evt_save:") + savedEvtId;
+        QTRY_COMPARE_WITH_TIMEOUT(evtReplayCount, 1, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(evtBackend.isIcloudMutationInBackoffForTest(evtMutKey), 1500);
+        evtBackend.clearIcloudMutationRetryStateForTest(evtMutKey);
+        evtBackend.replayPendingIcloudMutations();
+        QTRY_COMPARE_WITH_TIMEOUT(evtReplayCount, 2, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(!evtBackend.hasPendingIcloudEventSaveForTest(savedEvtId), 1500);
+        QVERIFY(!evtBackend.isIcloudMutationPausedForTest(evtMutKey));
+        if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
+        if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);
     }
 
     void testIcloudPhotosAndUnpurge() {

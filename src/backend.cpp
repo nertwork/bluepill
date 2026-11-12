@@ -8007,6 +8007,8 @@ void Backend::replayPendingIcloudMutations() {
             if (reply->error() == QNetworkReply::OperationCanceledError) {
                 if (m_pendingIcloudNoteSaves.contains(noteId)) {
                     recordIcloudMutationFailure(mutKey);
+                } else if (m_pendingIcloudNoteDeletes.contains(noteId)) {
+                    scheduleIcloudMutationRetry(true);
                 }
                 return;
             }
@@ -8022,23 +8024,23 @@ void Backend::replayPendingIcloudMutations() {
                     const QJsonArray dataArr = doc.value(QStringLiteral("data")).toArray();
                     ++m_icloudNotesSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
+                    const qint64 ackRev = extractServerItemRevision(dataArr, noteId);
                     if (sameMutation) {
                         m_pendingIcloudNoteSaves.remove(noteId);
-                    } else if (m_pendingIcloudNoteSaves.contains(noteId)) {
-                        const qint64 ackRev = extractServerItemRevision(dataArr, noteId);
-                        if (ackRev > 0) {
-                            QVariantMap nextMap = m_pendingIcloudNoteSaves.value(noteId);
-                            nextMap.insert(QStringLiteral("baseRevision"), ackRev);
-                            nextMap.insert(QStringLiteral("revision"), ackRev);
-                            m_pendingIcloudNoteSaves.insert(noteId, nextMap);
-                            for (int i = 0; i < m_icloudNotes.size(); ++i) {
-                                QVariantMap uiMap = m_icloudNotes.at(i).toMap();
-                                if (uiMap.value(QStringLiteral("id")).toString() == noteId) {
-                                    uiMap.insert(QStringLiteral("baseRevision"), ackRev);
-                                    uiMap.insert(QStringLiteral("revision"), ackRev);
-                                    m_icloudNotes[i] = uiMap;
-                                    break;
-                                }
+                    } else if (m_pendingIcloudNoteSaves.contains(noteId) && ackRev > 0) {
+                        QVariantMap nextMap = m_pendingIcloudNoteSaves.value(noteId);
+                        nextMap.insert(QStringLiteral("baseRevision"), ackRev);
+                        nextMap.insert(QStringLiteral("revision"), ackRev);
+                        m_pendingIcloudNoteSaves.insert(noteId, nextMap);
+                    }
+                    if (ackRev > 0) {
+                        for (int i = 0; i < m_icloudNotes.size(); ++i) {
+                            QVariantMap uiMap = m_icloudNotes.at(i).toMap();
+                            if (uiMap.value(QStringLiteral("id")).toString() == noteId) {
+                                uiMap.insert(QStringLiteral("baseRevision"), ackRev);
+                                uiMap.insert(QStringLiteral("revision"), ackRev);
+                                m_icloudNotes[i] = uiMap;
+                                break;
                             }
                         }
                     }
@@ -8119,6 +8121,8 @@ void Backend::replayPendingIcloudMutations() {
             if (reply->error() == QNetworkReply::OperationCanceledError) {
                 if (m_pendingIcloudNoteDeletes.contains(noteId)) {
                     recordIcloudMutationFailure(mutKey);
+                } else if (m_pendingIcloudNoteSaves.contains(noteId)) {
+                    scheduleIcloudMutationRetry(true);
                 }
                 return;
             }
@@ -8201,6 +8205,8 @@ void Backend::replayPendingIcloudMutations() {
             if (reply->error() == QNetworkReply::OperationCanceledError) {
                 if (m_pendingIcloudEventSaves.contains(evtId)) {
                     recordIcloudMutationFailure(mutKey);
+                } else if (m_pendingIcloudEventDeletes.contains(evtId)) {
+                    scheduleIcloudMutationRetry(true);
                 }
                 return;
             }
@@ -8216,23 +8222,23 @@ void Backend::replayPendingIcloudMutations() {
                     const QJsonArray dataArr = doc.value(QStringLiteral("data")).toArray();
                     ++m_icloudEventsSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
+                    const qint64 ackRev = extractServerItemRevision(dataArr, evtId);
                     if (sameMutation) {
                         m_pendingIcloudEventSaves.remove(evtId);
-                    } else if (m_pendingIcloudEventSaves.contains(evtId)) {
-                        const qint64 ackRev = extractServerItemRevision(dataArr, evtId);
-                        if (ackRev > 0) {
-                            QVariantMap nextMap = m_pendingIcloudEventSaves.value(evtId);
-                            nextMap.insert(QStringLiteral("baseRevision"), ackRev);
-                            nextMap.insert(QStringLiteral("revision"), ackRev);
-                            m_pendingIcloudEventSaves.insert(evtId, nextMap);
-                            for (int i = 0; i < m_icloudEvents.size(); ++i) {
-                                QVariantMap uiMap = m_icloudEvents.at(i).toMap();
-                                if (uiMap.value(QStringLiteral("id")).toString() == evtId) {
-                                    uiMap.insert(QStringLiteral("baseRevision"), ackRev);
-                                    uiMap.insert(QStringLiteral("revision"), ackRev);
-                                    m_icloudEvents[i] = uiMap;
-                                    break;
-                                }
+                    } else if (m_pendingIcloudEventSaves.contains(evtId) && ackRev > 0) {
+                        QVariantMap nextMap = m_pendingIcloudEventSaves.value(evtId);
+                        nextMap.insert(QStringLiteral("baseRevision"), ackRev);
+                        nextMap.insert(QStringLiteral("revision"), ackRev);
+                        m_pendingIcloudEventSaves.insert(evtId, nextMap);
+                    }
+                    if (ackRev > 0) {
+                        for (int i = 0; i < m_icloudEvents.size(); ++i) {
+                            QVariantMap uiMap = m_icloudEvents.at(i).toMap();
+                            if (uiMap.value(QStringLiteral("id")).toString() == evtId) {
+                                uiMap.insert(QStringLiteral("baseRevision"), ackRev);
+                                uiMap.insert(QStringLiteral("revision"), ackRev);
+                                m_icloudEvents[i] = uiMap;
+                                break;
                             }
                         }
                     }
@@ -8313,6 +8319,8 @@ void Backend::replayPendingIcloudMutations() {
             if (reply->error() == QNetworkReply::OperationCanceledError) {
                 if (m_pendingIcloudEventDeletes.contains(evtId)) {
                     recordIcloudMutationFailure(mutKey);
+                } else if (m_pendingIcloudEventSaves.contains(evtId)) {
+                    scheduleIcloudMutationRetry(true);
                 }
                 return;
             }
@@ -8467,6 +8475,8 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
             if (reply->error() == QNetworkReply::OperationCanceledError) {
                 if (m_pendingIcloudNoteSaves.contains(actualId)) {
                     recordIcloudMutationFailure(mutKey);
+                } else if (m_pendingIcloudNoteDeletes.contains(actualId)) {
+                    scheduleIcloudMutationRetry(true);
                 }
                 return;
             }
@@ -8487,23 +8497,23 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
                     const QJsonArray dataArr = dataVal.toArray();
                     ++m_icloudNotesSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
+                    const qint64 ackRev = extractRev(dataArr);
                     if (sameMutation) {
                         m_pendingIcloudNoteSaves.remove(actualId);
-                    } else if (m_pendingIcloudNoteSaves.contains(actualId)) {
-                        const qint64 ackRev = extractRev(dataArr);
-                        if (ackRev > 0) {
-                            QVariantMap nextMap = m_pendingIcloudNoteSaves.value(actualId);
-                            nextMap.insert(QStringLiteral("baseRevision"), ackRev);
-                            nextMap.insert(QStringLiteral("revision"), ackRev);
-                            m_pendingIcloudNoteSaves.insert(actualId, nextMap);
-                            for (int i = 0; i < m_icloudNotes.size(); ++i) {
-                                QVariantMap uiMap = m_icloudNotes.at(i).toMap();
-                                if (uiMap.value(QStringLiteral("id")).toString() == actualId) {
-                                    uiMap.insert(QStringLiteral("baseRevision"), ackRev);
-                                    uiMap.insert(QStringLiteral("revision"), ackRev);
-                                    m_icloudNotes[i] = uiMap;
-                                    break;
-                                }
+                    } else if (m_pendingIcloudNoteSaves.contains(actualId) && ackRev > 0) {
+                        QVariantMap nextMap = m_pendingIcloudNoteSaves.value(actualId);
+                        nextMap.insert(QStringLiteral("baseRevision"), ackRev);
+                        nextMap.insert(QStringLiteral("revision"), ackRev);
+                        m_pendingIcloudNoteSaves.insert(actualId, nextMap);
+                    }
+                    if (ackRev > 0) {
+                        for (int i = 0; i < m_icloudNotes.size(); ++i) {
+                            QVariantMap uiMap = m_icloudNotes.at(i).toMap();
+                            if (uiMap.value(QStringLiteral("id")).toString() == actualId) {
+                                uiMap.insert(QStringLiteral("baseRevision"), ackRev);
+                                uiMap.insert(QStringLiteral("revision"), ackRev);
+                                m_icloudNotes[i] = uiMap;
+                                break;
                             }
                         }
                     }
@@ -8612,6 +8622,8 @@ void Backend::deleteIcloudNote(const QString &id) {
             if (reply->error() == QNetworkReply::OperationCanceledError) {
                 if (m_pendingIcloudNoteDeletes.contains(id)) {
                     recordIcloudMutationFailure(mutKey);
+                } else if (m_pendingIcloudNoteSaves.contains(id)) {
+                    scheduleIcloudMutationRetry(true);
                 }
                 return;
             }
@@ -8747,6 +8759,8 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
             if (reply->error() == QNetworkReply::OperationCanceledError) {
                 if (m_pendingIcloudEventSaves.contains(id)) {
                     recordIcloudMutationFailure(mutKey);
+                } else if (m_pendingIcloudEventDeletes.contains(id)) {
+                    scheduleIcloudMutationRetry(true);
                 }
                 return;
             }
@@ -8767,23 +8781,23 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
                     const QJsonArray dataArr = dataVal.toArray();
                     ++m_icloudEventsSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
+                    const qint64 ackRev = extractRev(dataArr);
                     if (sameMutation) {
                         m_pendingIcloudEventSaves.remove(id);
-                    } else if (m_pendingIcloudEventSaves.contains(id)) {
-                        const qint64 ackRev = extractRev(dataArr);
-                        if (ackRev > 0) {
-                            QVariantMap nextMap = m_pendingIcloudEventSaves.value(id);
-                            nextMap.insert(QStringLiteral("baseRevision"), ackRev);
-                            nextMap.insert(QStringLiteral("revision"), ackRev);
-                            m_pendingIcloudEventSaves.insert(id, nextMap);
-                            for (int i = 0; i < m_icloudEvents.size(); ++i) {
-                                QVariantMap uiMap = m_icloudEvents.at(i).toMap();
-                                if (uiMap.value(QStringLiteral("id")).toString() == id) {
-                                    uiMap.insert(QStringLiteral("baseRevision"), ackRev);
-                                    uiMap.insert(QStringLiteral("revision"), ackRev);
-                                    m_icloudEvents[i] = uiMap;
-                                    break;
-                                }
+                    } else if (m_pendingIcloudEventSaves.contains(id) && ackRev > 0) {
+                        QVariantMap nextMap = m_pendingIcloudEventSaves.value(id);
+                        nextMap.insert(QStringLiteral("baseRevision"), ackRev);
+                        nextMap.insert(QStringLiteral("revision"), ackRev);
+                        m_pendingIcloudEventSaves.insert(id, nextMap);
+                    }
+                    if (ackRev > 0) {
+                        for (int i = 0; i < m_icloudEvents.size(); ++i) {
+                            QVariantMap uiMap = m_icloudEvents.at(i).toMap();
+                            if (uiMap.value(QStringLiteral("id")).toString() == id) {
+                                uiMap.insert(QStringLiteral("baseRevision"), ackRev);
+                                uiMap.insert(QStringLiteral("revision"), ackRev);
+                                m_icloudEvents[i] = uiMap;
+                                break;
                             }
                         }
                     }
@@ -8901,6 +8915,8 @@ void Backend::deleteIcloudEvent(const QString &id) {
             if (reply->error() == QNetworkReply::OperationCanceledError) {
                 if (m_pendingIcloudEventDeletes.contains(id)) {
                     recordIcloudMutationFailure(mutKey);
+                } else if (m_pendingIcloudEventSaves.contains(id)) {
+                    scheduleIcloudMutationRetry(true);
                 }
                 return;
             }
@@ -9009,6 +9025,7 @@ void Backend::syncIcloudPhotosPage(int offset, int accumulatedSynced, const QStr
         const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
         const QJsonObject data = doc.value(QStringLiteral("data")).toObject();
         const QString state = data.value(QStringLiteral("state")).toString();
+        const QString statusStr = data.value(QStringLiteral("status")).toString();
         const QString activeJobId = data.value(QStringLiteral("jobId")).toString();
         if (state == QStringLiteral("running") && !activeJobId.isEmpty()) {
             QTimer::singleShot(350, this, [this, offset, accumulatedSynced, activeJobId]() {
@@ -9018,6 +9035,7 @@ void Backend::syncIcloudPhotosPage(int offset, int accumulatedSynced, const QStr
         }
         const int batchSynced = data.value(QStringLiteral("synced")).toInt();
         const int totalSynced = activeJobId.isEmpty() ? (accumulatedSynced + batchSynced) : batchSynced;
+        const int failedCount = data.value(QStringLiteral("failed")).toInt();
         const bool hasMore = data.value(QStringLiteral("hasMore")).toBool();
         const int nextOffset = data.value(QStringLiteral("nextOffset")).toInt(-1);
         if (activeJobId.isEmpty() && hasMore && nextOffset > offset) {
@@ -9026,7 +9044,21 @@ void Backend::syncIcloudPhotosPage(int offset, int accumulatedSynced, const QStr
         }
         m_icloudPhotosSyncInFlight = false;
         emit icloudPhotosSyncingChanged();
-        emit toastMessage(QStringLiteral("iCloud Photos sync complete: ") + QString::number(totalSynced) + QStringLiteral(" processed"));
+        if (state == QStringLiteral("failed") || statusStr == QStringLiteral("error") || statusStr == QStringLiteral("partial") || failedCount > 0) {
+            QString errMsg = data.value(QStringLiteral("error")).toString().trimmed();
+            if (errMsg.isEmpty()) {
+                errMsg = doc.value(QStringLiteral("message")).toString().trimmed();
+            }
+            if (errMsg.isEmpty() && failedCount > 0) {
+                errMsg = QString::number(failedCount) + QStringLiteral(" photo(s) failed to download");
+            }
+            if (errMsg.isEmpty()) {
+                errMsg = QStringLiteral("Photo sync job failed");
+            }
+            emit toastMessage(QStringLiteral("iCloud Photos sync failed: ") + errMsg);
+        } else {
+            emit toastMessage(QStringLiteral("iCloud Photos sync complete: ") + QString::number(totalSynced) + QStringLiteral(" processed"));
+        }
         fetchIcloudPhotos();
     });
 }

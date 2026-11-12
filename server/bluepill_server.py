@@ -3015,8 +3015,10 @@ class BluePillEngine:
         limit: int = 48,
         offset: int = 0,
         include_dimensions: bool = True,
+        _max_limit: int = 250,
     ) -> List[Dict[str, Any]]:
-        clamped_limit = max(1, min(int(limit or 48), 250))
+        effective_max = max(1, min(int(_max_limit or 250), 251))
+        clamped_limit = max(1, min(int(limit or 48), effective_max))
         clamped_offset = min(max(0, int(offset or 0)), 100000)
         window_limit = clamped_offset + clamped_limit
         photos_lib = os.path.expanduser(self.photos_library_path)
@@ -3249,6 +3251,7 @@ class BluePillEngine:
             limit=clamped_limit + 1,
             offset=clamped_offset,
             include_dimensions=False,
+            _max_limit=clamped_limit + 1,
         )
         has_more = len(batch) > clamped_limit
         photos = batch[:clamped_limit]
@@ -3258,6 +3261,8 @@ class BluePillEngine:
         unpurged_count = 0
         transcoded_count = 0
         processed_count = 0
+        failed_count = 0
+        errors: List[Dict[str, str]] = []
         total_count = len(photos)
 
         for p in photos:
@@ -3270,6 +3275,15 @@ class BluePillEngine:
                 res = self.download_cloud_attachment(guid)
                 if res.get("downloaded"):
                     unpurged_count += 1
+                else:
+                    failed_count += 1
+                    err_msg = str(
+                        res.get("error")
+                        or res.get("message")
+                        or f"Failed to download cloud photo {guid}"
+                    ).strip()
+                    if len(errors) < 20:
+                        errors.append({"guid": guid, "error": err_msg})
             # Check on-disk file and populate unified conversion cache
             resolved = self.resolve_attachment_file(guid, convert_heic=False)
             if resolved:
@@ -3282,15 +3296,21 @@ class BluePillEngine:
                     if os.path.exists(cached_target) or already_cached:
                         transcoded_count += 1
 
+        synced_count = unpurged_count + transcoded_count
+        status_str = "ok" if failed_count == 0 else ("partial" if synced_count > 0 else "error")
+        state_str = "completed" if failed_count == 0 else "failed"
         return {
-            "status": "ok",
-            "state": "completed",
+            "status": status_str,
+            "state": state_str,
             "jobId": job_id or "",
             "total": total_count,
             "processed": processed_count,
-            "synced": unpurged_count + transcoded_count,
+            "synced": synced_count,
             "unpurged": unpurged_count,
             "transcoded": transcoded_count,
+            "failed": failed_count,
+            "errors": errors,
+            "error": errors[0]["error"] if errors else "",
             "offset": clamped_offset,
             "limit": clamped_limit,
             "hasMore": has_more,
@@ -3320,6 +3340,9 @@ class BluePillEngine:
                 "synced": 0,
                 "unpurged": 0,
                 "transcoded": 0,
+                "failed": 0,
+                "errors": [],
+                "error": "",
                 "offset": clamped_offset,
                 "limit": clamped_limit,
                 "hasMore": False,
@@ -3337,6 +3360,8 @@ class BluePillEngine:
             sync_acc = 0
             unp_acc = 0
             tr_acc = 0
+            failed_acc = 0
+            errors_acc: List[Dict[str, str]] = []
             try:
                 while not self._stop_event.is_set():
                     res = self.sync_icloud_photos(limit=clamped_limit, offset=cur_offset, job_id=job_id)
@@ -3345,6 +3370,10 @@ class BluePillEngine:
                     sync_acc += int(res.get("synced", 0))
                     unp_acc += int(res.get("unpurged", 0))
                     tr_acc += int(res.get("transcoded", 0))
+                    failed_acc += int(res.get("failed", 0))
+                    for err_item in res.get("errors") or []:
+                        if isinstance(err_item, dict) and len(errors_acc) < 20:
+                            errors_acc.append(err_item)
                     has_more = bool(res.get("hasMore", False))
                     next_off = res.get("nextOffset")
                     with self._photo_sync_lock:
@@ -3354,6 +3383,9 @@ class BluePillEngine:
                             "synced": sync_acc,
                             "unpurged": unp_acc,
                             "transcoded": tr_acc,
+                            "failed": failed_acc,
+                            "errors": list(errors_acc),
+                            "error": errors_acc[0]["error"] if errors_acc else "",
                             "offset": cur_offset,
                             "hasMore": has_more,
                             "nextOffset": next_off,
@@ -3365,8 +3397,14 @@ class BluePillEngine:
                     else:
                         break
                 with self._photo_sync_lock:
-                    job["status"] = "ok"
-                    job["state"] = "completed"
+                    if failed_acc > 0:
+                        job["status"] = "partial" if sync_acc > 0 else "error"
+                        job["state"] = "failed"
+                        if not job.get("error"):
+                            job["error"] = f"{failed_acc} photo(s) failed to download"
+                    else:
+                        job["status"] = "ok"
+                        job["state"] = "completed"
                     if self._active_photo_sync_job_id == job_id:
                         self._active_photo_sync_job_id = None
                     final_snapshot = dict(job)
@@ -3859,7 +3897,12 @@ class BluePillEngine:
                 self.logger.debug("[calendar] Calendar query failed: %s", exc)
         return calendars
 
-    def query_icloud_events(self, limit: int = 250, max_limit: int = 250) -> List[Dict[str, Any]]:
+    def query_icloud_events(
+        self,
+        limit: int = 250,
+        max_limit: int = 250,
+        include_event_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         effective_cap = max(1, min(int(max_limit or 250), 5000))
         clamped_limit = max(1, min(int(limit or 250), effective_cap))
         with self._icloud_store_lock:
@@ -4020,6 +4063,12 @@ class BluePillEngine:
                 )
             )
             selected = res[:clamped_limit]
+            clean_inc = str(include_event_id or "").strip()
+            if clean_inc and clean_inc in events_by_id and not any(e.get("id") == clean_inc for e in selected):
+                if len(selected) >= clamped_limit and selected:
+                    selected[-1] = events_by_id[clean_inc]
+                else:
+                    selected.append(events_by_id[clean_inc])
             selected.sort(key=lambda x: int(x.get("startMs", 0)))
             return selected
 
@@ -4060,7 +4109,7 @@ class BluePillEngine:
                 if not allow_recreate and not (force_overwrite and base_rev == del_rev):
                     if raise_on_conflict:
                         raise ValueError(f"Conflict: event '{eid}' was deleted (revision {del_rev})")
-                    return self.query_icloud_events()
+                    return self.query_icloud_events(include_event_id=eid)
                 del del_map[eid]
                 del_revs.pop(eid, None)
                 try:
@@ -4093,7 +4142,7 @@ class BluePillEngine:
                             raise ValueError(
                                 f"Conflict: baseRevision {base_rev} does not match current revision {existing_rev} for event '{eid}'"
                             )
-                        return self.query_icloud_events()
+                        return self.query_icloud_events(include_event_id=eid)
                     new_item["updatedAtMs"] = max(now_server_ms, existing_ts + 1)
                     new_item["revision"] = max(max_rev, existing_rev) + 1
                     events[i] = new_item
@@ -4103,7 +4152,7 @@ class BluePillEngine:
                 events.insert(0, new_item)
 
             self._atomic_write_json(events_path, events)
-            return self.query_icloud_events()
+            return self.query_icloud_events(include_event_id=eid)
 
     def delete_icloud_event(self, event_id: str, raise_on_missing: bool = False) -> List[Dict[str, Any]]:
         clean_id = str(event_id).strip()
@@ -4746,7 +4795,24 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     let conflictSaveAttemptSeq = 0;
     let conflictNoteDeleted = false;
     const deletedNoteSeqById = {};
+    const pendingDeleteById = {};
     let allEvents = [];
+
+    function mergeServerNotesSnapshot(snapshot) {
+      if (!Array.isArray(snapshot)) return;
+      for (const item of snapshot) {
+        if (!item || !item.id) continue;
+        if (pendingDeleteById[item.id] || deletedNoteSeqById[item.id]) continue;
+        const idx = allNotes.findIndex(existing => existing && existing.id === item.id);
+        if (idx >= 0) {
+          const curRev = typeof allNotes[idx].revision === 'number' ? allNotes[idx].revision : 0;
+          const newRev = typeof item.revision === 'number' ? item.revision : 0;
+          if (newRev >= curRev) allNotes[idx] = item;
+        } else {
+          allNotes.unshift(item);
+        }
+      }
+    }
 
     function openNotesModal() {
       document.getElementById('notesModal').style.display = 'flex';
@@ -4839,6 +4905,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const body = document.getElementById('noteBodyInput').value;
       if (!selectedNoteId) selectedNoteId = 'note-' + Date.now();
       const nid = selectedNoteId;
+      if (pendingDeleteById[nid]) return;
       const reqToken = noteSelectionToken;
       const reqDraftToken = noteDraftToken;
       const reqBody = {id: nid, title, folder, body, updatedAtMs: Date.now()};
@@ -4860,18 +4927,15 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         body: JSON.stringify(reqBody)
       });
       const j = await resp.json();
+      const wasDeletedConcurrently = Boolean(pendingDeleteById[nid] || ((deletedNoteSeqById[nid] || 0) > 0 && !reqBody.allowRecreate));
+      if (resp.ok && j.status === 200 && !wasDeletedConcurrently) {
+        delete deletedNoteSeqById[nid];
+      }
       if (reqToken !== noteSelectionToken || selectedNoteId !== nid) {
-        if (Array.isArray(j.data) && (deletedNoteSeqById[nid] || 0) <= reqAttemptSeq) {
+        if (Array.isArray(j.data) && !wasDeletedConcurrently) {
           const updatedTarget = j.data.find(item => item && item.id === nid);
           if (updatedTarget) {
-            const idx = allNotes.findIndex(item => item && item.id === nid);
-            if (idx >= 0) {
-              const curRev = typeof allNotes[idx].revision === 'number' ? allNotes[idx].revision : 0;
-              const newRev = typeof updatedTarget.revision === 'number' ? updatedTarget.revision : 0;
-              if (newRev >= curRev) allNotes[idx] = updatedTarget;
-            } else {
-              allNotes.unshift(updatedTarget);
-            }
+            mergeServerNotesSnapshot([updatedTarget]);
           }
         }
         renderNotesList();
@@ -4879,28 +4943,14 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       }
       let responseSavedNote = null;
       if (Array.isArray(j.data)) {
-        responseSavedNote = j.data.find(item => item && item.id === nid) || null;
-        if (reqAttemptSeq >= noteSaveAttemptSeq) {
-          allNotes = j.data.filter(item => item && (deletedNoteSeqById[item.id] || 0) <= reqAttemptSeq);
-        } else {
-          for (const item of j.data) {
-            if (!item || !item.id) continue;
-            if ((deletedNoteSeqById[item.id] || 0) > reqAttemptSeq) continue;
-            const idx = allNotes.findIndex(existing => existing && existing.id === item.id);
-            if (idx >= 0) {
-              const curRev = typeof allNotes[idx].revision === 'number' ? allNotes[idx].revision : 0;
-              const newRev = typeof item.revision === 'number' ? item.revision : 0;
-              if (newRev >= curRev) allNotes[idx] = item;
-            } else {
-              allNotes.unshift(item);
-            }
-          }
+        if (!wasDeletedConcurrently) {
+          responseSavedNote = j.data.find(item => item && item.id === nid) || null;
         }
+        mergeServerNotesSnapshot(j.data);
       }
       const banner = document.getElementById('noteConflictBanner');
       const errBanner = document.getElementById('noteErrorBanner');
-      if (resp.ok && j.status === 200) {
-        delete deletedNoteSeqById[nid];
+      if (resp.ok && j.status === 200 && !wasDeletedConcurrently) {
         if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
         const canClearConflict = (reqAttemptSeq >= conflictSaveAttemptSeq);
         if (canClearConflict) {
@@ -4975,19 +5025,26 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     async function deleteCurrentNote() {
       if (!selectedNoteId) return;
       const delTargetId = selectedNoteId;
+      if (pendingDeleteById[delTargetId]) return;
       const n = allNotes.find(item => item.id === delTargetId);
       if (!n || (n.syncSource && n.syncSource !== 'local_hub')) return;
-      const delSeq = ++noteSaveAttemptSeq;
-      const resp = await fetch(apiUrl('/api/v1/icloud/notes/' + encodeURIComponent(delTargetId)), { method: 'DELETE' });
-      const j = await resp.json();
-      if (!resp.ok || j.status !== 200) return;
-      deletedNoteSeqById[delTargetId] = delSeq;
-      allNotes = (j.data || []).filter(item => item && (deletedNoteSeqById[item.id] || 0) <= delSeq);
-      if (selectedNoteId === delTargetId) {
-        selectedNoteId = allNotes.length > 0 ? allNotes[0].id : null;
-        if (selectedNoteId) selectNote(selectedNoteId); else newNote();
-      } else {
-        renderNotesList();
+      pendingDeleteById[delTargetId] = true;
+      try {
+        const resp = await fetch(apiUrl('/api/v1/icloud/notes/' + encodeURIComponent(delTargetId)), { method: 'DELETE' });
+        const j = await resp.json();
+        if (!resp.ok || j.status !== 200) return;
+        const delSeq = ++noteSaveAttemptSeq;
+        deletedNoteSeqById[delTargetId] = delSeq;
+        allNotes = allNotes.filter(item => item && item.id !== delTargetId);
+        mergeServerNotesSnapshot(j.data);
+        if (selectedNoteId === delTargetId) {
+          selectedNoteId = allNotes.length > 0 ? allNotes[0].id : null;
+          if (selectedNoteId) selectNote(selectedNoteId); else newNote();
+        } else {
+          renderNotesList();
+        }
+      } finally {
+        delete pendingDeleteById[delTargetId];
       }
     }
     function sendNoteToChat() {
@@ -5753,7 +5810,8 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(200, self.engine.save_icloud_event(body, raise_on_conflict=True))
             except (ValueError, OverflowError) as exc:
                 status_code = 409 if str(exc).startswith("Conflict:") else 400
-                data = self.engine.query_icloud_events() if status_code == 409 else None
+                target_eid = str(body.get("id") or "").strip()
+                data = self.engine.query_icloud_events(include_event_id=target_eid) if status_code == 409 else None
                 self._send_json(status_code, data, str(exc))
             return
 
@@ -6127,35 +6185,43 @@ def run_selftest(engine: BluePillEngine) -> int:
         sync_res = test_eng.sync_icloud_photos(limit=5)
         assert isinstance(sync_res, dict) and "synced" in sync_res
 
-        # Selftest: Verify mixed-source pagination (>100 photos across chat.db + Photos.sqlite)
-        # does not skip or repeat any photos across pages
+        # Selftest: Verify mixed-source pagination (>250 photos across chat.db + Photos.sqlite)
+        # preserves lookahead at limit=250 and does not skip or repeat any photos across pages
+        sample_jpg = os.path.join(test_eng._config_dir, "sample.jpg")
+        with open(sample_jpg, "wb") as jf:
+            jf.write(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9")
+
         mixed_chat_db = os.path.join(test_eng._config_dir, "mixed_chat.db")
         mconn = sqlite3.connect(mixed_chat_db)
         try:
             mconn.execute(
-                "CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, guid TEXT, filename TEXT, mime_type TEXT, total_bytes INTEGER, transfer_state INTEGER, transfer_name TEXT, is_sticker INTEGER);"
+                "CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, guid TEXT, original_guid TEXT, filename TEXT, mime_type TEXT, total_bytes INTEGER, transfer_state INTEGER, transfer_name TEXT, is_sticker INTEGER);"
             )
-            for idx in range(60):
+            for idx in range(140):
                 mconn.execute(
-                    "INSERT INTO attachment (ROWID, guid, filename, mime_type, total_bytes, transfer_state, transfer_name, is_sticker) VALUES (?, ?, ?, 'image/heic', 1024, 5, ?, 0);",
-                    (idx + 1, f"chat-guid-{idx:03d}", "", f"IMG_{idx:04d}.HEIC"),
+                    "INSERT INTO attachment (ROWID, guid, filename, mime_type, total_bytes, transfer_state, transfer_name, is_sticker) VALUES (?, ?, ?, 'image/jpeg', 1024, 5, ?, 0);",
+                    (idx + 1, f"chat-guid-{idx:03d}", sample_jpg, f"IMG_{idx:04d}.JPG"),
                 )
             mconn.commit()
         finally:
             mconn.close()
 
         photos_db_dir = os.path.join(test_eng.photos_library_path, "database")
+        orig_zero_dir = os.path.join(test_eng.photos_library_path, "originals", "0")
         os.makedirs(photos_db_dir, exist_ok=True)
+        os.makedirs(orig_zero_dir, exist_ok=True)
         photos_db_file = os.path.join(photos_db_dir, "Photos.sqlite")
         pconn = sqlite3.connect(photos_db_file)
         try:
             pconn.execute(
                 "CREATE TABLE ZASSET (ZUUID TEXT, ZFILENAME TEXT, ZUNIFORMTYPEIDENTIFIER TEXT, ZDIRECTORY TEXT, ZTRASHEDSTATE INTEGER, ZDATECREATED REAL);"
             )
-            for idx in range(60):
+            for idx in range(140):
+                fname = f"IMG_LIB_{idx:04d}.JPG"
+                shutil.copy2(sample_jpg, os.path.join(orig_zero_dir, fname))
                 pconn.execute(
-                    "INSERT INTO ZASSET (ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY, ZTRASHEDSTATE, ZDATECREATED) VALUES (?, ?, 'public.heic', '0', 0, ?);",
-                    (f"lib-guid-{idx:03d}", f"IMG_LIB_{idx:04d}.HEIC", float(1000 - idx)),
+                    "INSERT INTO ZASSET (ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY, ZTRASHEDSTATE, ZDATECREATED) VALUES (?, ?, 'public.jpeg', '0', 0, ?);",
+                    (f"lib-guid-{idx:03d}", fname, float(1000 - idx)),
                 )
             pconn.commit()
         finally:
@@ -6172,10 +6238,69 @@ def run_selftest(engine: BluePillEngine) -> int:
             if len(page) < 48:
                 break
             cur_off += len(page)
-        assert len(paged_guids) == 120, f"Expected 120 paged photos, got {len(paged_guids)}"
-        assert len(set(paged_guids)) == 120, "Pagination produced duplicate photo GUIDs"
-        assert sum(1 for g in paged_guids if g.startswith("chat-guid-")) == 60
-        assert sum(1 for g in paged_guids if g.startswith("lib-guid-")) == 60
+        assert len(paged_guids) == 280, f"Expected 280 paged photos, got {len(paged_guids)}"
+        assert len(set(paged_guids)) == 280, "Pagination produced duplicate photo GUIDs"
+        assert sum(1 for g in paged_guids if g.startswith("chat-guid-")) == 140
+        assert sum(1 for g in paged_guids if g.startswith("lib-guid-")) == 140
+
+        # Verify sync_icloud_photos(limit=250) preserves the 251st lookahead record (hasMore=True, nextOffset=250)
+        batch1 = test_eng.sync_icloud_photos(limit=250, offset=0)
+        assert batch1["hasMore"] is True and batch1["nextOffset"] == 250, f"Expected hasMore=True at limit=250, got {batch1}"
+        batch2 = test_eng.sync_icloud_photos(limit=250, offset=250)
+        assert batch2["hasMore"] is False and batch2["processed"] == 30, f"Expected 30 remaining photos, got {batch2}"
+
+        # Verify background sync job processes all 280 photos across both pages
+        job_snap = test_eng.start_icloud_photos_sync_job(limit=250, offset=0, sync_all=True)
+        for _ in range(40):
+            if job_snap.get("state") != "running":
+                break
+            time.sleep(0.05)
+            job_snap = test_eng.get_icloud_photos_sync_job(job_snap["jobId"])
+        assert job_snap["state"] == "completed" and job_snap["processed"] == 280, f"Expected 280 processed in job, got {job_snap}"
+
+        # Verify failed photo download is propagated in sync_icloud_photos result
+        mconn = sqlite3.connect(mixed_chat_db)
+        try:
+            mconn.execute("DELETE FROM attachment;")
+            mconn.execute(
+                "INSERT INTO attachment (ROWID, guid, filename, mime_type, total_bytes, transfer_state, transfer_name, is_sticker) VALUES (1, 'evicted-fail-guid', '/nonexistent/evicted.heic', 'image/heic', 1024, 0, 'IMG_9999.HEIC', 0);"
+            )
+            mconn.commit()
+        finally:
+            mconn.close()
+        os.remove(photos_db_file)
+        fail_sync = test_eng.sync_icloud_photos(limit=10, offset=0)
+        assert fail_sync["failed"] == 1 and fail_sync["status"] == "error" and fail_sync["state"] == "failed"
+
+        # Verify query_icloud_events(include_event_id=...) includes an affected event outside the 250-event window
+        now_ms_test = int(time.time() * 1000)
+        evts_260 = [
+            {
+                "id": f"evt-near-{idx}",
+                "title": f"Near {idx}",
+                "calendarName": "Work",
+                "calendarTitle": "Work",
+                "startMs": now_ms_test + (idx * 60000),
+                "endMs": now_ms_test + (idx * 60000) + 3600000,
+                "revision": 1,
+            }
+            for idx in range(255)
+        ]
+        evts_260.append(
+            {
+                "id": "evt-far-future-conflict",
+                "title": "Far Future Conflict Event",
+                "calendarName": "Work",
+                "calendarTitle": "Work",
+                "startMs": now_ms_test + (9999 * 3600000),
+                "endMs": now_ms_test + (10000 * 3600000),
+                "revision": 3,
+            }
+        )
+        test_eng._atomic_write_json(test_eng._get_calendar_events_json_path(), evts_260)
+        snap_with_far = test_eng.query_icloud_events(limit=250, include_event_id="evt-far-future-conflict")
+        assert len(snap_with_far) == 250
+        assert any(e.get("id") == "evt-far-future-conflict" for e in snap_with_far)
     finally:
         srv.shutdown()
         srv.server_close()
@@ -6293,22 +6418,36 @@ def main() -> int:
 
     if args.sync_icloud_photos or args.command == "sync-icloud-photos":
         offset = 0
-        totals = {"total": 0, "processed": 0, "synced": 0, "unpurged": 0, "transcoded": 0}
+        totals = {"total": 0, "processed": 0, "synced": 0, "unpurged": 0, "transcoded": 0, "failed": 0}
+        cli_errors: List[Dict[str, str]] = []
         while True:
             res = engine.sync_icloud_photos(limit=250, offset=offset)
             for k in totals:
                 totals[k] += int(res.get(k, 0))
+            for err_item in res.get("errors") or []:
+                if isinstance(err_item, dict) and len(cli_errors) < 20:
+                    cli_errors.append(err_item)
             nxt = res.get("nextOffset")
             if not res.get("hasMore") or not isinstance(nxt, int) or nxt <= offset:
                 break
             offset = nxt
+        cli_status = "ok" if totals["failed"] == 0 else ("partial" if totals["synced"] > 0 else "error")
+        cli_state = "completed" if totals["failed"] == 0 else "failed"
         print(
             json.dumps(
-                {"status": "ok", "state": "completed", **totals, "hasMore": False, "nextOffset": None},
+                {
+                    "status": cli_status,
+                    "state": cli_state,
+                    **totals,
+                    "errors": cli_errors,
+                    "error": cli_errors[0]["error"] if cli_errors else "",
+                    "hasMore": False,
+                    "nextOffset": None,
+                },
                 indent=2,
             )
         )
-        return 0
+        return 0 if totals["failed"] == 0 else 1
 
     if args.selftest or args.command == "selftest":
         return run_selftest(engine)
