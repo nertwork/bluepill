@@ -5176,6 +5176,8 @@ ApplicationWindow {
         property string noteId: ""
         property string noteSyncSource: "local_hub"
         property bool noteSendInFlight: false
+        property string targetChatGuid: ""
+        property string targetChatTitle: ""
 
         Shortcut {
             sequence: "Escape"
@@ -5198,7 +5200,12 @@ ApplicationWindow {
         }
 
         onVisibleChanged: {
-            if (!visible) {
+            if (visible) {
+                if (noteDetailWindow.targetChatGuid === "") {
+                    noteDetailWindow.targetChatGuid = backend.selectedChatGuid
+                    noteDetailWindow.targetChatTitle = backend.selectedChatTitle
+                }
+            } else {
                 noteDetailWindow.noteSendInFlight = false
             }
         }
@@ -5303,16 +5310,18 @@ ApplicationWindow {
                 }
 
                 Button {
-                    text: "📤 " + i18n.tr("Send to Chat")
-                    enabled: !noteDetailWindow.noteSendInFlight && !backend.sendingMessage && backend.selectedChatGuid !== "" && (noteDetailTitleInput.text.trim().length > 0 || noteDetailBodyInput.text.trim().length > 0)
+                    text: "📤 " + (noteDetailWindow.targetChatTitle.trim().length > 0
+                                   ? i18n.tr("Send to %1").arg(noteDetailWindow.targetChatTitle.trim())
+                                   : i18n.tr("Send to Chat"))
+                    enabled: !noteDetailWindow.noteSendInFlight && !backend.sendingMessage && noteDetailWindow.targetChatGuid !== "" && (noteDetailTitleInput.text.trim().length > 0 || noteDetailBodyInput.text.trim().length > 0)
                     onClicked: {
-                        if (noteDetailWindow.noteSendInFlight || backend.sendingMessage) return
+                        if (noteDetailWindow.noteSendInFlight || backend.sendingMessage || noteDetailWindow.targetChatGuid === "") return
                         var textToSend = noteDetailTitleInput.text.trim()
                         if (noteDetailBodyInput.text.trim().length > 0) {
                             textToSend = (textToSend.length > 0 ? ("* " + textToSend + " *\n\n") : "") + noteDetailBodyInput.text.trim()
                         }
                         noteDetailWindow.noteSendInFlight = true
-                        backend.sendMessage(backend.selectedChatGuid, textToSend, "")
+                        backend.sendMessage(noteDetailWindow.targetChatGuid, textToSend, "")
                         if (!backend.sendingMessage) {
                             noteDetailWindow.noteSendInFlight = false
                         }
@@ -5486,6 +5495,8 @@ ApplicationWindow {
 
                                     noteDetailWindow.noteId = modelData.id || ""
                                     noteDetailWindow.noteSyncSource = modelData.syncSource || "local_hub"
+                                    noteDetailWindow.targetChatGuid = backend.selectedChatGuid
+                                    noteDetailWindow.targetChatTitle = backend.selectedChatTitle
                                     noteDetailTitleInput.text = modelData.title || ""
                                     noteDetailFolderInput.text = modelData.folder || "Notes"
                                     noteDetailBodyInput.text = modelData.body || modelData.snippet || ""

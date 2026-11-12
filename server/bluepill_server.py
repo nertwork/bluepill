@@ -439,6 +439,7 @@ class BluePillEngine:
         self._photo_sync_lock = threading.Lock()
         self._photo_sync_jobs: Dict[str, Dict[str, Any]] = {}
         self._active_photo_sync_job_id: Optional[str] = None
+        self._image_dims_cache: Dict[Tuple[str, int, int], Tuple[int, int, bool]] = {}
         self.deleted_state_path: Optional[str] = (
             None if is_ephemeral else os.path.expanduser("~/.config/bluepill/deleted_state.json")
         )
@@ -2991,9 +2992,32 @@ class BluePillEngine:
             pass
         return 0, 0, False
 
-    def query_icloud_photos(self, limit: int = 48, offset: int = 0) -> List[Dict[str, Any]]:
+    def _get_cached_image_dimensions(self, file_path: str) -> Tuple[int, int, bool]:
+        if not file_path or not os.path.exists(file_path):
+            return 0, 0, False
+        try:
+            real_p = os.path.realpath(file_path)
+            st = os.stat(real_p)
+            cache_key = (real_p, int(st.st_mtime_ns), int(st.st_size))
+            cached = self._image_dims_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        except OSError:
+            return 0, 0, False
+        dims = self._get_image_dimensions(real_p)
+        if len(self._image_dims_cache) >= 4096:
+            self._image_dims_cache.clear()
+        self._image_dims_cache[cache_key] = dims
+        return dims
+
+    def query_icloud_photos(
+        self,
+        limit: int = 48,
+        offset: int = 0,
+        include_dimensions: bool = True,
+    ) -> List[Dict[str, Any]]:
         clamped_limit = max(1, min(int(limit or 48), 250))
-        clamped_offset = max(0, int(offset or 0))
+        clamped_offset = min(max(0, int(offset or 0)), 100000)
         window_limit = clamped_offset + clamped_limit
         photos_lib = os.path.expanduser(self.photos_library_path)
         photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
@@ -3070,14 +3094,14 @@ class BluePillEngine:
                             continue
                         seen_guids.add(g)
                         mime = str(r["mime_type"] or "image/jpeg")
-                        w, h, is_p = 0, 0, False
+                        dim_path = ""
                         if exists_on_disk:
                             cached_target = self._cached_converted_jpeg_path(real_p, None)
                             if os.path.exists(cached_target):
-                                w, h, is_p = self._get_image_dimensions(cached_target)
+                                dim_path = cached_target
                                 mime = "image/jpeg"
                             else:
-                                w, h, is_p = self._get_image_dimensions(real_p)
+                                dim_path = real_p
                         chat_photos.append({
                             "guid": g,
                             "name": name,
@@ -3088,9 +3112,10 @@ class BluePillEngine:
                             "source": "chat_attachment",
                             "transferState": t_state,
                             "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(g)}/live",
-                            "width": w,
-                            "height": h,
-                            "isPortrait": is_p,
+                            "width": 0,
+                            "height": 0,
+                            "isPortrait": False,
+                            "_dimPath": dim_path,
                         })
                         if len(chat_photos) >= window_limit:
                             break
@@ -3155,7 +3180,7 @@ class BluePillEngine:
                             if not mime.startswith("image/"):
                                 continue
                             size_bytes = 0
-                            w, h, is_p = 0, 0, False
+                            dim_path = ""
                             if resolved_asset:
                                 self._photos_library_assets[zuuid] = (resolved_asset, mime)
                                 try:
@@ -3164,10 +3189,10 @@ class BluePillEngine:
                                     size_bytes = 0
                                 cached_target = self._cached_converted_jpeg_path(resolved_asset, None)
                                 if os.path.exists(cached_target):
-                                    w, h, is_p = self._get_image_dimensions(cached_target)
+                                    dim_path = cached_target
                                     mime = "image/jpeg"
                                 else:
-                                    w, h, is_p = self._get_image_dimensions(resolved_asset)
+                                    dim_path = resolved_asset
                             can_unpurge = bool(
                                 resolved_asset is not None
                                 or (sys.platform == "darwin" and bool(zdir and zfn) and os.path.exists("/usr/bin/brctl"))
@@ -3183,28 +3208,35 @@ class BluePillEngine:
                                 "source": "photos_library",
                                 "transferState": 5 if resolved_asset else 0,
                                 "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(zuuid)}/live",
-                                "width": w,
-                                "height": h,
-                                "isPortrait": is_p,
+                                "width": 0,
+                                "height": 0,
+                                "isPortrait": False,
+                                "_dimPath": dim_path,
                             })
                 finally:
                     pconn.close()
             except sqlite3.Error as exc:
                 self.logger.debug("[photos] Photos.sqlite check: %s", exc)
 
-        if not lib_photos:
-            return chat_photos[clamped_offset : clamped_offset + clamped_limit]
-        if not chat_photos:
-            return lib_photos[clamped_offset : clamped_offset + clamped_limit]
-
-        # Reserve up to half the quota for each source and fill any unused capacity from the other
-        reserved_lib = min(len(lib_photos), max(1, window_limit // 2))
-        reserved_chat = min(len(chat_photos), window_limit - reserved_lib)
-        if reserved_chat + reserved_lib < window_limit:
-            extra_lib = min(len(lib_photos) - reserved_lib, window_limit - (reserved_chat + reserved_lib))
-            reserved_lib += extra_lib
-        photos = chat_photos[:reserved_chat] + lib_photos[:reserved_lib]
-        return photos[clamped_offset : clamped_offset + clamped_limit]
+        # Prefix-stable interleave so every window is an exact prefix of every larger window across pagination offsets
+        photos: List[Dict[str, Any]] = []
+        ci = li = 0
+        while len(photos) < window_limit and (ci < len(chat_photos) or li < len(lib_photos)):
+            if ci < len(chat_photos):
+                photos.append(chat_photos[ci])
+                ci += 1
+            if li < len(lib_photos) and len(photos) < window_limit:
+                photos.append(lib_photos[li])
+                li += 1
+        page_photos = photos[clamped_offset : clamped_offset + clamped_limit]
+        for item in page_photos:
+            dim_path = str(item.pop("_dimPath", "") or "")
+            if include_dimensions and dim_path:
+                w, h, is_p = self._get_cached_image_dimensions(dim_path)
+                item["width"] = w
+                item["height"] = h
+                item["isPortrait"] = is_p
+        return page_photos
 
     def sync_icloud_photos(self, limit: int = 250, offset: int = 0, job_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -3212,8 +3244,12 @@ class BluePillEngine:
         and transcodes on-disk HEIC/TIFF files into the unified conversion cache.
         """
         clamped_limit = max(1, min(int(limit or 250), 250))
-        clamped_offset = max(0, int(offset or 0))
-        batch = self.query_icloud_photos(limit=clamped_limit + 1, offset=clamped_offset)
+        clamped_offset = min(max(0, int(offset or 0)), 100000)
+        batch = self.query_icloud_photos(
+            limit=clamped_limit + 1,
+            offset=clamped_offset,
+            include_dimensions=False,
+        )
         has_more = len(batch) > clamped_limit
         photos = batch[:clamped_limit]
         next_offset = (clamped_offset + len(photos)) if has_more else None
@@ -4198,10 +4234,21 @@ class BluePillEngine:
                 offset=int(params.get("offset", 0) or 0),
             )
         if method in ("icloud.photos.sync", "api.icloud.photos.sync"):
-            return self.sync_icloud_photos(
+            job_id = str(params.get("jobId") or "").strip()
+            if job_id:
+                return self.get_icloud_photos_sync_job(job_id)
+            return self.start_icloud_photos_sync_job(
                 limit=int(params.get("limit", 250) or 250),
                 offset=int(params.get("offset", 0) or 0),
+                sync_all=bool(params.get("syncAll", True)),
             )
+        if method in (
+            "icloud.photos.sync.status",
+            "api.icloud.photos.sync.status",
+            "icloud.photos.sync_status",
+            "api.icloud.photos.sync_status",
+        ):
+            return self.get_icloud_photos_sync_job(str(params.get("jobId") or "").strip())
         if method in ("icloud.notes", "api.icloud.notes"):
             return self.query_icloud_notes()
         if method in ("icloud.note.save", "api.icloud.note.save"):
@@ -6079,6 +6126,56 @@ def run_selftest(engine: BluePillEngine) -> int:
         # Selftest: Verify sync_icloud_photos doesn't crash in test harness
         sync_res = test_eng.sync_icloud_photos(limit=5)
         assert isinstance(sync_res, dict) and "synced" in sync_res
+
+        # Selftest: Verify mixed-source pagination (>100 photos across chat.db + Photos.sqlite)
+        # does not skip or repeat any photos across pages
+        mixed_chat_db = os.path.join(test_eng._config_dir, "mixed_chat.db")
+        mconn = sqlite3.connect(mixed_chat_db)
+        try:
+            mconn.execute(
+                "CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, guid TEXT, filename TEXT, mime_type TEXT, total_bytes INTEGER, transfer_state INTEGER, transfer_name TEXT, is_sticker INTEGER);"
+            )
+            for idx in range(60):
+                mconn.execute(
+                    "INSERT INTO attachment (ROWID, guid, filename, mime_type, total_bytes, transfer_state, transfer_name, is_sticker) VALUES (?, ?, ?, 'image/heic', 1024, 5, ?, 0);",
+                    (idx + 1, f"chat-guid-{idx:03d}", "", f"IMG_{idx:04d}.HEIC"),
+                )
+            mconn.commit()
+        finally:
+            mconn.close()
+
+        photos_db_dir = os.path.join(test_eng.photos_library_path, "database")
+        os.makedirs(photos_db_dir, exist_ok=True)
+        photos_db_file = os.path.join(photos_db_dir, "Photos.sqlite")
+        pconn = sqlite3.connect(photos_db_file)
+        try:
+            pconn.execute(
+                "CREATE TABLE ZASSET (ZUUID TEXT, ZFILENAME TEXT, ZUNIFORMTYPEIDENTIFIER TEXT, ZDIRECTORY TEXT, ZTRASHEDSTATE INTEGER, ZDATECREATED REAL);"
+            )
+            for idx in range(60):
+                pconn.execute(
+                    "INSERT INTO ZASSET (ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY, ZTRASHEDSTATE, ZDATECREATED) VALUES (?, ?, 'public.heic', '0', 0, ?);",
+                    (f"lib-guid-{idx:03d}", f"IMG_LIB_{idx:04d}.HEIC", float(1000 - idx)),
+                )
+            pconn.commit()
+        finally:
+            pconn.close()
+
+        test_eng.db_path = mixed_chat_db
+        paged_guids: List[str] = []
+        cur_off = 0
+        while True:
+            page = test_eng.query_icloud_photos(limit=48, offset=cur_off)
+            if not page:
+                break
+            paged_guids.extend(p["guid"] for p in page)
+            if len(page) < 48:
+                break
+            cur_off += len(page)
+        assert len(paged_guids) == 120, f"Expected 120 paged photos, got {len(paged_guids)}"
+        assert len(set(paged_guids)) == 120, "Pagination produced duplicate photo GUIDs"
+        assert sum(1 for g in paged_guids if g.startswith("chat-guid-")) == 60
+        assert sum(1 for g in paged_guids if g.startswith("lib-guid-")) == 60
     finally:
         srv.shutdown()
         srv.server_close()
@@ -6158,7 +6255,7 @@ def main() -> int:
         "command",
         nargs="?",
         default="serve",
-        help="serve | status | doctor | logs | stdio | selftest | sync-icloud-photos",
+        help="serve | status | doctor | logs | stdio | selftest | sync-icloud-photos (standalone CLI sync uses brctl fallback)",
     )
     parser.add_argument("--host", default=os.environ.get("BLUEPILL_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("BLUEPILL_PORT", "1234")))
@@ -6168,7 +6265,11 @@ def main() -> int:
     parser.add_argument("--tls-key", default=os.environ.get("BLUEPILL_TLS_KEY", ""), help="Optional TLS private key path for HTTPS listener")
     parser.add_argument("-n", "--lines", type=int, default=100, help="Number of log lines to display for 'logs'")
     parser.add_argument("--stdio", action="store_true", help="Run JSON-RPC over stdin/stdout (Direct SSH mode)")
-    parser.add_argument("--sync-icloud-photos", action="store_true", help="Download purged iCloud camera photos and cache as JPEGs")
+    parser.add_argument(
+        "--sync-icloud-photos",
+        action="store_true",
+        help="Download purged iCloud camera photos (uses brctl fallback in standalone CLI mode) and cache as JPEGs",
+    )
     parser.add_argument("--selftest", action="store_true", help="Run built-in self-test suite and exit")
     parser.add_argument("--json", action="store_true", help="Format status/doctor/logs output as JSON")
     parser.add_argument("--version", action="store_true", help="Print version and exit")
@@ -6191,8 +6292,22 @@ def main() -> int:
     )
 
     if args.sync_icloud_photos or args.command == "sync-icloud-photos":
-        res = engine.sync_icloud_photos(limit=250)
-        print(json.dumps(res, indent=2))
+        offset = 0
+        totals = {"total": 0, "processed": 0, "synced": 0, "unpurged": 0, "transcoded": 0}
+        while True:
+            res = engine.sync_icloud_photos(limit=250, offset=offset)
+            for k in totals:
+                totals[k] += int(res.get(k, 0))
+            nxt = res.get("nextOffset")
+            if not res.get("hasMore") or not isinstance(nxt, int) or nxt <= offset:
+                break
+            offset = nxt
+        print(
+            json.dumps(
+                {"status": "ok", "state": "completed", **totals, "hasMore": False, "nextOffset": None},
+                indent=2,
+            )
+        )
         return 0
 
     if args.selftest or args.command == "selftest":

@@ -3401,6 +3401,8 @@ private slots:
         const quint16 mockPort = mockServer.serverPort();
         int noteACount = 0;
         int noteBCount = 0;
+        int noteWsReplayCount = 0;
+        int noteRealConflictCount = 0;
         int restartNoteCount = 0;
         qint64 secondRestartBaseRev = -1;
         QTcpSocket *stalledRestartSock = nullptr;
@@ -3455,6 +3457,25 @@ private slots:
                         noteBCount++;
                         sendHttpJson(sock, 200, "OK",
                                      R"({"status":200,"data":[{"id":"note_conc_b","title":"Note B","body":"Body B","folder":"Notes","revision":1}]})");
+                        return;
+                    }
+                    if (reqId == QStringLiteral("note_ws_replay")) {
+                        noteWsReplayCount++;
+                        if (noteWsReplayCount == 1) {
+                            // Simulate dropped ACK after server already stored the trimmed note
+                            sendHttpJson(sock, 503, "Service Unavailable",
+                                         R"({"status":503,"message":"Dropped ACK"})");
+                            return;
+                        }
+                        // On replay, server returns 409 with the stored (trimmed) body
+                        sendHttpJson(sock, 409, "Conflict",
+                                     R"({"status":409,"error":"revision_conflict","data":[{"id":"note_ws_replay","title":"Trailing WS Note","body":"Body with trailing newline","folder":"Notes","revision":5}]})");
+                        return;
+                    }
+                    if (reqId == QStringLiteral("note_real_conflict")) {
+                        noteRealConflictCount++;
+                        sendHttpJson(sock, 409, "Conflict",
+                                     R"({"status":409,"error":"revision_conflict","data":[{"id":"note_real_conflict","title":"Conflict Note","body":"Different Server Body","folder":"Notes","revision":6}]})");
                         return;
                     }
                     sendHttpJson(sock, 200, "OK", R"({"status":200,"data":[]})");
@@ -3521,6 +3542,24 @@ private slots:
         liveBackend.clearIcloudMutationRetryStateForTest(keyA);
         QCOMPARE(liveBackend.icloudMutationRetryCountForTest(keyA), 0);
         QVERIFY(!liveBackend.isIcloudMutationInBackoffForTest(keyA));
+
+        // Verify dropped ACK followed by 409 replay with trailing whitespace in saved body is recognized as already-applied (not paused)
+        const QString wsKey = QStringLiteral("note_save:note_ws_replay");
+        liveBackend.saveIcloudNote(QStringLiteral("note_ws_replay"), QStringLiteral("Trailing WS Note "), QStringLiteral("Body with trailing newline\n  "), QStringLiteral("Notes"));
+        QTRY_COMPARE_WITH_TIMEOUT(noteWsReplayCount, 1, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(liveBackend.isIcloudMutationInBackoffForTest(wsKey), 1500);
+        liveBackend.clearIcloudMutationRetryStateForTest(wsKey);
+        liveBackend.replayPendingIcloudMutations();
+        QTRY_COMPARE_WITH_TIMEOUT(noteWsReplayCount, 2, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(!liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_ws_replay")), 1500);
+        QVERIFY(!liveBackend.isIcloudMutationPausedForTest(wsKey));
+
+        // Verify a genuine 409 conflict with a different server body still pauses the pending mutation
+        const QString conflictKey = QStringLiteral("note_save:note_real_conflict");
+        liveBackend.saveIcloudNote(QStringLiteral("note_real_conflict"), QStringLiteral("Conflict Note"), QStringLiteral("Local Draft\n"), QStringLiteral("Notes"));
+        QTRY_COMPARE_WITH_TIMEOUT(noteRealConflictCount, 1, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(liveBackend.isIcloudMutationPausedForTest(conflictKey), 1500);
+        QVERIFY(liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_real_conflict")));
 
         if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
         if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);

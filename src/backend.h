@@ -268,6 +268,8 @@ public:
     void recordIcloudMutationFailureForTest(const QString &mutationKey) { recordIcloudMutationFailure(mutationKey); }
     void clearIcloudMutationRetryStateForTest(const QString &mutationKey) { clearIcloudMutationRetryState(mutationKey); }
     bool isIcloudMutationInBackoffForTest(const QString &mutationKey) const;
+    bool isIcloudMutationPausedForTest(const QString &mutationKey) const { return m_icloudMutationPausedKeys.contains(mutationKey); }
+    bool hasPendingIcloudNoteSaveForTest(const QString &noteId) const { return m_pendingIcloudNoteSaves.contains(noteId); }
     int icloudMutationRetryCountForTest(const QString &mutationKey) const { return m_icloudMutationRetryCounts.value(mutationKey, 0); }
     void scheduleIcloudMutationRetryForTest(bool immediate) { scheduleIcloudMutationRetry(immediate); }
 

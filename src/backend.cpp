@@ -7935,14 +7935,14 @@ void Backend::replayPendingIcloudMutations() {
 
     auto isNoteReplayAlreadyApplied = [](const QJsonArray &arr, const QString &itemId, const QVariantMap &pendingMap) -> bool {
         const QString wantTitle = pendingMap.value(QStringLiteral("title")).toString().trimmed();
-        const QString wantBody = pendingMap.value(QStringLiteral("body")).toString();
+        const QString wantBody = pendingMap.value(QStringLiteral("body")).toString().trimmed();
         const QString wantFolder = pendingMap.value(QStringLiteral("folder"), QStringLiteral("Notes")).toString().trimmed();
         for (const QJsonValue &v : arr) {
             if (!v.isObject()) continue;
             const QJsonObject o = v.toObject();
             if (o.value(QStringLiteral("id")).toString() != itemId) continue;
             const QString srvTitle = o.value(QStringLiteral("title")).toString().trimmed();
-            const QString srvBody = o.value(QStringLiteral("body")).toString();
+            const QString srvBody = o.value(QStringLiteral("body")).toString().trimmed();
             const QString srvFolder = o.value(QStringLiteral("folder")).toString().trimmed();
             return srvTitle == wantTitle && srvBody == wantBody &&
                    (srvFolder == wantFolder || (srvFolder.isEmpty() && wantFolder == QStringLiteral("Notes")));
@@ -7958,7 +7958,7 @@ void Backend::replayPendingIcloudMutations() {
             QStringLiteral("calendarTitle"),
             pendingMap.value(QStringLiteral("calendarName"), QStringLiteral("Home"))
         ).toString().trimmed();
-        const QString wantNotes = pendingMap.value(QStringLiteral("notes")).toString();
+        const QString wantNotes = pendingMap.value(QStringLiteral("notes")).toString().trimmed();
         for (const QJsonValue &v : arr) {
             if (!v.isObject()) continue;
             const QJsonObject o = v.toObject();
@@ -7969,7 +7969,7 @@ void Backend::replayPendingIcloudMutations() {
             const QString srvCal = (o.value(QStringLiteral("calendarTitle")).toString().trimmed().isEmpty()
                                         ? o.value(QStringLiteral("calendarName")).toString().trimmed()
                                         : o.value(QStringLiteral("calendarTitle")).toString().trimmed());
-            const QString srvNotes = o.value(QStringLiteral("notes")).toString();
+            const QString srvNotes = o.value(QStringLiteral("notes")).toString().trimmed();
             return srvTitle == wantTitle && srvStart == wantStart && srvEnd == wantEnd &&
                    srvCal == wantCal && srvNotes == wantNotes;
         }
@@ -8522,7 +8522,7 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
                     if (httpStatus == 409 && dataVal.isArray()) {
                         const QVariantMap curPend = m_pendingIcloudNoteSaves.value(actualId);
                         const QString wantTitle = curPend.value(QStringLiteral("title")).toString().trimmed();
-                        const QString wantBody = curPend.value(QStringLiteral("body")).toString();
+                        const QString wantBody = curPend.value(QStringLiteral("body")).toString().trimmed();
                         const QString wantFolder = curPend.value(QStringLiteral("folder"), QStringLiteral("Notes")).toString().trimmed();
                         bool alreadyApplied = false;
                         for (const QJsonValue &v : dataVal.toArray()) {
@@ -8530,7 +8530,7 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
                             const QJsonObject o = v.toObject();
                             if (o.value(QStringLiteral("id")).toString() != actualId) continue;
                             const QString srvTitle = o.value(QStringLiteral("title")).toString().trimmed();
-                            const QString srvBody = o.value(QStringLiteral("body")).toString();
+                            const QString srvBody = o.value(QStringLiteral("body")).toString().trimmed();
                             const QString srvFolder = o.value(QStringLiteral("folder")).toString().trimmed();
                             alreadyApplied = (srvTitle == wantTitle && srvBody == wantBody &&
                                               (srvFolder == wantFolder || (srvFolder.isEmpty() && wantFolder == QStringLiteral("Notes"))));
@@ -8808,7 +8808,7 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
                             QStringLiteral("calendarTitle"),
                             curPend.value(QStringLiteral("calendarName"), QStringLiteral("Home"))
                         ).toString().trimmed();
-                        const QString wantNotes = curPend.value(QStringLiteral("notes")).toString();
+                        const QString wantNotes = curPend.value(QStringLiteral("notes")).toString().trimmed();
                         bool alreadyApplied = false;
                         for (const QJsonValue &v : dataVal.toArray()) {
                             if (!v.isObject()) continue;
@@ -8820,7 +8820,7 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
                             const QString srvCal = (o.value(QStringLiteral("calendarTitle")).toString().trimmed().isEmpty()
                                                         ? o.value(QStringLiteral("calendarName")).toString().trimmed()
                                                         : o.value(QStringLiteral("calendarTitle")).toString().trimmed());
-                            const QString srvNotes = o.value(QStringLiteral("notes")).toString();
+                            const QString srvNotes = o.value(QStringLiteral("notes")).toString().trimmed();
                             alreadyApplied = (srvTitle == wantTitle && srvStart == wantStart && srvEnd == wantEnd &&
                                               srvCal == wantCal && srvNotes == wantNotes);
                             break;
@@ -8982,13 +8982,18 @@ void Backend::syncIcloudPhotos() {
 }
 
 void Backend::syncIcloudPhotosPage(int offset, int accumulatedSynced, const QString &jobId) {
+    if (!isSecureOrLocalIcloudEndpoint()) {
+        m_icloudPhotosSyncInFlight = false;
+        emit icloudPhotosSyncingChanged();
+        return;
+    }
     QNetworkReply *reply = nullptr;
     if (!jobId.isEmpty()) {
         const QString encodedJob = QString::fromUtf8(QUrl::toPercentEncoding(jobId));
         reply = m_mediaNam.get(makeRequest(QStringLiteral("/api/v1/icloud/photos/sync?jobId=") + encodedJob));
     } else {
         QJsonObject payload;
-        payload.insert(QStringLiteral("limit"), 100);
+        payload.insert(QStringLiteral("limit"), 250);
         payload.insert(QStringLiteral("offset"), offset);
         payload.insert(QStringLiteral("syncAll"), true);
         reply = m_mediaNam.post(makeRequest(QStringLiteral("/api/v1/icloud/photos/sync")), QJsonDocument(payload).toJson(QJsonDocument::Compact));
