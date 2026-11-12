@@ -5675,15 +5675,23 @@ ApplicationWindow {
                                         }
                                     }
                                     if (noteDetailWindow.noteId === icloudNotesPopup.selectedNoteId) {
-                                        noteDetailTitleInput.text = noteTitleInput.text
-                                        noteDetailBodyInput.text = noteBodyInput.text
-                                        noteDetailFolderInput.text = noteFolderInput.text
-                                        noteDetailWindow.loadedTitle = noteTitleInput.text
-                                        noteDetailWindow.loadedBody = noteBodyInput.text
-                                        noteDetailWindow.loadedFolder = noteFolderInput.text
-                                        noteDetailWindow.noteSyncSource = "local_hub"
-                                        noteDetailWindow.noteRevision = icloudNotesPopup.selectedNoteRevision
-                                        noteDetailWindow.noteMutationSeq = icloudNotesPopup.selectedNoteMutationSeq
+                                        var detailCleanOnPopupSave = !noteDetailWindow.visible ||
+                                                                     (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
+                                                                      noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
+                                                                      noteDetailFolderInput.text === noteDetailWindow.loadedFolder)
+                                        if (detailCleanOnPopupSave) {
+                                            noteDetailTitleInput.text = noteTitleInput.text
+                                            noteDetailBodyInput.text = noteBodyInput.text
+                                            noteDetailFolderInput.text = noteFolderInput.text
+                                            noteDetailWindow.loadedTitle = noteTitleInput.text
+                                            noteDetailWindow.loadedBody = noteBodyInput.text
+                                            noteDetailWindow.loadedFolder = noteFolderInput.text
+                                            noteDetailWindow.noteSyncSource = "local_hub"
+                                            noteDetailWindow.noteRevision = icloudNotesPopup.selectedNoteRevision
+                                            noteDetailWindow.noteMutationSeq = icloudNotesPopup.selectedNoteMutationSeq
+                                        } else {
+                                            root.showToast(i18n.tr("Note saved in Notes Hub; unsaved draft in detail window preserved."))
+                                        }
                                     }
                                 }
                             }
@@ -6026,6 +6034,7 @@ ApplicationWindow {
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
                                     if (modelData.guid && !modelData.isCloudEvicted) {
+                                        icloudPhotosPopup.close()
                                         root.openPhotoViewer(backend.icloudPhotos, index)
                                     } else if (modelData.guid && modelData.isCloudEvicted && modelData.canUnpurge !== false) {
                                         backend.downloadCloudAttachment(modelData.guid)
@@ -6056,6 +6065,7 @@ ApplicationWindow {
                                         if (modelData.canUnpurge === false) return
                                         backend.downloadCloudAttachment(modelData.guid)
                                     } else {
+                                        icloudPhotosPopup.close()
                                         root.openPhotoViewer(backend.icloudPhotos, index)
                                     }
                                 }

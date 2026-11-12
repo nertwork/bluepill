@@ -296,9 +296,11 @@ void Backend::loadAppState() {
     const QJsonArray pendingNoteSavesArr = obj.value(QStringLiteral("pendingIcloudNoteSaves")).toArray();
     for (const QJsonValue &v : pendingNoteSavesArr) {
         if (v.isObject()) {
-            const QVariantMap m = v.toObject().toVariantMap();
+            QVariantMap m = v.toObject().toVariantMap();
             const QString id = m.value(QStringLiteral("id")).toString();
             if (!id.isEmpty()) {
+                m.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
+                m.insert(QStringLiteral("dispatchAttempted"), true);
                 m_icloudNotesGeneration = qMax(
                     m_icloudNotesGeneration,
                     qMax(m.value(QStringLiteral("clientMutationSeq")).toULongLong(),
@@ -326,9 +328,11 @@ void Backend::loadAppState() {
     const QJsonArray pendingEventSavesArr = obj.value(QStringLiteral("pendingIcloudEventSaves")).toArray();
     for (const QJsonValue &v : pendingEventSavesArr) {
         if (v.isObject()) {
-            const QVariantMap m = v.toObject().toVariantMap();
+            QVariantMap m = v.toObject().toVariantMap();
             const QString id = m.value(QStringLiteral("id")).toString();
             if (!id.isEmpty()) {
+                m.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
+                m.insert(QStringLiteral("dispatchAttempted"), true);
                 m_icloudEventsGeneration = qMax(
                     m_icloudEventsGeneration,
                     qMax(m.value(QStringLiteral("clientMutationSeq")).toULongLong(),
@@ -361,8 +365,8 @@ void Backend::loadAppState() {
     emit selectedChatChanged();
 }
 
-void Backend::saveAppState() const {
-    if (m_demoMode || m_stateFilePath.isEmpty()) return;
+bool Backend::saveAppState() const {
+    if (m_demoMode || m_stateFilePath.isEmpty()) return true;
     QFileInfo fi(m_stateFilePath);
     QDir().mkpath(fi.absolutePath());
 
@@ -424,7 +428,9 @@ void Backend::saveAppState() const {
 
     QJsonArray pendingNoteSavesOut;
     for (auto it = m_pendingIcloudNoteSaves.begin(); it != m_pendingIcloudNoteSaves.end(); ++it) {
-        pendingNoteSavesOut.append(QJsonObject::fromVariantMap(it.value()));
+        QJsonObject noteObj = QJsonObject::fromVariantMap(it.value());
+        noteObj.remove(QStringLiteral("neverDispatchedLocalCreate"));
+        pendingNoteSavesOut.append(noteObj);
     }
     root.insert(QStringLiteral("pendingIcloudNoteSaves"), pendingNoteSavesOut);
 
@@ -436,7 +442,9 @@ void Backend::saveAppState() const {
 
     QJsonArray pendingEventSavesOut;
     for (auto it = m_pendingIcloudEventSaves.begin(); it != m_pendingIcloudEventSaves.end(); ++it) {
-        pendingEventSavesOut.append(QJsonObject::fromVariantMap(it.value()));
+        QJsonObject evtObj = QJsonObject::fromVariantMap(it.value());
+        evtObj.remove(QStringLiteral("neverDispatchedLocalCreate"));
+        pendingEventSavesOut.append(evtObj);
     }
     root.insert(QStringLiteral("pendingIcloudEventSaves"), pendingEventSavesOut);
 
@@ -448,15 +456,17 @@ void Backend::saveAppState() const {
     root.insert(QStringLiteral("icloudEventsGeneration"), static_cast<qint64>(m_icloudEventsGeneration));
     root.insert(QStringLiteral("pendingIcloudEventDeletes"), pendingEventDeletesOut);
 
+    bool committed = false;
     QSaveFile f(m_stateFilePath);
     if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         f.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
         const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Indented);
         if (f.write(payload) == payload.size()) {
-            f.commit();
+            committed = f.commit();
         }
     }
     saveDeletedMessagesFile();
+    return committed;
 }
 
 QString Backend::deletedMessagesFilePath() const {
@@ -970,17 +980,13 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
                                   normPrimary != m_serverUrl && normPrimary != m_secondaryServerUrl &&
                                   (normSecondary.isEmpty() || (normSecondary != m_serverUrl && normSecondary != m_secondaryServerUrl));
     if (endpointReplaced) {
+        const int discardedCount = m_pendingIcloudNoteSaves.size() + m_pendingIcloudNoteDeletes.size() +
+                                   m_pendingIcloudEventSaves.size() + m_pendingIcloudEventDeletes.size();
         m_icloudMutationRetryTimer.stop();
         m_icloudMutationRetryScheduled = false;
         m_icloudMutationRetryArmedDeadlineMs = 0;
-        for (auto it = m_inFlightIcloudNoteReplies.begin(); it != m_inFlightIcloudNoteReplies.end(); ++it) {
-            if (it.value()) it.value()->abort();
-        }
-        m_inFlightIcloudNoteReplies.clear();
-        for (auto it = m_inFlightIcloudEventReplies.begin(); it != m_inFlightIcloudEventReplies.end(); ++it) {
-            if (it.value()) it.value()->abort();
-        }
-        m_inFlightIcloudEventReplies.clear();
+        const auto noteReplies = std::exchange(m_inFlightIcloudNoteReplies, {});
+        const auto eventReplies = std::exchange(m_inFlightIcloudEventReplies, {});
         m_pendingIcloudNoteSaves.clear();
         m_pendingIcloudNoteDeletes.clear();
         m_pendingIcloudEventSaves.clear();
@@ -988,7 +994,19 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
         m_icloudMutationRetryCounts.clear();
         m_icloudMutationNextRetryMs.clear();
         m_icloudMutationPausedKeys.clear();
+        for (QNetworkReply *reply : noteReplies) {
+            if (reply) reply->abort();
+        }
+        for (QNetworkReply *reply : eventReplies) {
+            if (reply) reply->abort();
+        }
+        m_icloudMutationRetryTimer.stop();
+        m_icloudMutationRetryScheduled = false;
+        m_icloudMutationRetryArmedDeadlineMs = 0;
         saveAppState();
+        if (discardedCount > 0) {
+            emit toastMessage(QStringLiteral("Server endpoint changed; discarded %1 unsynced iCloud Hub change(s).").arg(discardedCount));
+        }
     }
 
     m_serverUrl = normPrimary;
@@ -8064,7 +8082,10 @@ void Backend::replayPendingIcloudMutations() {
         dispatchedNoteMap.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
         dispatchedNoteMap.insert(QStringLiteral("dispatchAttempted"), true);
         m_pendingIcloudNoteSaves.insert(noteId, dispatchedNoteMap);
-        saveAppState();
+        if (!m_stateFilePath.isEmpty() && !saveAppState()) {
+            recordIcloudMutationFailure(mutKey);
+            continue;
+        }
         const quint64 sentSeq = dispatchedNoteMap.value(QStringLiteral("clientMutationSeq")).toULongLong();
         const qint64 sentUpdatedAt = dispatchedNoteMap.value(QStringLiteral("updatedAtMs")).toLongLong();
         QJsonObject payload = QJsonObject::fromVariantMap(dispatchedNoteMap);
@@ -8290,7 +8311,10 @@ void Backend::replayPendingIcloudMutations() {
         dispatchedEvtMap.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
         dispatchedEvtMap.insert(QStringLiteral("dispatchAttempted"), true);
         m_pendingIcloudEventSaves.insert(evtId, dispatchedEvtMap);
-        saveAppState();
+        if (!m_stateFilePath.isEmpty() && !saveAppState()) {
+            recordIcloudMutationFailure(mutKey);
+            continue;
+        }
         const quint64 sentSeq = dispatchedEvtMap.value(QStringLiteral("clientMutationSeq")).toULongLong();
         const qint64 sentUpdatedAt = dispatchedEvtMap.value(QStringLiteral("updatedAtMs")).toLongLong();
         QJsonObject payload = QJsonObject::fromVariantMap(dispatchedEvtMap);
@@ -8525,11 +8549,11 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
     }
 
     const QVariantMap prevPendNote = m_pendingIcloudNoteSaves.value(actualId);
-    const bool alreadyDispatched = prevPendNote.value(QStringLiteral("dispatchAttempted")).toBool(false);
+    const bool alreadyDispatched = prevPendNote.value(QStringLiteral("dispatchAttempted")).toBool();
     const bool wasNeverDispatchedCreate = id.trimmed().isEmpty()
                                               ? true
                                               : (m_pendingIcloudNoteSaves.contains(actualId) &&
-                                                 prevPendNote.value(QStringLiteral("neverDispatchedLocalCreate")).toBool(false) &&
+                                                 prevPendNote.value(QStringLiteral("neverDispatchedLocalCreate")).toBool() &&
                                                  !alreadyDispatched);
 
     QVariantMap noteMap;
@@ -8567,14 +8591,22 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
         m_icloudNotes.prepend(noteMap);
     }
     emit icloudNotesChanged();
-    saveAppState();
+    const bool initialNoteStateSaved = m_stateFilePath.isEmpty() || saveAppState();
+    if (!initialNoteStateSaved) {
+        noteMap.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
+        noteMap.insert(QStringLiteral("dispatchAttempted"), true);
+        m_pendingIcloudNoteSaves.insert(actualId, noteMap);
+    }
 
     // Queue behind any already in-flight HTTP request for this noteId instead of dispatching concurrently
     if (isSecureOrLocalIcloudEndpoint() && !m_inFlightIcloudNoteReplies.value(actualId)) {
         noteMap.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
         noteMap.insert(QStringLiteral("dispatchAttempted"), true);
         m_pendingIcloudNoteSaves.insert(actualId, noteMap);
-        saveAppState();
+        if (!m_stateFilePath.isEmpty() && !saveAppState()) {
+            recordIcloudMutationFailure(mutKey);
+            return actualId;
+        }
 
         QJsonObject payload;
         payload.insert(QStringLiteral("id"), actualId);
@@ -8737,8 +8769,8 @@ void Backend::deleteIcloudNote(const QString &id) {
     const QString saveKey = QStringLiteral("note_save:") + id;
     const QVariantMap pendSave = m_pendingIcloudNoteSaves.value(id);
     const bool neverSentLocalCreate = m_pendingIcloudNoteSaves.contains(id) &&
-                                      pendSave.value(QStringLiteral("neverDispatchedLocalCreate")).toBool(false) &&
-                                      !pendSave.value(QStringLiteral("dispatchAttempted")).toBool(false) &&
+                                      pendSave.value(QStringLiteral("neverDispatchedLocalCreate")).toBool() &&
+                                      !pendSave.value(QStringLiteral("dispatchAttempted")).toBool() &&
                                       pendSave.value(QStringLiteral("baseRevision")).toLongLong() <= 0 &&
                                       pendSave.value(QStringLiteral("revision")).toLongLong() <= 0 &&
                                       !m_inFlightIcloudNoteReplies.value(id) &&
@@ -8893,14 +8925,22 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
 
     m_icloudEvents.prepend(evtMap);
     emit icloudEventsChanged();
-    saveAppState();
+    const bool initialEvtStateSaved = m_stateFilePath.isEmpty() || saveAppState();
+    if (!initialEvtStateSaved) {
+        evtMap.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
+        evtMap.insert(QStringLiteral("dispatchAttempted"), true);
+        m_pendingIcloudEventSaves.insert(id, evtMap);
+    }
 
     // Queue behind any already in-flight HTTP request for this evtId instead of dispatching concurrently
     if (isSecureOrLocalIcloudEndpoint() && !m_inFlightIcloudEventReplies.value(id)) {
         evtMap.insert(QStringLiteral("neverDispatchedLocalCreate"), false);
         evtMap.insert(QStringLiteral("dispatchAttempted"), true);
         m_pendingIcloudEventSaves.insert(id, evtMap);
-        saveAppState();
+        if (!m_stateFilePath.isEmpty() && !saveAppState()) {
+            recordIcloudMutationFailure(mutKey);
+            return id;
+        }
 
         QJsonObject payload;
         payload.insert(QStringLiteral("id"), id);
@@ -9053,8 +9093,8 @@ void Backend::deleteIcloudEvent(const QString &id) {
     const QString saveKey = QStringLiteral("evt_save:") + id;
     const QVariantMap pendSave = m_pendingIcloudEventSaves.value(id);
     const bool neverSentLocalCreate = m_pendingIcloudEventSaves.contains(id) &&
-                                      pendSave.value(QStringLiteral("neverDispatchedLocalCreate")).toBool(false) &&
-                                      !pendSave.value(QStringLiteral("dispatchAttempted")).toBool(false) &&
+                                      pendSave.value(QStringLiteral("neverDispatchedLocalCreate")).toBool() &&
+                                      !pendSave.value(QStringLiteral("dispatchAttempted")).toBool() &&
                                       pendSave.value(QStringLiteral("baseRevision")).toLongLong() <= 0 &&
                                       pendSave.value(QStringLiteral("revision")).toLongLong() <= 0 &&
                                       !m_inFlightIcloudEventReplies.value(id) &&

@@ -3370,8 +3370,8 @@ private slots:
         QVERIFY(fi.exists());
         QCOMPARE(fi.permissions() & (QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ReadOther | QFileDevice::WriteOther), QFileDevice::Permissions());
 
-        // Update Note
-        backend.saveIcloudNote(QStringLiteral("note_test_1"), QStringLiteral("Updated Meeting Notes"), QStringLiteral("New action items"), QStringLiteral("Work"));
+        // Update Note (passing baseRevision = 1 to represent an existing server-backed note edited offline)
+        backend.saveIcloudNote(QStringLiteral("note_test_1"), QStringLiteral("Updated Meeting Notes"), QStringLiteral("New action items"), QStringLiteral("Work"), 1);
         QCOMPARE(backend.icloudNotes().size(), 1);
         QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("Updated Meeting Notes"));
         QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("body")).toString(), QStringLiteral("New action items"));
@@ -3383,6 +3383,7 @@ private slots:
         // Delete Note
         backend.deleteIcloudNote(QStringLiteral("note_test_1"));
         QCOMPARE(backend.icloudNotes().size(), 0);
+        QVERIFY(backend.hasPendingIcloudNoteDeleteForTest(QStringLiteral("note_test_1")));
 
         // Reconciling with a stale remote array containing deleted note_test_1 keeps it deleted while delete is pending
         QJsonObject staleNote;
@@ -3411,6 +3412,8 @@ private slots:
         int noteWsReplayCount = 0;
         int noteRealConflictCount = 0;
         int restartNoteCount = 0;
+        bool lostAckCreatedOnServer = false;
+        int unwritableNotePostCount = 0;
         qint64 secondRestartBaseRev = -1;
         QTcpSocket *stalledRestartSock = nullptr;
 
@@ -3454,15 +3457,24 @@ private slots:
                                      R"({"status":200,"data":[{"id":"note_restart_seq","title":"Newer Post-Restart Edit","body":"Body 2","folder":"Notes","revision":3}]})");
                         return;
                     }
-                    if (reqId == QStringLiteral("note_conc_a") || bodyObj.value(QStringLiteral("title")).toString() == QStringLiteral("Lost Ack Auto Note")) {
-                        if (reqId == QStringLiteral("note_conc_a")) {
-                            noteACount++;
-                            const qint64 nowAttemptMs = QDateTime::currentMSecsSinceEpoch();
-                            if (noteACount == 1) {
-                                firstAttemptAMs = nowAttemptMs;
-                            } else if (noteACount == 2) {
-                                secondAttemptAMs = nowAttemptMs;
-                            }
+                    if (bodyObj.value(QStringLiteral("title")).toString() == QStringLiteral("Lost Ack Auto Note")) {
+                        // Simulate server persisting the created note and dropping the TCP connection before the HTTP ACK arrives
+                        lostAckCreatedOnServer = true;
+                        sock->disconnectFromHost();
+                        return;
+                    }
+                    if (bodyObj.value(QStringLiteral("title")).toString() == QStringLiteral("Unwritable State Note")) {
+                        unwritableNotePostCount++;
+                        sendHttpJson(sock, 200, "OK", R"({"status":200,"data":[]})");
+                        return;
+                    }
+                    if (reqId == QStringLiteral("note_conc_a")) {
+                        noteACount++;
+                        const qint64 nowAttemptMs = QDateTime::currentMSecsSinceEpoch();
+                        if (noteACount == 1) {
+                            firstAttemptAMs = nowAttemptMs;
+                        } else if (noteACount == 2) {
+                            secondAttemptAMs = nowAttemptMs;
                         }
                         sendHttpJson(sock, 503, "Service Unavailable",
                                      R"({"status":503,"message":"Transient upstream failure"})");
@@ -3568,11 +3580,12 @@ private slots:
         QCOMPARE(liveBackend.icloudMutationRetryCountForTest(keyA), 0);
         QVERIFY(!liveBackend.isIcloudMutationInBackoffForTest(keyA));
 
-        // Verify an auto-ID note create whose ACK was lost followed by a client restart without credentials
-        // retains its pending deletion when deleted after restart (since dispatchAttempted was durably persisted)
+        // Verify an auto-ID note create that was created on the server before the connection dropped (lost ACK),
+        // followed by a client restart without credentials, retains its pending deletion when deleted after restart
         {
             const QString lostAckNoteId = liveBackend.saveIcloudNote(QString(), QStringLiteral("Lost Ack Auto Note"), QStringLiteral("Body"), QStringLiteral("Notes"));
             const QString lostAckMutKey = QStringLiteral("note_save:") + lostAckNoteId;
+            QTRY_VERIFY_WITH_TIMEOUT(lostAckCreatedOnServer, 1500);
             QTRY_VERIFY_WITH_TIMEOUT(liveBackend.isIcloudMutationInBackoffForTest(lostAckMutKey), 1500);
             liveBackend.clearIcloudMutationRetryStateForTest(lostAckMutKey);
 
@@ -3591,6 +3604,24 @@ private slots:
             qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(mockPort).toUtf8());
             qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
             liveBackend.deleteIcloudNote(lostAckNoteId);
+
+            // Also verify that if saveAppState() fails (unwritable state path), saveIcloudNote does not dispatch
+            // the network POST until state can be durably persisted
+            const QString blockerFile = tempDir.filePath(QStringLiteral("unwritable_note_blocker"));
+            QFile bf(blockerFile);
+            QVERIFY(bf.open(QIODevice::WriteOnly));
+            bf.write("x");
+            bf.close();
+            Backend failPersistNoteBackend(false);
+            failPersistNoteBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_notes_fail_persist.json")));
+            failPersistNoteBackend.setStateFilePath(blockerFile + QStringLiteral("/state.json"));
+            failPersistNoteBackend.loadCredentials();
+            const QString failNoteId = failPersistNoteBackend.saveIcloudNote(QString(), QStringLiteral("Unwritable State Note"), QStringLiteral("Body"), QStringLiteral("Notes"));
+            QCoreApplication::processEvents();
+            QCOMPARE(unwritableNotePostCount, 0);
+            failPersistNoteBackend.deleteIcloudNote(failNoteId);
+            QVERIFY(!failPersistNoteBackend.hasPendingIcloudNoteSaveForTest(failNoteId));
+            QVERIFY(!failPersistNoteBackend.hasPendingIcloudNoteDeleteForTest(failNoteId));
         }
 
         // Verify dropped ACK followed by 409 replay with trailing whitespace in saved body is recognized as already-applied (not paused)
@@ -3708,6 +3739,7 @@ private slots:
         QTcpServer evtServer;
         QVERIFY(evtServer.listen(QHostAddress::LocalHost, 0));
         int evtRequestCount = 0;
+        bool evtCreatedBeforeDroppedAck = false;
         QString capturedEvtId;
         auto buildNear250 = []() {
             QJsonArray snap250;
@@ -3771,7 +3803,9 @@ private slots:
                         return;
                     }
                     if (evtRequestCount == 2) {
-                        sendJson(sock, 503, "Service Unavailable", R"({"status":503,"message":"Dropped ACK"})");
+                        // Simulate server creating the event and dropping the connection before sending the HTTP ACK
+                        evtCreatedBeforeDroppedAck = true;
+                        sock->disconnectFromHost();
                         return;
                     }
                     // Third request: 409 Conflict snapshot with full 250 near events + appended outsideWindow target
@@ -3843,6 +3877,7 @@ private slots:
         );
         const QString evtMutKey = QStringLiteral("evt_save:") + savedEvtId;
         QTRY_COMPARE_WITH_TIMEOUT(evtRequestCount, 2, 1500);
+        QVERIFY(evtCreatedBeforeDroppedAck);
         QTRY_VERIFY_WITH_TIMEOUT(evtBackend.isIcloudMutationInBackoffForTest(evtMutKey), 1500);
 
         // Verify that if a client restarts without credentials after a dropped event-create ACK,
@@ -3862,6 +3897,30 @@ private slots:
             QVERIFY(offlineRestartEvtBackend.hasPendingIcloudEventDeleteForTest(savedEvtId));
             qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(evtServer.serverPort()).toUtf8());
             qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+
+            // Also verify that if saveAppState() fails (unwritable state path), saveIcloudEvent does not dispatch
+            // the network POST until state can be durably persisted
+            const QString blockerEvtFile = tempDir.filePath(QStringLiteral("unwritable_evt_blocker"));
+            QFile ebf(blockerEvtFile);
+            QVERIFY(ebf.open(QIODevice::WriteOnly));
+            ebf.write("x");
+            ebf.close();
+            Backend failPersistEvtBackend(false);
+            failPersistEvtBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_events_fail_persist.json")));
+            failPersistEvtBackend.setStateFilePath(blockerEvtFile + QStringLiteral("/state.json"));
+            failPersistEvtBackend.loadCredentials();
+            const QString failEvtId = failPersistEvtBackend.saveIcloudEvent(
+                QStringLiteral("Unwritable State Event"),
+                1960000000000LL,
+                1960003600000LL,
+                QStringLiteral("Work"),
+                QStringLiteral("Notes")
+            );
+            QCoreApplication::processEvents();
+            QCOMPARE(evtRequestCount, 2);
+            failPersistEvtBackend.deleteIcloudEvent(failEvtId);
+            QVERIFY(!failPersistEvtBackend.hasPendingIcloudEventSaveForTest(failEvtId));
+            QVERIFY(!failPersistEvtBackend.hasPendingIcloudEventDeleteForTest(failEvtId));
         }
 
         evtBackend.clearIcloudMutationRetryStateForTest(evtMutKey);

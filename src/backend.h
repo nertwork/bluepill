@@ -314,7 +314,7 @@ public:
     void loadCredentials();
     void loadConfig() { loadCredentials(); }
     void loadAppState();
-    void saveAppState() const;
+    bool saveAppState() const;
     QString messagesCacheFilePath() const;
     void loadMessagesCache();
     void saveMessagesCache() const;

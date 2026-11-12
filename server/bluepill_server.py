@@ -3017,21 +3017,29 @@ class BluePillEngine:
         offset: int = 0,
         include_dimensions: bool = True,
         _max_limit: int = 250,
+        _cursor_state: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         effective_max = max(1, min(int(_max_limit or 250), 251))
         clamped_limit = max(1, min(int(limit or 48), effective_max))
-        clamped_offset = min(max(0, int(offset or 0)), 100000)
-        window_limit = clamped_offset + clamped_limit
+        clamped_offset = max(0, int(offset or 0))
+        use_cursor = _cursor_state is not None
+        window_limit = clamped_limit if use_cursor else (clamped_offset + clamped_limit)
         photos_lib = os.path.expanduser(self.photos_library_path)
         photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
         has_photos_db = os.path.exists(photos_db)
-        seen_chat_guids: set[str] = set()
-        seen_lib_guids: set[str] = set()
-        chat_photos: List[Dict[str, Any]] = []
-        lib_photos: List[Dict[str, Any]] = []
+        if use_cursor:
+            seen_chat_guids: set[str] = _cursor_state.setdefault("seen_chat_guids", set())
+            seen_lib_guids: set[str] = _cursor_state.setdefault("seen_lib_guids", set())
+            chat_photos: List[Dict[str, Any]] = _cursor_state.setdefault("chat_buffer", [])
+            lib_photos: List[Dict[str, Any]] = _cursor_state.setdefault("lib_buffer", [])
+        else:
+            seen_chat_guids = set()
+            seen_lib_guids = set()
+            chat_photos = []
+            lib_photos = []
 
         # 1. Query chat.db image attachments strictly filtered to iCloud CloudKit camera photos
-        if os.path.exists(self.db_path):
+        if os.path.exists(self.db_path) and len(chat_photos) < window_limit and (not use_cursor or not _cursor_state.get("chat_exhausted")):
             try:
                 conn = self._open_chat_db()
                 try:
@@ -3061,67 +3069,95 @@ class BluePillEngine:
                         if has_transfer_state
                         else "ORDER BY ROWID DESC"
                     )
+                    bucket_expr = "CASE WHEN transfer_state = 5 THEN 0 ELSE 1 END" if has_transfer_state else "0"
+                    needed_chat = window_limit - len(chat_photos)
+                    batch_fetch = max(needed_chat * 2, 60)
 
-                    chat_sql = f"""
-                        SELECT guid, filename, mime_type, total_bytes,
-                               {('transfer_state' if has_transfer_state else '5 AS transfer_state')},
-                               {('transfer_name' if has_transfer_name else "'' AS transfer_name")}
-                        FROM attachment
-                        WHERE {' AND '.join(where_clauses)}
-                        {order_clause}
-                        LIMIT ?
-                    """
-                    fetch_limit = max(window_limit * 2, 60)
-                    rows = conn.execute(chat_sql, (fetch_limit,)).fetchall()
-                    for r in rows:
-                        g = str(r["guid"] or "").strip()
-                        if not g or g in seen_chat_guids:
-                            continue
-                        fn = str(r["filename"] or "").strip()
-                        raw_path = os.path.expanduser(fn) if fn else ""
-                        real_p = os.path.realpath(raw_path) if raw_path else ""
-                        exists_on_disk = bool(real_p and os.path.exists(real_p))
-                        t_state = int(r["transfer_state"] or 0) if "transfer_state" in r.keys() else 5
-                        name = (
-                            str(r["transfer_name"] or "").strip()
-                            or (os.path.basename(real_p) if real_p else "")
-                            or f"photo_{g[:8]}.jpg"
-                        )
-                        lower_name = name.lower()
-                        # Strictly filter out stickers, GIFs, and desktop pastes (IMG_*, <id>__*, or HEIC)
-                        if not (
-                            name.startswith("IMG_")
-                            or "__" in name
-                            or str(r["mime_type"] or "") == "image/heic"
-                            or lower_name.endswith((".heic", ".heif"))
-                        ):
-                            continue
-                        seen_chat_guids.add(g)
-                        mime = str(r["mime_type"] or "image/jpeg")
-                        dim_path = ""
-                        if exists_on_disk:
-                            cached_target = self._cached_converted_jpeg_path(real_p, None)
-                            if os.path.exists(cached_target):
-                                dim_path = cached_target
-                                mime = "image/jpeg"
+                    while len(chat_photos) < window_limit:
+                        query_clauses = list(where_clauses)
+                        query_params: List[Any] = []
+                        chat_cur = _cursor_state.get("chat_cursor") if use_cursor else None
+                        if chat_cur is not None:
+                            last_bucket, last_rowid = chat_cur
+                            if has_transfer_state:
+                                query_clauses.append(
+                                    f"(({bucket_expr}) > ? OR (({bucket_expr}) = ? AND ROWID < ?))"
+                                )
+                                query_params.extend([int(last_bucket), int(last_bucket), int(last_rowid)])
                             else:
-                                dim_path = real_p
-                        chat_photos.append({
-                            "guid": g,
-                            "name": name,
-                            "mimeType": mime,
-                            "totalBytes": int(r["total_bytes"] or 0),
-                            "isCloudEvicted": (not exists_on_disk),
-                            "canUnpurge": True,
-                            "source": "chat_attachment",
-                            "transferState": t_state,
-                            "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(g)}/live",
-                            "width": 0,
-                            "height": 0,
-                            "isPortrait": False,
-                            "_dimPath": dim_path,
-                        })
-                        if len(chat_photos) >= window_limit:
+                                query_clauses.append("ROWID < ?")
+                                query_params.append(int(last_rowid))
+                        query_params.append(batch_fetch)
+                        chat_sql = f"""
+                            SELECT ROWID AS _rowid, ({bucket_expr}) AS _bucket,
+                                   guid, filename, mime_type, total_bytes,
+                                   {('transfer_state' if has_transfer_state else '5 AS transfer_state')},
+                                   {('transfer_name' if has_transfer_name else "'' AS transfer_name")}
+                            FROM attachment
+                            WHERE {' AND '.join(query_clauses)}
+                            {order_clause}
+                            LIMIT ?
+                        """
+                        rows = conn.execute(chat_sql, tuple(query_params)).fetchall()
+                        if not rows:
+                            if use_cursor:
+                                _cursor_state["chat_exhausted"] = True
+                            break
+                        for r in rows:
+                            if use_cursor:
+                                _cursor_state["chat_cursor"] = (int(r["_bucket"]), int(r["_rowid"]))
+                            g = str(r["guid"] or "").strip()
+                            if not g or g in seen_chat_guids:
+                                continue
+                            fn = str(r["filename"] or "").strip()
+                            raw_path = os.path.expanduser(fn) if fn else ""
+                            real_p = os.path.realpath(raw_path) if raw_path else ""
+                            exists_on_disk = bool(real_p and os.path.exists(real_p))
+                            t_state = int(r["transfer_state"] or 0) if "transfer_state" in r.keys() else 5
+                            name = (
+                                str(r["transfer_name"] or "").strip()
+                                or (os.path.basename(real_p) if real_p else "")
+                                or f"photo_{g[:8]}.jpg"
+                            )
+                            lower_name = name.lower()
+                            # Strictly filter out stickers, GIFs, and desktop pastes (IMG_*, <id>__*, or HEIC)
+                            if not (
+                                name.startswith("IMG_")
+                                or "__" in name
+                                or str(r["mime_type"] or "") == "image/heic"
+                                or lower_name.endswith((".heic", ".heif"))
+                            ):
+                                continue
+                            seen_chat_guids.add(g)
+                            mime = str(r["mime_type"] or "image/jpeg")
+                            dim_path = ""
+                            if exists_on_disk:
+                                cached_target = self._cached_converted_jpeg_path(real_p, None)
+                                if os.path.exists(cached_target):
+                                    dim_path = cached_target
+                                    mime = "image/jpeg"
+                                else:
+                                    dim_path = real_p
+                            chat_photos.append({
+                                "guid": g,
+                                "name": name,
+                                "mimeType": mime,
+                                "totalBytes": int(r["total_bytes"] or 0),
+                                "isCloudEvicted": (not exists_on_disk),
+                                "canUnpurge": True,
+                                "source": "chat_attachment",
+                                "transferState": t_state,
+                                "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(g)}/live",
+                                "width": 0,
+                                "height": 0,
+                                "isPortrait": False,
+                                "_dimPath": dim_path,
+                            })
+                            if len(chat_photos) >= window_limit:
+                                break
+                        if not use_cursor or len(rows) < batch_fetch:
+                            if use_cursor and len(rows) < batch_fetch:
+                                _cursor_state["chat_exhausted"] = True
                             break
                 finally:
                     conn.close()
@@ -3129,95 +3165,118 @@ class BluePillEngine:
                 self.logger.warning("[photos] chat.db image query failed: %s", exc)
 
         # 2. Query Photos.sqlite with reserved capacity so chat attachments never starve Photos library assets
-        if has_photos_db:
+        if has_photos_db and len(lib_photos) < window_limit and (not use_cursor or not _cursor_state.get("lib_exhausted")):
             try:
                 pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
                 try:
                     pconn.row_factory = sqlite3.Row
                     asset_count_row = pconn.execute("SELECT count(*) FROM ZASSET;").fetchone()
                     if asset_count_row and asset_count_row[0] > 0:
-                        rows = pconn.execute(
-                            """
-                            SELECT ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY
-                            FROM ZASSET
-                            WHERE ZFILENAME IS NOT NULL
-                              AND (ZTRASHEDSTATE IS NULL OR ZTRASHEDSTATE = 0)
-                              AND (
-                                ZUNIFORMTYPEIDENTIFIER IS NULL
-                                OR (
-                                  LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%movie%'
-                                  AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%video%'
-                                  AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%mpeg%'
-                                  AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%quicktime%'
-                                  AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%audio%'
+                        needed_lib = window_limit - len(lib_photos)
+                        lib_batch_fetch = max(needed_lib, 60)
+                        while len(lib_photos) < window_limit:
+                            lib_cur = _cursor_state.get("lib_cursor") if use_cursor else None
+                            lib_cursor_sql = ""
+                            lib_params: List[Any] = []
+                            if lib_cur is not None:
+                                last_zdate, last_rowid = lib_cur
+                                lib_cursor_sql = "AND (COALESCE(ZDATECREATED, 0) < ? OR (COALESCE(ZDATECREATED, 0) = ? AND ROWID < ?))"
+                                lib_params.extend([float(last_zdate), float(last_zdate), int(last_rowid)])
+                            lib_params.append(lib_batch_fetch)
+                            rows = pconn.execute(
+                                f"""
+                                SELECT ROWID AS _rowid, COALESCE(ZDATECREATED, 0) AS _zdate,
+                                       ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY
+                                FROM ZASSET
+                                WHERE ZFILENAME IS NOT NULL
+                                  AND (ZTRASHEDSTATE IS NULL OR ZTRASHEDSTATE = 0)
+                                  AND (
+                                    ZUNIFORMTYPEIDENTIFIER IS NULL
+                                    OR (
+                                      LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%movie%'
+                                      AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%video%'
+                                      AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%mpeg%'
+                                      AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%quicktime%'
+                                      AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%audio%'
+                                    )
+                                  )
+                                  AND LOWER(ZFILENAME) NOT LIKE '%.mov'
+                                  AND LOWER(ZFILENAME) NOT LIKE '%.mp4'
+                                  AND LOWER(ZFILENAME) NOT LIKE '%.m4v'
+                                  AND LOWER(ZFILENAME) NOT LIKE '%.avi'
+                                  AND LOWER(ZFILENAME) NOT LIKE '%.mkv'
+                                  {lib_cursor_sql}
+                                ORDER BY COALESCE(ZDATECREATED, 0) DESC, ROWID DESC LIMIT ?
+                                """,
+                                tuple(lib_params),
+                            ).fetchall()
+                            if not rows:
+                                if use_cursor:
+                                    _cursor_state["lib_exhausted"] = True
+                                break
+                            for ar in rows:
+                                if use_cursor:
+                                    _cursor_state["lib_cursor"] = (float(ar["_zdate"] or 0.0), int(ar["_rowid"]))
+                                zuuid = str(ar["ZUUID"] or "").strip()
+                                if not zuuid or zuuid in seen_lib_guids:
+                                    continue
+                                zfn = str(ar["ZFILENAME"] or f"asset_{zuuid[:8]}").strip()
+                                zdir = str(ar["ZDIRECTORY"] or "").strip()
+                                resolved_asset: Optional[str] = None
+                                candidates = []
+                                if zdir and zfn:
+                                    candidates.append(os.path.join(photos_lib, "originals", zdir, zfn))
+                                    candidates.append(os.path.join(photos_lib, "resources", "renders", zdir, zfn))
+                                    candidates.append(os.path.join(photos_lib, "resources", "derivatives", zdir, zfn))
+                                if zfn and zuuid:
+                                    candidates.append(os.path.join(photos_lib, "originals", zuuid[0].upper(), zfn))
+                                for cand in candidates:
+                                    rc = os.path.realpath(cand)
+                                    if os.path.exists(rc):
+                                        resolved_asset = rc
+                                        break
+                                mime = (mimetypes.guess_type(resolved_asset or zfn)[0] or "image/jpeg")
+                                if not mime.startswith("image/"):
+                                    continue
+                                size_bytes = 0
+                                dim_path = ""
+                                if resolved_asset:
+                                    self._photos_library_assets[zuuid] = (resolved_asset, mime)
+                                    try:
+                                        size_bytes = int(os.path.getsize(resolved_asset))
+                                    except OSError:
+                                        size_bytes = 0
+                                    cached_target = self._cached_converted_jpeg_path(resolved_asset, None)
+                                    if os.path.exists(cached_target):
+                                        dim_path = cached_target
+                                        mime = "image/jpeg"
+                                    else:
+                                        dim_path = resolved_asset
+                                can_unpurge = bool(
+                                    resolved_asset is not None
+                                    or (sys.platform == "darwin" and bool(zdir and zfn) and os.path.exists("/usr/bin/brctl"))
                                 )
-                              )
-                              AND LOWER(ZFILENAME) NOT LIKE '%.mov'
-                              AND LOWER(ZFILENAME) NOT LIKE '%.mp4'
-                              AND LOWER(ZFILENAME) NOT LIKE '%.m4v'
-                              AND LOWER(ZFILENAME) NOT LIKE '%.avi'
-                              AND LOWER(ZFILENAME) NOT LIKE '%.mkv'
-                            ORDER BY ZDATECREATED DESC LIMIT ?
-                            """,
-                            (window_limit,),
-                        ).fetchall()
-                        for ar in rows:
-                            zuuid = str(ar["ZUUID"] or "").strip()
-                            if not zuuid or zuuid in seen_lib_guids:
-                                continue
-                            zfn = str(ar["ZFILENAME"] or f"asset_{zuuid[:8]}").strip()
-                            zdir = str(ar["ZDIRECTORY"] or "").strip()
-                            resolved_asset: Optional[str] = None
-                            candidates = []
-                            if zdir and zfn:
-                                candidates.append(os.path.join(photos_lib, "originals", zdir, zfn))
-                                candidates.append(os.path.join(photos_lib, "resources", "renders", zdir, zfn))
-                                candidates.append(os.path.join(photos_lib, "resources", "derivatives", zdir, zfn))
-                            if zfn and zuuid:
-                                candidates.append(os.path.join(photos_lib, "originals", zuuid[0].upper(), zfn))
-                            for cand in candidates:
-                                rc = os.path.realpath(cand)
-                                if os.path.exists(rc):
-                                    resolved_asset = rc
+                                seen_lib_guids.add(zuuid)
+                                lib_photos.append({
+                                    "guid": zuuid,
+                                    "name": zfn,
+                                    "mimeType": mime,
+                                    "totalBytes": size_bytes,
+                                    "isCloudEvicted": resolved_asset is None,
+                                    "canUnpurge": can_unpurge,
+                                    "source": "photos_library",
+                                    "transferState": 5 if resolved_asset else 0,
+                                    "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(zuuid)}/live",
+                                    "width": 0,
+                                    "height": 0,
+                                    "isPortrait": False,
+                                    "_dimPath": dim_path,
+                                })
+                                if len(lib_photos) >= window_limit:
                                     break
-                            mime = (mimetypes.guess_type(resolved_asset or zfn)[0] or "image/jpeg")
-                            if not mime.startswith("image/"):
-                                continue
-                            size_bytes = 0
-                            dim_path = ""
-                            if resolved_asset:
-                                self._photos_library_assets[zuuid] = (resolved_asset, mime)
-                                try:
-                                    size_bytes = int(os.path.getsize(resolved_asset))
-                                except OSError:
-                                    size_bytes = 0
-                                cached_target = self._cached_converted_jpeg_path(resolved_asset, None)
-                                if os.path.exists(cached_target):
-                                    dim_path = cached_target
-                                    mime = "image/jpeg"
-                                else:
-                                    dim_path = resolved_asset
-                            can_unpurge = bool(
-                                resolved_asset is not None
-                                or (sys.platform == "darwin" and bool(zdir and zfn) and os.path.exists("/usr/bin/brctl"))
-                            )
-                            seen_lib_guids.add(zuuid)
-                            lib_photos.append({
-                                "guid": zuuid,
-                                "name": zfn,
-                                "mimeType": mime,
-                                "totalBytes": size_bytes,
-                                "isCloudEvicted": resolved_asset is None,
-                                "canUnpurge": can_unpurge,
-                                "source": "photos_library",
-                                "transferState": 5 if resolved_asset else 0,
-                                "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(zuuid)}/live",
-                                "width": 0,
-                                "height": 0,
-                                "isPortrait": False,
-                                "_dimPath": dim_path,
-                            })
-                            if len(lib_photos) >= window_limit:
+                            if not use_cursor or len(rows) < lib_batch_fetch:
+                                if use_cursor and len(rows) < lib_batch_fetch:
+                                    _cursor_state["lib_exhausted"] = True
                                 break
                 finally:
                     pconn.close()
@@ -3227,28 +3286,53 @@ class BluePillEngine:
         # Prefix-stable interleave with in-order cross-source deduplication so every window
         # is an exact prefix of every larger window across pagination offsets even when sources share GUIDs
         photos: List[Dict[str, Any]] = []
-        seen_interleaved: set[str] = set()
-        ci = li = 0
-        while len(photos) < window_limit and (ci < len(chat_photos) or li < len(lib_photos)):
-            while ci < len(chat_photos):
-                cand_c = chat_photos[ci]
-                ci += 1
-                cg = cand_c["guid"]
-                if cg not in seen_interleaved:
-                    seen_interleaved.add(cg)
-                    photos.append(cand_c)
+        if use_cursor:
+            seen_interleaved: set[str] = _cursor_state.setdefault("seen_interleaved", set())
+            next_turn = str(_cursor_state.get("next_turn") or "chat")
+            while len(photos) < window_limit and (chat_photos or lib_photos):
+                if next_turn == "chat":
+                    next_turn = "lib"
+                    while chat_photos:
+                        cand_c = chat_photos.pop(0)
+                        cg = cand_c["guid"]
+                        if cg not in seen_interleaved:
+                            seen_interleaved.add(cg)
+                            photos.append(cand_c)
+                            break
+                else:
+                    next_turn = "chat"
+                    while lib_photos:
+                        cand_l = lib_photos.pop(0)
+                        lg = cand_l["guid"]
+                        if lg not in seen_interleaved:
+                            seen_interleaved.add(lg)
+                            photos.append(cand_l)
+                            break
+            _cursor_state["next_turn"] = next_turn
+            page_photos = photos[:clamped_limit]
+        else:
+            seen_interleaved = set()
+            ci = li = 0
+            while len(photos) < window_limit and (ci < len(chat_photos) or li < len(lib_photos)):
+                while ci < len(chat_photos):
+                    cand_c = chat_photos[ci]
+                    ci += 1
+                    cg = cand_c["guid"]
+                    if cg not in seen_interleaved:
+                        seen_interleaved.add(cg)
+                        photos.append(cand_c)
+                        break
+                if len(photos) >= window_limit:
                     break
-            if len(photos) >= window_limit:
-                break
-            while li < len(lib_photos):
-                cand_l = lib_photos[li]
-                li += 1
-                lg = cand_l["guid"]
-                if lg not in seen_interleaved:
-                    seen_interleaved.add(lg)
-                    photos.append(cand_l)
-                    break
-        page_photos = photos[clamped_offset : clamped_offset + clamped_limit]
+                while li < len(lib_photos):
+                    cand_l = lib_photos[li]
+                    li += 1
+                    lg = cand_l["guid"]
+                    if lg not in seen_interleaved:
+                        seen_interleaved.add(lg)
+                        photos.append(cand_l)
+                        break
+            page_photos = photos[clamped_offset : clamped_offset + clamped_limit]
         for item in page_photos:
             dim_path = str(item.pop("_dimPath", "") or "")
             if include_dimensions and dim_path:
@@ -3258,20 +3342,38 @@ class BluePillEngine:
                 item["isPortrait"] = is_p
         return page_photos
 
-    def sync_icloud_photos(self, limit: int = 250, offset: int = 0, job_id: Optional[str] = None) -> Dict[str, Any]:
+    def sync_icloud_photos(
+        self,
+        limit: int = 250,
+        offset: int = 0,
+        job_id: Optional[str] = None,
+        _cursor_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Batch unpurges evicted iCloud photos via download_cloud_attachment
         and transcodes on-disk HEIC/TIFF files into the unified conversion cache.
         """
         clamped_limit = max(1, min(int(limit or 250), 250))
-        clamped_offset = min(max(0, int(offset or 0)), 100000)
+        clamped_offset = max(0, int(offset or 0))
         batch = self.query_icloud_photos(
             limit=clamped_limit + 1,
             offset=clamped_offset,
             include_dimensions=False,
             _max_limit=clamped_limit + 1,
+            _cursor_state=_cursor_state,
         )
         has_more = len(batch) > clamped_limit
+        if has_more and _cursor_state is not None:
+            extra_item = batch[clamped_limit]
+            seen_inter = _cursor_state.get("seen_interleaved")
+            if isinstance(seen_inter, set):
+                seen_inter.discard(extra_item.get("guid"))
+            if extra_item.get("source") == "chat_attachment":
+                _cursor_state.setdefault("chat_buffer", []).insert(0, extra_item)
+                _cursor_state["next_turn"] = "chat"
+            else:
+                _cursor_state.setdefault("lib_buffer", []).insert(0, extra_item)
+                _cursor_state["next_turn"] = "lib"
         photos = batch[:clamped_limit]
         next_offset = (clamped_offset + len(photos)) if has_more else None
         os.makedirs(self.icloud_photos_cache_dir, mode=0o700, exist_ok=True)
@@ -3392,6 +3494,7 @@ class BluePillEngine:
 
         def _worker() -> None:
             cur_offset = clamped_offset
+            cursor_state: Optional[Dict[str, Any]] = {} if cur_offset == 0 else None
             total_acc = 0
             proc_acc = 0
             sync_acc = 0
@@ -3401,7 +3504,12 @@ class BluePillEngine:
             errors_acc: List[Dict[str, str]] = []
             try:
                 while not self._stop_event.is_set():
-                    res = self.sync_icloud_photos(limit=clamped_limit, offset=cur_offset, job_id=job_id)
+                    res = self.sync_icloud_photos(
+                        limit=clamped_limit,
+                        offset=cur_offset,
+                        job_id=job_id,
+                        _cursor_state=cursor_state,
+                    )
                     total_acc += int(res.get("total", 0))
                     proc_acc += int(res.get("processed", 0))
                     sync_acc += int(res.get("synced", 0))
@@ -3633,10 +3741,10 @@ class BluePillEngine:
         try:
             try:
                 decomp = zlib.decompress(zdata, 32 + zlib.MAX_WBITS)
-            except (zlib.error, OSError):
+            except (zlib.error, OSError, EOFError):
                 try:
                     decomp = zlib.decompress(zdata)
-                except (zlib.error, OSError):
+                except (zlib.error, OSError, EOFError):
                     decomp = gzip.decompress(zdata)
 
             # 1. Parse top-level NoteStoreProto -> Document (field 2, wire_type 2)
@@ -3662,7 +3770,7 @@ class BluePillEngine:
                             text = val.decode("utf-8", errors="replace").replace("\ufffc", "")
                             if text.strip():
                                 return text.strip()
-        except (zlib.error, OSError, ValueError, UnicodeError, IndexError):
+        except (zlib.error, OSError, EOFError, ValueError, UnicodeError, IndexError):
             pass
 
         # Fallback to UTF-8 regex scan if structured protobuf unpack failed
@@ -3677,7 +3785,7 @@ class BluePillEngine:
                 candidate = "\n\n".join(text_parts).strip().replace("\ufffc", "")
                 if len(candidate) >= len(fallback_snippet):
                     return candidate
-        except (zlib.error, OSError, ValueError, UnicodeError):
+        except (zlib.error, OSError, EOFError, ValueError, UnicodeError):
             pass
         return fallback_snippet
 
@@ -6498,8 +6606,9 @@ def main() -> int:
         offset = 0
         totals = {"total": 0, "processed": 0, "synced": 0, "unpurged": 0, "transcoded": 0, "failed": 0}
         cli_errors: List[Dict[str, str]] = []
+        cli_cursor_state: Dict[str, Any] = {}
         while True:
-            res = engine.sync_icloud_photos(limit=250, offset=offset)
+            res = engine.sync_icloud_photos(limit=250, offset=offset, _cursor_state=cli_cursor_state)
             for k in totals:
                 totals[k] += int(res.get(k, 0))
             for err_item in res.get("errors") or []:
