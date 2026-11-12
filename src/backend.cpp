@@ -7843,7 +7843,7 @@ void Backend::scheduleIcloudMutationRetry(bool immediate) {
     if (earliestNextMs == std::numeric_limits<qint64>::max()) {
         return;
     }
-    const int delayMs = static_cast<int>(qBound<qint64>(50, earliestNextMs - nowMs, 30000));
+    const int delayMs = static_cast<int>(qBound(qint64(50), earliestNextMs - nowMs, qint64(30000)));
     m_icloudMutationRetryScheduled = true;
     QTimer::singleShot(delayMs, this, [this]() {
         m_icloudMutationRetryScheduled = false;
