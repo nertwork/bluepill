@@ -3386,24 +3386,122 @@ private slots:
         backend.saveIcloudNote(QStringLiteral("note_restart_seq"), QStringLiteral("Restart Seq Note"), QStringLiteral("Body"), QStringLiteral("Notes"));
         const quint64 preRestartGen = backend.icloudNotesGenerationForTest();
         QVERIFY(preRestartGen > 0);
+
+        // Start a local mock HTTP relay to test:
+        // 1) Delayed replay response after restart when a newer edit is queued while replay is in flight
+        // 2) Concurrent mutation A failing (entering backoff) followed by mutation B succeeding (triggering scheduleIcloudMutationRetry(true))
+        //    without prematurely retrying mutation A before its backoff deadline
+        QTcpServer mockServer;
+        QVERIFY(mockServer.listen(QHostAddress::LocalHost, 0));
+        const quint16 mockPort = mockServer.serverPort();
+        int noteACount = 0;
+        int noteBCount = 0;
+        int restartNoteCount = 0;
+        qint64 secondRestartBaseRev = -1;
+        QTcpSocket *stalledRestartSock = nullptr;
+
+        auto sendHttpJson = [](QTcpSocket *s, int status, const QByteArray &statusText, const QByteArray &jsonBody) {
+            const QByteArray resp = "HTTP/1.1 " + QByteArray::number(status) + " " + statusText + "\r\n"
+                                    "Content-Type: application/json\r\n"
+                                    "Content-Length: " + QByteArray::number(jsonBody.size()) + "\r\n"
+                                    "Connection: close\r\n\r\n" + jsonBody;
+            s->write(resp);
+            s->flush();
+            s->disconnectFromHost();
+        };
+
+        QObject::connect(&mockServer, &QTcpServer::newConnection, &mockServer, [&]() {
+            while (QTcpSocket *sock = mockServer.nextPendingConnection()) {
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
+                    const QByteArray reqData = sock->readAll();
+                    const int bodyIdx = reqData.indexOf("\r\n\r\n");
+                    if (bodyIdx < 0) return;
+                    const QByteArray rawBody = reqData.mid(bodyIdx + 4);
+                    const QJsonObject bodyObj = QJsonDocument::fromJson(rawBody).object();
+                    const QString reqId = bodyObj.value(QStringLiteral("id")).toString();
+
+                    if (reqId == QStringLiteral("note_restart_seq")) {
+                        restartNoteCount++;
+                        if (restartNoteCount == 1) {
+                            // Hold the first replayed request in flight so a post-restart edit can queue behind it
+                            stalledRestartSock = sock;
+                            return;
+                        }
+                        secondRestartBaseRev = bodyObj.value(QStringLiteral("baseRevision")).toVariant().toLongLong();
+                        sendHttpJson(sock, 200, "OK",
+                                     R"({"status":200,"data":[{"id":"note_restart_seq","title":"Newer Post-Restart Edit","body":"Body 2","folder":"Notes","revision":3}]})");
+                        return;
+                    }
+                    if (reqId == QStringLiteral("note_conc_a")) {
+                        noteACount++;
+                        sendHttpJson(sock, 503, "Service Unavailable",
+                                     R"({"status":503,"message":"Transient upstream failure"})");
+                        return;
+                    }
+                    if (reqId == QStringLiteral("note_conc_b")) {
+                        noteBCount++;
+                        sendHttpJson(sock, 200, "OK",
+                                     R"({"status":200,"data":[{"id":"note_conc_b","title":"Note B","body":"Body B","folder":"Notes","revision":1}]})");
+                        return;
+                    }
+                    sendHttpJson(sock, 200, "OK", R"({"status":200,"data":[]})");
+                });
+            }
+        });
+
+        const QByteArray prevUrl = qgetenv("BLUEBUBBLES_URL");
+        const QByteArray prevPass = qgetenv("BLUEBUBBLES_PASSWORD");
+        qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(mockPort).toUtf8());
+        qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+
         Backend restartedBackend(false);
         restartedBackend.setStateFilePath(statePath);
+        restartedBackend.loadCredentials();
         QVERIFY(restartedBackend.icloudNotesGenerationForTest() >= preRestartGen);
-        const QString postRestartId = restartedBackend.saveIcloudNote(QString(), QStringLiteral("Post-Restart Note"), QStringLiteral("Body 2"), QStringLiteral("Notes"));
-        QVERIFY(!postRestartId.isEmpty());
+
+        // Trigger replay of restored pending note_restart_seq and wait until it is in flight at the mock server
+        restartedBackend.scheduleIcloudMutationRetryForTest(true);
+        QTRY_COMPARE_WITH_TIMEOUT(restartNoteCount, 1, 1500);
+        QVERIFY(stalledRestartSock != nullptr);
+
+        // Save a newer edit to note_restart_seq while the initial replay is still in flight
+        restartedBackend.saveIcloudNote(QStringLiteral("note_restart_seq"), QStringLiteral("Newer Post-Restart Edit"), QStringLiteral("Body 2"), QStringLiteral("Notes"));
         QVERIFY(restartedBackend.icloudNotesGenerationForTest() > preRestartGen);
 
-        // Verify per-mutation exponential backoff is preserved when a different mutation succeeds and triggers scheduleIcloudMutationRetry(true)
-        const QString failKey = QStringLiteral("note_save:note_backoff_a");
-        backend.recordIcloudMutationFailureForTest(failKey);
-        QCOMPARE(backend.icloudMutationRetryCountForTest(failKey), 1);
-        QVERIFY(backend.isIcloudMutationInBackoffForTest(failKey));
-        backend.scheduleIcloudMutationRetryForTest(true);
-        QCOMPARE(backend.icloudMutationRetryCountForTest(failKey), 1);
-        QVERIFY(backend.isIcloudMutationInBackoffForTest(failKey));
-        backend.clearIcloudMutationRetryStateForTest(failKey);
-        QCOMPARE(backend.icloudMutationRetryCountForTest(failKey), 0);
-        QVERIFY(!backend.isIcloudMutationInBackoffForTest(failKey));
+        // Now complete the first in-flight replay with revision=2; the callback must NOT drop the newer edit,
+        // and must advance the queued edit's baseRevision to 2 and immediately replay it
+        sendHttpJson(stalledRestartSock, 200, "OK",
+                     R"({"status":200,"data":[{"id":"note_restart_seq","title":"Restart Seq Note","body":"Body","folder":"Notes","revision":2}]})");
+        stalledRestartSock = nullptr;
+        QTRY_COMPARE_WITH_TIMEOUT(restartNoteCount, 2, 1500);
+        QCOMPARE(secondRestartBaseRev, qint64(2));
+
+        // Now test concurrent mutations A (fails -> enters backoff) and B (succeeds -> calls scheduleIcloudMutationRetry(true))
+        Backend liveBackend(false);
+        liveBackend.setStateFilePath(tempDir.filePath(QStringLiteral("state_live_backoff.json")));
+        liveBackend.loadCredentials();
+
+        const QString keyA = QStringLiteral("note_save:note_conc_a");
+        liveBackend.saveIcloudNote(QStringLiteral("note_conc_a"), QStringLiteral("Note A"), QStringLiteral("Body A"), QStringLiteral("Notes"));
+        QTRY_COMPARE_WITH_TIMEOUT(noteACount, 1, 1500);
+        QTRY_COMPARE_WITH_TIMEOUT(liveBackend.icloudMutationRetryCountForTest(keyA), 1, 1500);
+        QVERIFY(liveBackend.isIcloudMutationInBackoffForTest(keyA));
+
+        // Dispatch mutation B which succeeds with HTTP 200 and triggers scheduleIcloudMutationRetry(true)
+        liveBackend.saveIcloudNote(QStringLiteral("note_conc_b"), QStringLiteral("Note B"), QStringLiteral("Body B"), QStringLiteral("Notes"));
+        QTRY_COMPARE_WITH_TIMEOUT(noteBCount, 1, 1500);
+        QTest::qWait(80);
+
+        // Verify mutation A was NOT retried early before its 1000ms backoff deadline when mutation B succeeded
+        QCOMPARE(noteACount, 1);
+        QCOMPARE(liveBackend.icloudMutationRetryCountForTest(keyA), 1);
+        QVERIFY(liveBackend.isIcloudMutationInBackoffForTest(keyA));
+        liveBackend.clearIcloudMutationRetryStateForTest(keyA);
+        QCOMPARE(liveBackend.icloudMutationRetryCountForTest(keyA), 0);
+        QVERIFY(!liveBackend.isIcloudMutationInBackoffForTest(keyA));
+
+        if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
+        if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);
     }
 
     void testIcloudCalendarEventsLifecycle() {

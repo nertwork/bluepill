@@ -4147,6 +4147,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
               <button onclick="resolveNoteConflictReload()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;">Load Server Version</button>
             </div>
           </div>
+          <div id="noteErrorBanner" style="display:none;background:#3d1418;border:1px solid #f85149;border-radius:6px;padding:8px 10px;font-size:12px;color:#f0f6fc;"></div>
           <input id="noteTitleInput" placeholder="Note Title" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:14px;font-weight:600;" />
           <input id="noteFolderInput" placeholder="Folder (e.g. Notes, Work)" value="Notes" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--muted);font-size:12px;" />
           <textarea id="noteBodyInput" placeholder="Write note content..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--text);font-size:13px;resize:none;font-family:inherit;"></textarea>
@@ -4197,7 +4198,10 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     let allNotes = [];
     let selectedNoteId = null;
     let selectedNoteRevision = null;
+    let noteSelectionToken = 0;
     let conflictServerRevision = null;
+    let conflictNoteId = null;
+    let conflictSelectionToken = 0;
     let allEvents = [];
 
     function openNotesModal() {
@@ -4238,12 +4242,17 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
     function filterNotes() { renderNotesList(); }
     function selectNote(id) {
+      noteSelectionToken += 1;
       selectedNoteId = id;
       const n = allNotes.find(item => item.id === id);
       selectedNoteRevision = (n && typeof n.revision === 'number') ? n.revision : 1;
       conflictServerRevision = null;
+      conflictNoteId = null;
+      conflictSelectionToken = 0;
       const banner = document.getElementById('noteConflictBanner');
       if (banner) banner.style.display = 'none';
+      const errBanner = document.getElementById('noteErrorBanner');
+      if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
       if (n) {
         document.getElementById('noteTitleInput').value = n.title || '';
         document.getElementById('noteFolderInput').value = n.folder || 'Notes';
@@ -4257,11 +4266,16 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       renderNotesList();
     }
     function newNote() {
+      noteSelectionToken += 1;
       selectedNoteId = 'note-' + Date.now();
       selectedNoteRevision = 0;
       conflictServerRevision = null;
+      conflictNoteId = null;
+      conflictSelectionToken = 0;
       const banner = document.getElementById('noteConflictBanner');
       if (banner) banner.style.display = 'none';
+      const errBanner = document.getElementById('noteErrorBanner');
+      if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
       document.getElementById('noteTitleInput').value = '';
       document.getElementById('noteFolderInput').value = 'Notes';
       document.getElementById('noteBodyInput').value = '';
@@ -4273,9 +4287,12 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const title = document.getElementById('noteTitleInput').value.trim() || 'Untitled Note';
       const folder = document.getElementById('noteFolderInput').value.trim() || 'Notes';
       const body = document.getElementById('noteBodyInput').value;
-      const nid = selectedNoteId || ('note-' + Date.now());
+      if (!selectedNoteId) selectedNoteId = 'note-' + Date.now();
+      const nid = selectedNoteId;
+      const reqToken = noteSelectionToken;
       const reqBody = {id: nid, title, folder, body, updatedAtMs: Date.now()};
       if (forceOverwrite === true) {
+        if (reqToken !== conflictSelectionToken || nid !== conflictNoteId) return;
         if (conflictServerRevision !== null) reqBody.baseRevision = conflictServerRevision;
         reqBody.forceOverwrite = true;
       } else if (selectedNoteRevision !== null) {
@@ -4287,23 +4304,46 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         body: JSON.stringify(reqBody)
       });
       const j = await resp.json();
-      allNotes = j.data || allNotes;
+      if (Array.isArray(j.data)) allNotes = j.data;
+      if (reqToken !== noteSelectionToken || selectedNoteId !== nid) {
+        renderNotesList();
+        return;
+      }
       const banner = document.getElementById('noteConflictBanner');
+      const errBanner = document.getElementById('noteErrorBanner');
       if (resp.ok && j.status === 200) {
         if (banner) banner.style.display = 'none';
+        if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
         conflictServerRevision = null;
+        conflictNoteId = null;
+        conflictSelectionToken = 0;
         selectNote(nid);
-      } else {
+      } else if (j.status === 409) {
+        if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
         const srvNote = allNotes.find(item => item.id === nid);
         conflictServerRevision = (srvNote && typeof srvNote.revision === 'number') ? srvNote.revision : null;
+        conflictNoteId = nid;
+        conflictSelectionToken = reqToken;
         if (banner) banner.style.display = 'flex';
+        renderNotesList();
+      } else {
+        if (banner) banner.style.display = 'none';
+        conflictServerRevision = null;
+        conflictNoteId = null;
+        conflictSelectionToken = 0;
+        if (errBanner) {
+          errBanner.textContent = j.message || ('Save failed (HTTP ' + (j.status || resp.status) + ')');
+          errBanner.style.display = 'block';
+        }
         renderNotesList();
       }
     }
     async function resolveNoteConflictOverwrite() {
+      if (noteSelectionToken !== conflictSelectionToken || selectedNoteId !== conflictNoteId) return;
       await saveCurrentNote(true);
     }
     function resolveNoteConflictReload() {
+      if (noteSelectionToken !== conflictSelectionToken || selectedNoteId !== conflictNoteId) return;
       if (selectedNoteId) selectNote(selectedNoteId);
     }
     async function deleteCurrentNote() {
@@ -5020,7 +5060,9 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             try:
                 self._send_json(200, self.engine.save_icloud_note(body, raise_on_conflict=True))
             except ValueError as exc:
-                self._send_json(409, self.engine.query_icloud_notes(), str(exc))
+                status_code = 409 if str(exc).startswith("Conflict:") else 400
+                data = self.engine.query_icloud_notes() if status_code == 409 else None
+                self._send_json(status_code, data, str(exc))
             return
 
         if path == "/api/v1/icloud/events":
@@ -5029,7 +5071,9 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             try:
                 self._send_json(200, self.engine.save_icloud_event(body, raise_on_conflict=True))
             except ValueError as exc:
-                self._send_json(409, self.engine.query_icloud_events(), str(exc))
+                status_code = 409 if str(exc).startswith("Conflict:") else 400
+                data = self.engine.query_icloud_events() if status_code == 409 else None
+                self._send_json(status_code, data, str(exc))
             return
 
         m_att_dl = re.match(r"^/api/v1/attachment/([^/]+)/download$", path)
@@ -5132,20 +5176,22 @@ def run_stdio_loop(engine: BluePillEngine) -> int:
         line = raw_line.strip()
         if not line:
             continue
+        req_id = None
         try:
             req = json.loads(line)
-            req_id = req.get("id")
+            if isinstance(req, dict):
+                req_id = req.get("id")
             method = str(req.get("method") or "")
             params = req.get("params") if isinstance(req.get("params"), dict) else {}
             data = engine.handle_rpc(method, params)
             resp = {"id": req_id, "status": 200, "data": data}
         except PermissionError as exc:
-            resp = {"id": req_id if "req_id" in locals() else None, "status": 403, "message": str(exc), "data": None}
+            resp = {"id": req_id, "status": 403, "message": str(exc), "data": None}
         except ValueError as exc:
             status_code = 409 if str(exc).startswith("Conflict:") else 400
-            resp = {"id": req_id if "req_id" in locals() else None, "status": status_code, "message": str(exc), "data": None}
+            resp = {"id": req_id, "status": status_code, "message": str(exc), "data": None}
         except Exception as exc:
-            resp = {"id": None, "status": 500, "message": str(exc), "data": None}
+            resp = {"id": req_id, "status": 500, "message": str(exc), "data": None}
         sys.stdout.write(json.dumps(resp) + "\n")
         sys.stdout.flush()
     return 0
@@ -5337,12 +5383,12 @@ def run_selftest(engine: BluePillEngine) -> int:
         # Verify read-only/non-local RPC delete raises PermissionError
         try:
             test_eng.handle_rpc("icloud.note.delete", {"id": "readonly-nonexistent-note"})
-            assert False, "RPC icloud.note.delete on non-local note should have raised PermissionError"
+            raise AssertionError("RPC icloud.note.delete on non-local note should have raised PermissionError")
         except PermissionError:
             pass
         try:
             test_eng.handle_rpc("icloud.event.delete", {"id": "readonly-nonexistent-event"})
-            assert False, "RPC icloud.event.delete on non-local event should have raised PermissionError"
+            raise AssertionError("RPC icloud.event.delete on non-local event should have raised PermissionError")
         except PermissionError:
             pass
 
@@ -5352,7 +5398,7 @@ def run_selftest(engine: BluePillEngine) -> int:
         assert isinstance(rev_n1.get("revision"), int) and rev_n1["revision"] >= 1
         try:
             test_eng.save_icloud_note({"id": "st-note-rev", "title": "V2-no-rev", "body": "B2"}, raise_on_conflict=True)
-            assert False, "Updating existing note without baseRevision should raise ValueError"
+            raise AssertionError("Updating existing note without baseRevision should raise ValueError")
         except ValueError:
             pass
         rev_notes2 = test_eng.save_icloud_note(

@@ -7836,6 +7836,7 @@ void Backend::scheduleIcloudMutationRetry(bool immediate) {
     qint64 earliestNextMs = std::numeric_limits<qint64>::max();
     for (auto it = m_icloudMutationNextRetryMs.begin(); it != m_icloudMutationNextRetryMs.end(); ++it) {
         if (m_icloudMutationPausedKeys.contains(it.key())) continue;
+        if (it.value() <= nowMs) continue; // already due: dispatched, in flight, or gated
         if (it.value() < earliestNextMs) {
             earliestNextMs = it.value();
         }
@@ -7877,6 +7878,7 @@ void Backend::replayPendingIcloudMutations() {
             scheduleIcloudMutationRetry(false);
             continue;
         }
+        m_icloudMutationNextRetryMs.remove(mutKey);
         const QVariantMap noteMap = it.value();
         const quint64 sentSeq = noteMap.value(QStringLiteral("clientMutationSeq")).toULongLong();
         const qint64 sentUpdatedAt = noteMap.value(QStringLiteral("updatedAtMs")).toLongLong();
@@ -7958,6 +7960,11 @@ void Backend::replayPendingIcloudMutations() {
                 }
                 return;
             }
+            if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudNoteDeletes.contains(noteId)) {
+                clearIcloudMutationRetryState(mutKey);
+                scheduleIcloudMutationRetry(true);
+                return;
+            }
             recordIcloudMutationFailure(mutKey);
         });
     }
@@ -7971,6 +7978,7 @@ void Backend::replayPendingIcloudMutations() {
             scheduleIcloudMutationRetry(false);
             continue;
         }
+        m_icloudMutationNextRetryMs.remove(mutKey);
         const quint64 gen = ++m_icloudNotesGeneration;
         const QString encodedId = QString::fromUtf8(QUrl::toPercentEncoding(noteId));
         QNetworkReply *reply = m_nam.deleteResource(makeRequest(QStringLiteral("/api/v1/icloud/notes/") + encodedId));
@@ -8020,6 +8028,11 @@ void Backend::replayPendingIcloudMutations() {
                 }
                 return;
             }
+            if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudNoteSaves.contains(noteId)) {
+                clearIcloudMutationRetryState(mutKey);
+                scheduleIcloudMutationRetry(true);
+                return;
+            }
             recordIcloudMutationFailure(mutKey);
         });
     }
@@ -8035,6 +8048,7 @@ void Backend::replayPendingIcloudMutations() {
             scheduleIcloudMutationRetry(false);
             continue;
         }
+        m_icloudMutationNextRetryMs.remove(mutKey);
         const QVariantMap evtMap = it.value();
         const quint64 sentSeq = evtMap.value(QStringLiteral("clientMutationSeq")).toULongLong();
         const qint64 sentUpdatedAt = evtMap.value(QStringLiteral("updatedAtMs")).toLongLong();
@@ -8117,6 +8131,11 @@ void Backend::replayPendingIcloudMutations() {
                 }
                 return;
             }
+            if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudEventDeletes.contains(evtId)) {
+                clearIcloudMutationRetryState(mutKey);
+                scheduleIcloudMutationRetry(true);
+                return;
+            }
             recordIcloudMutationFailure(mutKey);
         });
     }
@@ -8130,6 +8149,7 @@ void Backend::replayPendingIcloudMutations() {
             scheduleIcloudMutationRetry(false);
             continue;
         }
+        m_icloudMutationNextRetryMs.remove(mutKey);
         const quint64 gen = ++m_icloudEventsGeneration;
         const QString encodedId = QString::fromUtf8(QUrl::toPercentEncoding(evtId));
         QNetworkReply *reply = m_nam.deleteResource(makeRequest(QStringLiteral("/api/v1/icloud/events/") + encodedId));
@@ -8177,6 +8197,11 @@ void Backend::replayPendingIcloudMutations() {
                 if (m_pendingIcloudEventSaves.contains(evtId)) {
                     scheduleIcloudMutationRetry(true);
                 }
+                return;
+            }
+            if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudEventSaves.contains(evtId)) {
+                clearIcloudMutationRetryState(mutKey);
+                scheduleIcloudMutationRetry(true);
                 return;
             }
             recordIcloudMutationFailure(mutKey);
@@ -8357,6 +8382,11 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
                 }
                 return;
             }
+            if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudNoteDeletes.contains(actualId)) {
+                clearIcloudMutationRetryState(mutKey);
+                scheduleIcloudMutationRetry(true);
+                return;
+            }
             recordIcloudMutationFailure(mutKey);
         });
     }
@@ -8430,6 +8460,11 @@ void Backend::deleteIcloudNote(const QString &id) {
                 if (m_pendingIcloudNoteSaves.contains(id)) {
                     scheduleIcloudMutationRetry(true);
                 }
+                return;
+            }
+            if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudNoteSaves.contains(id)) {
+                clearIcloudMutationRetryState(mutKey);
+                scheduleIcloudMutationRetry(true);
                 return;
             }
             recordIcloudMutationFailure(mutKey);
@@ -8590,6 +8625,11 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
                 }
                 return;
             }
+            if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudEventDeletes.contains(id)) {
+                clearIcloudMutationRetryState(mutKey);
+                scheduleIcloudMutationRetry(true);
+                return;
+            }
             recordIcloudMutationFailure(mutKey);
         });
     }
@@ -8663,6 +8703,11 @@ void Backend::deleteIcloudEvent(const QString &id) {
                 if (m_pendingIcloudEventSaves.contains(id)) {
                     scheduleIcloudMutationRetry(true);
                 }
+                return;
+            }
+            if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudEventSaves.contains(id)) {
+                clearIcloudMutationRetryState(mutKey);
+                scheduleIcloudMutationRetry(true);
                 return;
             }
             recordIcloudMutationFailure(mutKey);
