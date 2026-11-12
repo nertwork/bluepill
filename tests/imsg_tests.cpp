@@ -3412,11 +3412,19 @@ private slots:
 
         QObject::connect(&mockServer, &QTcpServer::newConnection, &mockServer, [&]() {
             while (QTcpSocket *sock = mockServer.nextPendingConnection()) {
-                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
-                    const QByteArray reqData = sock->readAll();
-                    const int bodyIdx = reqData.indexOf("\r\n\r\n");
+                auto buf = std::make_shared<QByteArray>();
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock, buf]() {
+                    buf->append(sock->readAll());
+                    const int bodyIdx = buf->indexOf("\r\n\r\n");
                     if (bodyIdx < 0) return;
-                    const QByteArray rawBody = reqData.mid(bodyIdx + 4);
+                    const QByteArray headers = buf->left(bodyIdx).toLower();
+                    const int clIdx = headers.indexOf("content-length:");
+                    const int contentLength = clIdx >= 0
+                        ? headers.mid(clIdx + 15, headers.indexOf('\r', clIdx) - clIdx - 15).trimmed().toInt()
+                        : 0;
+                    if (buf->size() - (bodyIdx + 4) < contentLength) return;
+                    const QByteArray rawBody = buf->mid(bodyIdx + 4, contentLength);
+                    buf->clear();
                     const QJsonObject bodyObj = QJsonDocument::fromJson(rawBody).object();
                     const QString reqId = bodyObj.value(QStringLiteral("id")).toString();
 
@@ -3490,7 +3498,18 @@ private slots:
         // Dispatch mutation B which succeeds with HTTP 200 and triggers scheduleIcloudMutationRetry(true)
         liveBackend.saveIcloudNote(QStringLiteral("note_conc_b"), QStringLiteral("Note B"), QStringLiteral("Body B"), QStringLiteral("Notes"));
         QTRY_COMPARE_WITH_TIMEOUT(noteBCount, 1, 1500);
-        QTest::qWait(80);
+        // Wait for client-side checkpoint confirming mutation B's HTTP 200 response was processed and applied
+        QTRY_VERIFY_WITH_TIMEOUT([&]() {
+            for (const QVariant &v : liveBackend.icloudNotes()) {
+                const QVariantMap m = v.toMap();
+                if (m.value(QStringLiteral("id")).toString() == QStringLiteral("note_conc_b") &&
+                    m.value(QStringLiteral("revision")).toLongLong() == 1) {
+                    return true;
+                }
+            }
+            return false;
+        }(), 1500);
+        QCoreApplication::processEvents();
 
         // Verify mutation A was NOT retried early before its 1000ms backoff deadline when mutation B succeeded
         QCOMPARE(noteACount, 1);

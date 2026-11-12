@@ -518,5 +518,7 @@ private:
     QHash<QString, int> m_icloudMutationRetryCounts;
     QHash<QString, qint64> m_icloudMutationNextRetryMs;
     QSet<QString> m_icloudMutationPausedKeys;
+    QTimer m_icloudMutationRetryTimer;
+    qint64 m_icloudMutationRetryArmedDeadlineMs = 0;
     bool m_icloudMutationRetryScheduled = false;
 };

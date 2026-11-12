@@ -16,6 +16,7 @@ import argparse
 import collections
 from email.parser import BytesParser
 from email.policy import default as email_default_policy
+import fcntl
 import glob
 import hashlib
 import io
@@ -53,6 +54,48 @@ APPLE_EPOCH_OFFSET_MS = 978307200000
 
 LOG_RING: Deque[str] = collections.deque(maxlen=500)
 _LOG_LOCK = threading.Lock()
+
+
+class _CrossProcessStoreLock:
+    """Re-entrant thread + cross-process flock guard for ~/.config/bluepill iCloud store JSON files."""
+
+    def __init__(self, config_dir: str) -> None:
+        self._config_dir = config_dir
+        self._rlock = threading.RLock()
+        self._depth = 0
+        self._fd: Optional[int] = None
+
+    def __enter__(self) -> "_CrossProcessStoreLock":
+        self._rlock.acquire()
+        if self._depth == 0:
+            try:
+                os.makedirs(self._config_dir, exist_ok=True)
+                lock_path = os.path.join(self._config_dir, ".icloud_store.lock")
+                self._fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+                fcntl.flock(self._fd, fcntl.LOCK_EX)
+            except OSError:
+                if self._fd is not None:
+                    try:
+                        os.close(self._fd)
+                    except OSError:
+                        pass
+                    self._fd = None
+        self._depth += 1
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self._depth -= 1
+        if self._depth == 0 and self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+        self._rlock.release()
 
 
 class RingBufferHandler(logging.Handler):
@@ -378,7 +421,7 @@ class BluePillEngine:
             if is_ephemeral
             else os.path.expanduser("~/.config/bluepill")
         )
-        self._icloud_store_lock = threading.RLock()
+        self._icloud_store_lock = _CrossProcessStoreLock(self._config_dir)
         self._photos_library_assets: Dict[str, Tuple[str, str]] = {}
         self.deleted_state_path: Optional[str] = (
             None if is_ephemeral else os.path.expanduser("~/.config/bluepill/deleted_state.json")
@@ -3128,8 +3171,10 @@ class BluePillEngine:
             deleted_ids: set[str] = set(deleted_map.keys())
 
             local_notes: List[Dict[str, Any]] = []
+            pre_stat = None
             if os.path.exists(notes_path):
                 try:
+                    pre_stat = os.stat(notes_path)
                     local_notes = self._read_json_list_strict(notes_path)
                 except (OSError, ValueError) as exc:
                     self.logger.warning("[notes] icloud_notes.json read error: %s", exc)
@@ -3155,15 +3200,22 @@ class BluePillEngine:
             for n in local_notes:
                 if not isinstance(n, dict):
                     continue
-                if not isinstance(n.get("revision"), int) or int(n.get("revision") or 0) < 1:
+                raw_rev = n.get("revision")
+                if type(raw_rev) is not int or raw_rev < 1:
                     n["revision"] = 1
                     dirty_revs = True
                 nid = str(n.get("id") or "").strip()
                 if nid and nid not in deleted_ids:
                     notes_by_id[nid] = n
-            if dirty_revs:
+            if dirty_revs and pre_stat is not None:
                 try:
-                    self._atomic_write_json(notes_path, local_notes)
+                    cur_stat = os.stat(notes_path)
+                    if (cur_stat.st_ino, cur_stat.st_mtime_ns, cur_stat.st_size) == (
+                        pre_stat.st_ino,
+                        pre_stat.st_mtime_ns,
+                        pre_stat.st_size,
+                    ):
+                        self._atomic_write_json(notes_path, local_notes)
                 except OSError as exc:
                     self.logger.debug("[notes] revision backfill write skipped: %s", exc)
 
@@ -3217,9 +3269,13 @@ class BluePillEngine:
         folder = str(note.get("folder") or "Notes").strip()
         now_server_ms = int(time.time() * 1000)
         base_rev_raw = note.get("baseRevision") if "baseRevision" in note else note.get("expectedRevision")
-        base_rev: Optional[int] = int(base_rev_raw) if base_rev_raw is not None else None
-        allow_recreate = bool(note.get("allowRecreate"))
-        force_overwrite = bool(note.get("forceOverwrite"))
+        base_rev: Optional[int] = (
+            int(base_rev_raw)
+            if base_rev_raw is not None and not isinstance(base_rev_raw, bool)
+            else None
+        )
+        allow_recreate = note.get("allowRecreate") is True
+        force_overwrite = note.get("forceOverwrite") is True
 
         with self._icloud_store_lock:
             deleted_path = self._get_deleted_notes_json_path()
@@ -3236,7 +3292,7 @@ class BluePillEngine:
 
             if nid in del_map:
                 del_rev = int(del_revs.get(nid, 1))
-                if not allow_recreate and not force_overwrite and (base_rev is None or base_rev < del_rev):
+                if not allow_recreate and not (force_overwrite and base_rev == del_rev) and (base_rev is None or base_rev < del_rev):
                     if raise_on_conflict:
                         raise ValueError(f"Conflict: note '{nid}' was deleted (revision {del_rev})")
                     return self.query_icloud_notes()
@@ -3250,9 +3306,10 @@ class BluePillEngine:
             found = False
             for item in notes:
                 if isinstance(item, dict) and item.get("id") == nid:
-                    existing_rev = max(1, int(item.get("revision") or 1))
+                    raw_existing_rev = item.get("revision")
+                    existing_rev = max(1, raw_existing_rev if type(raw_existing_rev) is int else 1)
                     existing_ts = int(item.get("updatedAtMs") or 0)
-                    if not force_overwrite and (base_rev is None or base_rev != existing_rev):
+                    if base_rev is None or base_rev != existing_rev:
                         if raise_on_conflict:
                             raise ValueError(
                                 f"Conflict: baseRevision {base_rev} does not match current revision {existing_rev} for note '{nid}'"
@@ -3368,12 +3425,14 @@ class BluePillEngine:
 
             if os.path.exists(events_path):
                 try:
+                    pre_evt_stat = os.stat(events_path)
                     local_evts = self._read_json_list_strict(events_path)
                     dirty_evt_revs = False
                     for ev in local_evts:
                         if not isinstance(ev, dict):
                             continue
-                        if not isinstance(ev.get("revision"), int) or int(ev.get("revision") or 0) < 1:
+                        raw_evt_rev = ev.get("revision")
+                        if type(raw_evt_rev) is not int or raw_evt_rev < 1:
                             ev["revision"] = 1
                             dirty_evt_revs = True
                         eid = str(ev.get("id") or "").strip()
@@ -3384,7 +3443,13 @@ class BluePillEngine:
                             events_by_id[eid] = ev
                     if dirty_evt_revs:
                         try:
-                            self._atomic_write_json(events_path, local_evts)
+                            cur_evt_stat = os.stat(events_path)
+                            if (cur_evt_stat.st_ino, cur_evt_stat.st_mtime_ns, cur_evt_stat.st_size) == (
+                                pre_evt_stat.st_ino,
+                                pre_evt_stat.st_mtime_ns,
+                                pre_evt_stat.st_size,
+                            ):
+                                self._atomic_write_json(events_path, local_evts)
                         except OSError as exc:
                             self.logger.debug("[calendar] revision backfill write skipped: %s", exc)
                 except (OSError, ValueError) as exc:
@@ -3522,9 +3587,13 @@ class BluePillEngine:
         all_day = bool(event.get("allDay", False))
         now_server_ms = int(time.time() * 1000)
         base_rev_raw = event.get("baseRevision") if "baseRevision" in event else event.get("expectedRevision")
-        base_rev: Optional[int] = int(base_rev_raw) if base_rev_raw is not None else None
-        allow_recreate = bool(event.get("allowRecreate"))
-        force_overwrite = bool(event.get("forceOverwrite"))
+        base_rev: Optional[int] = (
+            int(base_rev_raw)
+            if base_rev_raw is not None and not isinstance(base_rev_raw, bool)
+            else None
+        )
+        allow_recreate = event.get("allowRecreate") is True
+        force_overwrite = event.get("forceOverwrite") is True
 
         with self._icloud_store_lock:
             deleted_path = self._get_deleted_events_json_path()
@@ -3541,7 +3610,7 @@ class BluePillEngine:
 
             if eid in del_map:
                 del_rev = int(del_revs.get(eid, 1))
-                if not allow_recreate and not force_overwrite and (base_rev is None or base_rev < del_rev):
+                if not allow_recreate and not (force_overwrite and base_rev == del_rev) and (base_rev is None or base_rev < del_rev):
                     if raise_on_conflict:
                         raise ValueError(f"Conflict: event '{eid}' was deleted (revision {del_rev})")
                     return self.query_icloud_events()
@@ -3569,9 +3638,10 @@ class BluePillEngine:
             }
             for i, item in enumerate(events):
                 if isinstance(item, dict) and item.get("id") == eid:
-                    existing_rev = max(1, int(item.get("revision") or 1))
+                    raw_existing_rev = item.get("revision")
+                    existing_rev = max(1, raw_existing_rev if type(raw_existing_rev) is int else 1)
                     existing_ts = int(item.get("updatedAtMs") or 0)
-                    if not force_overwrite and (base_rev is None or base_rev != existing_rev):
+                    if base_rev is None or base_rev != existing_rev:
                         if raise_on_conflict:
                             raise ValueError(
                                 f"Conflict: baseRevision {base_rev} does not match current revision {existing_rev} for event '{eid}'"
@@ -4141,16 +4211,16 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;padding:14px;gap:10px;">
           <div id="noteConflictBanner" style="display:none;background:#3d2c12;border:1px solid #d29922;border-radius:6px;padding:8px 10px;font-size:12px;color:#f0f6fc;align-items:center;justify-content:space-between;gap:8px;">
-            <span>⚠ Revision conflict: this note was updated elsewhere. Your draft is preserved.</span>
+            <span id="noteConflictText">⚠ Revision conflict: this note was updated elsewhere. Your draft is preserved.</span>
             <div style="display:flex;gap:6px;">
-              <button onclick="resolveNoteConflictOverwrite()" style="background:#d29922;color:#0d1117;border:none;border-radius:4px;padding:4px 8px;font-weight:600;font-size:11px;cursor:pointer;">Overwrite with Draft</button>
-              <button onclick="resolveNoteConflictReload()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;">Load Server Version</button>
+              <button id="noteConflictOverwriteBtn" onclick="resolveNoteConflictOverwrite()" style="background:#d29922;color:#0d1117;border:none;border-radius:4px;padding:4px 8px;font-weight:600;font-size:11px;cursor:pointer;">Overwrite with Draft</button>
+              <button id="noteConflictReloadBtn" onclick="resolveNoteConflictReload()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;">Load Server Version</button>
             </div>
           </div>
           <div id="noteErrorBanner" style="display:none;background:#3d1418;border:1px solid #f85149;border-radius:6px;padding:8px 10px;font-size:12px;color:#f0f6fc;"></div>
-          <input id="noteTitleInput" placeholder="Note Title" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:14px;font-weight:600;" />
-          <input id="noteFolderInput" placeholder="Folder (e.g. Notes, Work)" value="Notes" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--muted);font-size:12px;" />
-          <textarea id="noteBodyInput" placeholder="Write note content..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--text);font-size:13px;resize:none;font-family:inherit;"></textarea>
+          <input id="noteTitleInput" oninput="noteDraftToken += 1" placeholder="Note Title" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:14px;font-weight:600;" />
+          <input id="noteFolderInput" oninput="noteDraftToken += 1" placeholder="Folder (e.g. Notes, Work)" value="Notes" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--muted);font-size:12px;" />
+          <textarea id="noteBodyInput" oninput="noteDraftToken += 1" placeholder="Write note content..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--text);font-size:13px;resize:none;font-family:inherit;"></textarea>
           <div style="display:flex;justify-content:space-between;align-items:center;">
             <div style="display:flex;gap:8px;">
               <button onclick="saveCurrentNote()" style="background:var(--green);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-weight:600;font-size:12px;cursor:pointer;">💾 Save</button>
@@ -4199,9 +4269,11 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     let selectedNoteId = null;
     let selectedNoteRevision = null;
     let noteSelectionToken = 0;
+    let noteDraftToken = 0;
     let conflictServerRevision = null;
     let conflictNoteId = null;
     let conflictSelectionToken = 0;
+    let conflictNoteDeleted = false;
     let allEvents = [];
 
     function openNotesModal() {
@@ -4243,12 +4315,14 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     function filterNotes() { renderNotesList(); }
     function selectNote(id) {
       noteSelectionToken += 1;
+      noteDraftToken = 0;
       selectedNoteId = id;
       const n = allNotes.find(item => item.id === id);
       selectedNoteRevision = (n && typeof n.revision === 'number') ? n.revision : 1;
       conflictServerRevision = null;
       conflictNoteId = null;
       conflictSelectionToken = 0;
+      conflictNoteDeleted = false;
       const banner = document.getElementById('noteConflictBanner');
       if (banner) banner.style.display = 'none';
       const errBanner = document.getElementById('noteErrorBanner');
@@ -4267,11 +4341,13 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
     function newNote() {
       noteSelectionToken += 1;
+      noteDraftToken = 0;
       selectedNoteId = 'note-' + Date.now();
       selectedNoteRevision = 0;
       conflictServerRevision = null;
       conflictNoteId = null;
       conflictSelectionToken = 0;
+      conflictNoteDeleted = false;
       const banner = document.getElementById('noteConflictBanner');
       if (banner) banner.style.display = 'none';
       const errBanner = document.getElementById('noteErrorBanner');
@@ -4290,11 +4366,16 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       if (!selectedNoteId) selectedNoteId = 'note-' + Date.now();
       const nid = selectedNoteId;
       const reqToken = noteSelectionToken;
+      const reqDraftToken = noteDraftToken;
       const reqBody = {id: nid, title, folder, body, updatedAtMs: Date.now()};
       if (forceOverwrite === true) {
         if (reqToken !== conflictSelectionToken || nid !== conflictNoteId) return;
-        if (conflictServerRevision !== null) reqBody.baseRevision = conflictServerRevision;
-        reqBody.forceOverwrite = true;
+        if (conflictNoteDeleted) {
+          reqBody.allowRecreate = true;
+        } else {
+          if (conflictServerRevision !== null) reqBody.baseRevision = conflictServerRevision;
+          reqBody.forceOverwrite = true;
+        }
       } else if (selectedNoteRevision !== null) {
         reqBody.baseRevision = selectedNoteRevision;
       }
@@ -4304,11 +4385,24 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         body: JSON.stringify(reqBody)
       });
       const j = await resp.json();
-      if (Array.isArray(j.data)) allNotes = j.data;
       if (reqToken !== noteSelectionToken || selectedNoteId !== nid) {
+        if (Array.isArray(j.data)) {
+          const updatedTarget = j.data.find(item => item && item.id === nid);
+          if (updatedTarget) {
+            const idx = allNotes.findIndex(item => item && item.id === nid);
+            if (idx >= 0) {
+              const curRev = typeof allNotes[idx].revision === 'number' ? allNotes[idx].revision : 0;
+              const newRev = typeof updatedTarget.revision === 'number' ? updatedTarget.revision : 0;
+              if (newRev >= curRev) allNotes[idx] = updatedTarget;
+            } else {
+              allNotes.unshift(updatedTarget);
+            }
+          }
+        }
         renderNotesList();
         return;
       }
+      if (Array.isArray(j.data)) allNotes = j.data;
       const banner = document.getElementById('noteConflictBanner');
       const errBanner = document.getElementById('noteErrorBanner');
       if (resp.ok && j.status === 200) {
@@ -4317,13 +4411,39 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         conflictServerRevision = null;
         conflictNoteId = null;
         conflictSelectionToken = 0;
-        selectNote(nid);
+        conflictNoteDeleted = false;
+        if (reqDraftToken === noteDraftToken) {
+          selectNote(nid);
+        } else {
+          const savedNote = allNotes.find(item => item.id === nid);
+          if (savedNote && typeof savedNote.revision === 'number') {
+            selectedNoteRevision = savedNote.revision;
+          }
+          const delBtn = document.getElementById('deleteNoteBtn');
+          if (delBtn) delBtn.style.display = 'inline-block';
+          renderNotesList();
+        }
       } else if (j.status === 409) {
         if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
         const srvNote = allNotes.find(item => item.id === nid);
-        conflictServerRevision = (srvNote && typeof srvNote.revision === 'number') ? srvNote.revision : null;
+        const conflictText = document.getElementById('noteConflictText');
+        const overwriteBtn = document.getElementById('noteConflictOverwriteBtn');
+        const reloadBtn = document.getElementById('noteConflictReloadBtn');
         conflictNoteId = nid;
         conflictSelectionToken = reqToken;
+        if (srvNote && typeof srvNote.revision === 'number') {
+          conflictServerRevision = srvNote.revision;
+          conflictNoteDeleted = false;
+          if (conflictText) conflictText.textContent = '⚠ Revision conflict: this note was updated elsewhere. Your draft is preserved.';
+          if (overwriteBtn) overwriteBtn.textContent = 'Overwrite with Draft';
+          if (reloadBtn) reloadBtn.style.display = 'inline-block';
+        } else {
+          conflictServerRevision = null;
+          conflictNoteDeleted = true;
+          if (conflictText) conflictText.textContent = '⚠ This note was deleted on the server. Your draft is preserved.';
+          if (overwriteBtn) overwriteBtn.textContent = 'Recreate Note';
+          if (reloadBtn) reloadBtn.style.display = 'none';
+        }
         if (banner) banner.style.display = 'flex';
         renderNotesList();
       } else {
@@ -4331,6 +4451,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         conflictServerRevision = null;
         conflictNoteId = null;
         conflictSelectionToken = 0;
+        conflictNoteDeleted = false;
         if (errBanner) {
           errBanner.textContent = j.message || ('Save failed (HTTP ' + (j.status || resp.status) + ')');
           errBanner.style.display = 'block';
@@ -4344,6 +4465,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
     function resolveNoteConflictReload() {
       if (noteSelectionToken !== conflictSelectionToken || selectedNoteId !== conflictNoteId) return;
+      if (conflictNoteDeleted || !allNotes.some(item => item.id === selectedNoteId)) return;
       if (selectedNoteId) selectNote(selectedNoteId);
     }
     async function deleteCurrentNote() {
@@ -5099,12 +5221,12 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                 data = self.engine.handle_rpc(method, params)
                 self._send_json(200, {"id": req_id, "data": data})
             except PermissionError as exc:
-                self._send_json(403, None, str(exc))
+                self._send_json(403, {"id": req_id, "data": None}, str(exc))
             except ValueError as exc:
                 status_code = 409 if str(exc).startswith("Conflict:") else 400
-                self._send_json(status_code, None, str(exc))
+                self._send_json(status_code, {"id": req_id, "data": None}, str(exc))
             except Exception as exc:
-                self._send_json(500, None, str(exc))
+                self._send_json(500, {"id": req_id, "data": None}, str(exc))
             return
 
         self._send_json(404, None, f"Not found: {path}")
@@ -5190,7 +5312,7 @@ def run_stdio_loop(engine: BluePillEngine) -> int:
         except ValueError as exc:
             status_code = 409 if str(exc).startswith("Conflict:") else 400
             resp = {"id": req_id, "status": status_code, "message": str(exc), "data": None}
-        except Exception as exc:
+        except (KeyError, TypeError, OSError, RuntimeError, sqlite3.Error) as exc:
             resp = {"id": req_id, "status": 500, "message": str(exc), "data": None}
         sys.stdout.write(json.dumps(resp) + "\n")
         sys.stdout.flush()
@@ -5374,7 +5496,7 @@ def run_selftest(engine: BluePillEngine) -> int:
         # RPC checks
         rpc_notes = test_eng.handle_rpc("icloud.notes", {})
         assert isinstance(rpc_notes, list), "RPC icloud.notes failed"
-        assert all(isinstance(n.get("revision"), int) and n["revision"] >= 1 for n in rpc_notes), "All returned notes must have revision >= 1"
+        assert all(type(n.get("revision")) is int and n["revision"] >= 1 for n in rpc_notes), "All returned notes must have revision >= 1"
         rpc_evts = test_eng.handle_rpc("icloud.events", {})
         assert isinstance(rpc_evts, list), "RPC icloud.events failed"
         rpc_photos = test_eng.handle_rpc("icloud.photos", {})
@@ -5395,7 +5517,7 @@ def run_selftest(engine: BluePillEngine) -> int:
         # Verify existing-record updates require matching baseRevision
         rev_notes = test_eng.save_icloud_note({"id": "st-note-rev", "title": "V1", "body": "B1"}, raise_on_conflict=True)
         rev_n1 = next(n for n in rev_notes if n.get("id") == "st-note-rev")
-        assert isinstance(rev_n1.get("revision"), int) and rev_n1["revision"] >= 1
+        assert type(rev_n1.get("revision")) is int and rev_n1["revision"] >= 1
         try:
             test_eng.save_icloud_note({"id": "st-note-rev", "title": "V2-no-rev", "body": "B2"}, raise_on_conflict=True)
             raise AssertionError("Updating existing note without baseRevision should raise ValueError")

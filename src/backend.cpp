@@ -72,6 +72,13 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
     m_socketReconnectTimer.setSingleShot(true);
     connect(&m_socketReconnectTimer, &QTimer::timeout, this, &Backend::startSocketIoClient);
 
+    m_icloudMutationRetryTimer.setSingleShot(true);
+    connect(&m_icloudMutationRetryTimer, &QTimer::timeout, this, [this]() {
+        m_icloudMutationRetryScheduled = false;
+        m_icloudMutationRetryArmedDeadlineMs = 0;
+        replayPendingIcloudMutations();
+    });
+
     connect(&m_relativeTimeTimer, &QTimer::timeout, this, [this]() {
         if (m_demoMode) return;
         bool anyChanged = false;
@@ -1918,7 +1925,25 @@ void Backend::refreshAll() {
     // Defer heavy macOS AddressBook contact export so it never blocks BlueBubbles's
     // single-threaded Node.js event loop during initial startup/sync
     QTimer::singleShot(m_contactNames.isEmpty() ? 2000 : 12000, this, &Backend::fetchContactsRemote);
-    m_icloudMutationPausedKeys.clear();
+    QSet<QString> conflictPausedKeys;
+    for (const QString &key : std::as_const(m_icloudMutationPausedKeys)) {
+        if (key.startsWith(QStringLiteral("note_save:"))) {
+            const QString id = key.mid(10);
+            const QVariantMap pend = m_pendingIcloudNoteSaves.value(id);
+            if (pend.value(QStringLiteral("conflictServerRevision")).toLongLong() >
+                pend.value(QStringLiteral("baseRevision")).toLongLong()) {
+                conflictPausedKeys.insert(key);
+            }
+        } else if (key.startsWith(QStringLiteral("evt_save:"))) {
+            const QString id = key.mid(9);
+            const QVariantMap pend = m_pendingIcloudEventSaves.value(id);
+            if (pend.value(QStringLiteral("conflictServerRevision")).toLongLong() >
+                pend.value(QStringLiteral("baseRevision")).toLongLong()) {
+                conflictPausedKeys.insert(key);
+            }
+        }
+    }
+    m_icloudMutationPausedKeys = conflictPausedKeys;
     replayPendingIcloudMutations();
     fetchIcloudNotes();
     fetchIcloudEvents();
@@ -7829,9 +7854,6 @@ void Backend::scheduleIcloudMutationRetry(bool immediate) {
         replayPendingIcloudMutations();
         return;
     }
-    if (m_icloudMutationRetryScheduled) {
-        return;
-    }
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     qint64 earliestNextMs = std::numeric_limits<qint64>::max();
     for (auto it = m_icloudMutationNextRetryMs.begin(); it != m_icloudMutationNextRetryMs.end(); ++it) {
@@ -7845,11 +7867,14 @@ void Backend::scheduleIcloudMutationRetry(bool immediate) {
         return;
     }
     const int delayMs = static_cast<int>(qBound(qint64(50), earliestNextMs - nowMs, qint64(30000)));
+    const qint64 targetDeadlineMs = nowMs + delayMs;
+    if (m_icloudMutationRetryScheduled && m_icloudMutationRetryArmedDeadlineMs > 0 &&
+        m_icloudMutationRetryArmedDeadlineMs <= targetDeadlineMs) {
+        return;
+    }
     m_icloudMutationRetryScheduled = true;
-    QTimer::singleShot(delayMs, this, [this]() {
-        m_icloudMutationRetryScheduled = false;
-        replayPendingIcloudMutations();
-    });
+    m_icloudMutationRetryArmedDeadlineMs = targetDeadlineMs;
+    m_icloudMutationRetryTimer.start(delayMs);
 }
 
 void Backend::replayPendingIcloudMutations() {
@@ -7874,12 +7899,16 @@ void Backend::replayPendingIcloudMutations() {
         if (m_inFlightIcloudNoteReplies.value(noteId)) continue;
         const QString mutKey = QStringLiteral("note_save:") + noteId;
         if (m_icloudMutationPausedKeys.contains(mutKey)) continue;
+        const QVariantMap noteMap = it.value();
+        if (noteMap.value(QStringLiteral("conflictServerRevision")).toLongLong() >
+            noteMap.value(QStringLiteral("baseRevision")).toLongLong()) {
+            continue;
+        }
         if (m_icloudMutationNextRetryMs.value(mutKey, 0) > nowMs) {
             scheduleIcloudMutationRetry(false);
             continue;
         }
         m_icloudMutationNextRetryMs.remove(mutKey);
-        const QVariantMap noteMap = it.value();
         const quint64 sentSeq = noteMap.value(QStringLiteral("clientMutationSeq")).toULongLong();
         const qint64 sentUpdatedAt = noteMap.value(QStringLiteral("updatedAtMs")).toLongLong();
         QJsonObject payload = QJsonObject::fromVariantMap(noteMap);
@@ -8044,12 +8073,16 @@ void Backend::replayPendingIcloudMutations() {
         if (m_inFlightIcloudEventReplies.value(evtId)) continue;
         const QString mutKey = QStringLiteral("evt_save:") + evtId;
         if (m_icloudMutationPausedKeys.contains(mutKey)) continue;
+        const QVariantMap evtMap = it.value();
+        if (evtMap.value(QStringLiteral("conflictServerRevision")).toLongLong() >
+            evtMap.value(QStringLiteral("baseRevision")).toLongLong()) {
+            continue;
+        }
         if (m_icloudMutationNextRetryMs.value(mutKey, 0) > nowMs) {
             scheduleIcloudMutationRetry(false);
             continue;
         }
         m_icloudMutationNextRetryMs.remove(mutKey);
-        const QVariantMap evtMap = it.value();
         const quint64 sentSeq = evtMap.value(QStringLiteral("clientMutationSeq")).toULongLong();
         const qint64 sentUpdatedAt = evtMap.value(QStringLiteral("updatedAtMs")).toLongLong();
         QJsonObject payload = QJsonObject::fromVariantMap(evtMap);
