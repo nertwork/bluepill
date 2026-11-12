@@ -51,7 +51,10 @@ jobs:
         run: ./bin/build
 
       - name: Run Full 49-Test Suite (Offscreen QPA)
-        run: QT_QPA_PLATFORM=offscreen ./bin/test
+        run: |
+          QT_QPA_PLATFORM=offscreen ./bin/test
+          BLUEBUBBLES_URL=http://127.0.0.1:9 BLUEBUBBLES_PASSWORD=dummy QT_QPA_PLATFORM=offscreen ./build/imsg_tests testIcloudCalendarEventsLifecycle
+          python3 server/bluepill_server.py --selftest
 
       - name: Verify Demo Mode Offscreen Screenshot Rendering
         run: |

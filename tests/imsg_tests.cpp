@@ -3627,6 +3627,7 @@ private slots:
             failPersistNoteBackend.setStateFilePath(blockerFile + QStringLiteral("/state.json"));
             failPersistNoteBackend.loadCredentials();
             const QString failNoteId = failPersistNoteBackend.saveIcloudNote(QString(), QStringLiteral("Unwritable State Note"), QStringLiteral("Body"), QStringLiteral("Notes"));
+            QVERIFY(!failPersistNoteBackend.isIcloudNoteDurablyPersisted(failNoteId));
             QTest::qWait(300);
             QCOMPARE(unwritableNotePostCount, 0);
             failPersistNoteBackend.deleteIcloudNote(failNoteId);
@@ -3665,6 +3666,7 @@ private slots:
         const QString conflictCopyId = liveBackend.saveIcloudNote(QString(), QStringLiteral("Conflict Note Edited"), QStringLiteral("Updated Draft"), QStringLiteral("Notes"), 0);
         QVERIFY(!conflictCopyId.isEmpty());
         QVERIFY(conflictCopyId != QStringLiteral("note_real_conflict"));
+        QVERIFY(liveBackend.isIcloudNoteDurablyPersisted(conflictCopyId));
         QVERIFY(liveBackend.reloadConflictedIcloudNoteServerVersion(QStringLiteral("note_real_conflict")));
         QVERIFY(!liveBackend.isIcloudMutationPausedForTest(conflictKey));
         QVERIFY(!liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_real_conflict")));
@@ -3791,6 +3793,7 @@ private slots:
         QTcpServer evtServer;
         QVERIFY(evtServer.listen(QHostAddress::LocalHost, 0));
         int evtRequestCount = 0;
+        int unwritableEvtPostCount = 0;
         bool evtCreatedBeforeDroppedAck = false;
         QString capturedEvtId;
         auto buildNear250 = []() {
@@ -3824,8 +3827,6 @@ private slots:
                     const QByteArray rawBody = buf->mid(bodyIdx + 4, contentLength);
                     buf->clear();
                     const QJsonObject bodyObj = QJsonDocument::fromJson(rawBody).object();
-                    capturedEvtId = bodyObj.value(QStringLiteral("id")).toString();
-                    evtRequestCount++;
                     auto sendJson = [](QTcpSocket *s, int st, const QByteArray &stText, const QByteArray &jb) {
                         const QByteArray r = "HTTP/1.1 " + QByteArray::number(st) + " " + stText + "\r\n"
                                              "Content-Type: application/json\r\n"
@@ -3835,6 +3836,16 @@ private slots:
                         s->flush();
                         s->disconnectFromHost();
                     };
+                    if (bodyObj.value(QStringLiteral("title")).toString() == QStringLiteral("Unwritable State Event")) {
+                        unwritableEvtPostCount++;
+                        QJsonObject respObj;
+                        respObj.insert(QStringLiteral("status"), 200);
+                        respObj.insert(QStringLiteral("data"), QJsonArray());
+                        sendJson(sock, 200, "OK", QJsonDocument(respObj).toJson(QJsonDocument::Compact));
+                        return;
+                    }
+                    capturedEvtId = bodyObj.value(QStringLiteral("id")).toString();
+                    evtRequestCount++;
                     if (evtRequestCount == 1) {
                         // First request: 200 OK for far-future event save (returns full 250 near events + appended outsideWindow target)
                         QJsonArray snap = buildNear250();
@@ -3970,7 +3981,7 @@ private slots:
                 QStringLiteral("Notes")
             );
             QTest::qWait(300);
-            QCOMPARE(evtRequestCount, 2);
+            QCOMPARE(unwritableEvtPostCount, 0);
             failPersistEvtBackend.deleteIcloudEvent(failEvtId);
             QVERIFY(!failPersistEvtBackend.hasPendingIcloudEventSaveForTest(failEvtId));
             QVERIFY(failPersistEvtBackend.hasPendingIcloudEventDeleteForTest(failEvtId));

@@ -251,6 +251,7 @@ public:
     Q_INVOKABLE void fetchIcloudNotes();
     Q_INVOKABLE QString saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder = QStringLiteral("Notes"), qint64 baseRevision = -1);
     Q_INVOKABLE bool reloadConflictedIcloudNoteServerVersion(const QString &id);
+    Q_INVOKABLE bool isIcloudNoteDurablyPersisted(const QString &id) const;
     Q_INVOKABLE void deleteIcloudNote(const QString &id);
     Q_INVOKABLE void fetchIcloudEvents();
     Q_INVOKABLE QString saveIcloudEvent(const QString &title, qint64 startMs, qint64 endMs, const QString &calendarName = QStringLiteral("Home"), const QString &notes = QString());

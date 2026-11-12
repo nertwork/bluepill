@@ -291,7 +291,11 @@ ApplicationWindow {
         })
         var cur = list[idx]
         if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0 && cur.canRequestAttachment) {
-            backend.openAttachment(cur.guid, cur.name || "")
+            if (cur.isCloudEvicted) {
+                backend.downloadCloudAttachment(cur.guid)
+            } else {
+                backend.openAttachment(cur.guid, cur.name || "")
+            }
         }
     }
 
@@ -352,7 +356,11 @@ ApplicationWindow {
         root.photoViewerPanY = 0
         var cur = root.photoViewerItems[root.photoViewerIndex]
         if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0 && cur.canRequestAttachment) {
-            backend.openAttachment(cur.guid, cur.name || "")
+            if (cur.isCloudEvicted) {
+                backend.downloadCloudAttachment(cur.guid)
+            } else {
+                backend.openAttachment(cur.guid, cur.name || "")
+            }
         }
     }
 
@@ -364,7 +372,11 @@ ApplicationWindow {
         root.photoViewerPanY = 0
         var cur = root.photoViewerItems[root.photoViewerIndex]
         if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0 && cur.canRequestAttachment) {
-            backend.openAttachment(cur.guid, cur.name || "")
+            if (cur.isCloudEvicted) {
+                backend.downloadCloudAttachment(cur.guid)
+            } else {
+                backend.openAttachment(cur.guid, cur.name || "")
+            }
         }
     }
 
@@ -506,9 +518,56 @@ ApplicationWindow {
                     updated.push({
                         guid: item.guid,
                         name: item.name,
-                        localUrl: localUrl
+                        localUrl: localUrl,
+                        isCloudEvicted: false,
+                        canUnpurge: item.canUnpurge !== false,
+                        canRequestAttachment: true
                     })
                     changed = true
+                } else {
+                    updated.push(item)
+                }
+            }
+            if (changed) {
+                root.photoViewerItems = updated
+            }
+        }
+        function onIcloudPhotosChanged() {
+            if (!root.photoViewerItems || root.photoViewerItems.length === 0) return
+            var photos = backend.icloudPhotos
+            if (!photos || photos.length === 0) return
+            var changed = false
+            var updated = []
+            for (var i = 0; i < root.photoViewerItems.length; ++i) {
+                var item = root.photoViewerItems[i]
+                var ig = item.guid || ""
+                var matched = null
+                for (var j = 0; j < photos.length; ++j) {
+                    var p = photos[j]
+                    if (p && p.guid === ig) {
+                        matched = p
+                        break
+                    }
+                }
+                if (matched) {
+                    var nextUrl = (matched.localUrl && matched.localUrl.length > 0) ? matched.localUrl : (item.localUrl || "")
+                    var nextEvicted = !!matched.isCloudEvicted && nextUrl.length === 0
+                    var nextCanUnpurge = matched.canUnpurge !== false
+                    var nextCanReq = !nextEvicted || nextCanUnpurge
+                    if (nextUrl !== (item.localUrl || "") || nextEvicted !== !!item.isCloudEvicted || nextCanReq !== !!item.canRequestAttachment) {
+                        changed = true
+                    }
+                    updated.push({
+                        guid: item.guid,
+                        name: item.name,
+                        localUrl: nextUrl,
+                        isCloudEvicted: nextEvicted,
+                        canUnpurge: nextCanUnpurge,
+                        canRequestAttachment: nextCanReq
+                    })
+                    if (i === root.photoViewerIndex && root.showPhotoViewer && nextUrl.length === 0 && !nextEvicted && ig.length > 0) {
+                        backend.openAttachment(ig, item.name || "")
+                    }
                 } else {
                     updated.push(item)
                 }
@@ -5181,6 +5240,7 @@ ApplicationWindow {
         property int noteRevision: 0
         property int noteMutationSeq: 0
         property int noteConflictServerRevision: 0
+        property bool noteHasServerConflict: false
         property string noteConflictTitle: ""
         property string noteConflictBody: ""
         property string noteConflictFolder: "Notes"
@@ -5224,8 +5284,10 @@ ApplicationWindow {
                     var nRev = Number(n.revision || n.baseRevision || 0)
                     var nSeq = Number(n.clientMutationSeq || 0)
                     var nConflictRev = Number(n.conflictServerRevision || 0)
+                    var nHasConflict = !!n.hasServerConflict || (nConflictRev > nRev)
                     if (n.id === icloudNotesPopup.selectedNoteId) {
                         icloudNotesPopup.selectedNoteConflictServerRevision = nConflictRev
+                        icloudNotesPopup.selectedNoteHasServerConflict = nHasConflict
                         icloudNotesPopup.selectedNoteConflictTitle = n.conflictServerTitle || ""
                         icloudNotesPopup.selectedNoteConflictBody = n.conflictServerBody || ""
                         icloudNotesPopup.selectedNoteConflictFolder = n.conflictServerFolder || "Notes"
@@ -5235,7 +5297,7 @@ ApplicationWindow {
                         var popupClean = (noteTitleInput.text === icloudNotesPopup.loadedTitle &&
                                           noteBodyInput.text === icloudNotesPopup.loadedBody &&
                                           noteFolderInput.text === icloudNotesPopup.loadedFolder)
-                        if (popupClean && nConflictRev <= nRev && (nSeq > icloudNotesPopup.selectedNoteMutationSeq || nRev > icloudNotesPopup.selectedNoteRevision)) {
+                        if (popupClean && !nHasConflict && (nSeq > icloudNotesPopup.selectedNoteMutationSeq || nRev > icloudNotesPopup.selectedNoteRevision)) {
                             noteTitleInput.text = n.title || ""
                             noteFolderInput.text = n.folder || "Notes"
                             noteBodyInput.text = n.body || n.snippet || ""
@@ -5249,6 +5311,7 @@ ApplicationWindow {
                     }
                     if (n.id === noteDetailWindow.noteId) {
                         noteDetailWindow.noteConflictServerRevision = nConflictRev
+                        noteDetailWindow.noteHasServerConflict = nHasConflict
                         noteDetailWindow.noteConflictTitle = n.conflictServerTitle || ""
                         noteDetailWindow.noteConflictBody = n.conflictServerBody || ""
                         noteDetailWindow.noteConflictFolder = n.conflictServerFolder || "Notes"
@@ -5258,7 +5321,7 @@ ApplicationWindow {
                         var detailClean = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
                                            noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
                                            noteDetailFolderInput.text === noteDetailWindow.loadedFolder)
-                        if (detailClean && nConflictRev <= nRev && (nSeq > noteDetailWindow.noteMutationSeq || nRev > noteDetailWindow.noteRevision)) {
+                        if (detailClean && !nHasConflict && (nSeq > noteDetailWindow.noteMutationSeq || nRev > noteDetailWindow.noteRevision)) {
                             noteDetailTitleInput.text = n.title || ""
                             noteDetailFolderInput.text = n.folder || "Notes"
                             noteDetailBodyInput.text = n.body || n.snippet || ""
@@ -5366,7 +5429,8 @@ ApplicationWindow {
 
             RowLayout {
                 visible: noteDetailWindow.pendingHubConflictPrompt ||
-                         (noteDetailWindow.noteId !== "" && noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision)
+                         (noteDetailWindow.noteId !== "" &&
+                          (noteDetailWindow.noteHasServerConflict || noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision))
                 Layout.fillWidth: true
                 spacing: 8
 
@@ -5374,7 +5438,9 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     text: noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision
                           ? i18n.tr("Server conflict (rev %1). Choose how to resolve your draft:").arg(noteDetailWindow.noteConflictServerRevision)
-                          : i18n.tr("Updated in Notes Hub. Choose how to resolve your unsaved draft:")
+                          : (noteDetailWindow.noteHasServerConflict
+                             ? i18n.tr("Note was deleted on server. Choose how to resolve your draft:")
+                             : i18n.tr("Updated in Notes Hub. Choose how to resolve your unsaved draft:"))
                     font.pixelSize: theme.fontSize - 2
                     color: "#f7768e"
                     elide: Text.ElideRight
@@ -5383,20 +5449,28 @@ ApplicationWindow {
                 Button {
                     text: i18n.tr("Reload Latest")
                     onClicked: {
-                        if (noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision) {
+                        if (noteDetailWindow.noteHasServerConflict || noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision) {
                             var srvTitle = noteDetailWindow.noteConflictTitle
                             var srvFolder = noteDetailWindow.noteConflictFolder || "Notes"
                             var srvBody = noteDetailWindow.noteConflictBody
                             var srvRev = noteDetailWindow.noteConflictServerRevision
                             backend.reloadConflictedIcloudNoteServerVersion(noteDetailWindow.noteId)
+                            if (srvRev <= 0) {
+                                noteDetailWindow.noteId = ""
+                                noteDetailWindow.noteSyncSource = "local_hub"
+                                noteDetailWindow.noteRevision = 0
+                                noteDetailWindow.noteMutationSeq = 0
+                            } else {
+                                noteDetailWindow.noteRevision = srvRev
+                            }
                             noteDetailTitleInput.text = srvTitle
                             noteDetailFolderInput.text = srvFolder
                             noteDetailBodyInput.text = srvBody
                             noteDetailWindow.loadedTitle = srvTitle
                             noteDetailWindow.loadedFolder = srvFolder
                             noteDetailWindow.loadedBody = srvBody
-                            noteDetailWindow.noteRevision = srvRev
                             noteDetailWindow.noteConflictServerRevision = 0
+                            noteDetailWindow.noteHasServerConflict = false
                             noteDetailWindow.pendingHubConflictPrompt = false
                             return
                         }
@@ -5423,15 +5497,17 @@ ApplicationWindow {
                     text: i18n.tr("Save as Copy")
                     onClicked: {
                         var prevId = noteDetailWindow.noteId
-                        var hadServerConflict = (noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision && prevId !== "")
+                        var hadServerConflict = ((noteDetailWindow.noteHasServerConflict || noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision) && prevId !== "")
                         var draftTitle = noteDetailTitleInput.text
                         var draftBody = noteDetailBodyInput.text
                         var draftFolder = noteDetailFolderInput.text
                         var copyId = backend.saveIcloudNote("", draftTitle, draftBody, draftFolder, 0)
+                        var copyPersisted = (copyId !== "" && backend.isIcloudNoteDurablyPersisted(copyId))
                         noteDetailWindow.noteId = copyId
                         noteDetailWindow.noteSyncSource = "local_hub"
                         noteDetailWindow.noteRevision = 0
                         noteDetailWindow.noteConflictServerRevision = 0
+                        noteDetailWindow.noteHasServerConflict = false
                         noteDetailWindow.pendingHubConflictPrompt = false
                         noteDetailTitleInput.text = draftTitle
                         noteDetailFolderInput.text = draftFolder
@@ -5447,8 +5523,10 @@ ApplicationWindow {
                                 break
                             }
                         }
-                        if (hadServerConflict) {
+                        if (hadServerConflict && copyPersisted) {
                             backend.reloadConflictedIcloudNoteServerVersion(prevId)
+                        } else if (hadServerConflict && !copyPersisted) {
+                            root.showToast(i18n.tr("Copy could not be saved to disk yet; original conflicted draft preserved."))
                         }
                     }
                 }
@@ -5456,19 +5534,23 @@ ApplicationWindow {
                 Button {
                     text: i18n.tr("Overwrite")
                     onClicked: {
-                        var overwriteRev = Math.max(noteDetailWindow.noteRevision, noteDetailWindow.noteConflictServerRevision)
-                        var existingList = backend.icloudNotes
-                        for (var i = 0; i < existingList.length; ++i) {
-                            var cur = existingList[i]
-                            if (cur && cur.id === noteDetailWindow.noteId) {
-                                overwriteRev = Math.max(overwriteRev, Number(cur.revision || cur.baseRevision || 0))
-                                break
+                        var deletedOnServer = (noteDetailWindow.noteHasServerConflict && noteDetailWindow.noteConflictServerRevision <= 0)
+                        var overwriteRev = deletedOnServer ? 0 : Math.max(noteDetailWindow.noteRevision, noteDetailWindow.noteConflictServerRevision)
+                        if (!deletedOnServer) {
+                            var existingList = backend.icloudNotes
+                            for (var i = 0; i < existingList.length; ++i) {
+                                var cur = existingList[i]
+                                if (cur && cur.id === noteDetailWindow.noteId) {
+                                    overwriteRev = Math.max(overwriteRev, Number(cur.revision || cur.baseRevision || 0))
+                                    break
+                                }
                             }
                         }
                         noteDetailWindow.noteId = backend.saveIcloudNote(noteDetailWindow.noteId, noteDetailTitleInput.text, noteDetailBodyInput.text, noteDetailFolderInput.text, overwriteRev)
                         noteDetailWindow.noteSyncSource = "local_hub"
                         noteDetailWindow.noteRevision = overwriteRev
                         noteDetailWindow.noteConflictServerRevision = 0
+                        noteDetailWindow.noteHasServerConflict = false
                         noteDetailWindow.pendingHubConflictPrompt = false
                         noteDetailWindow.loadedTitle = noteDetailTitleInput.text
                         noteDetailWindow.loadedFolder = noteDetailFolderInput.text
@@ -5495,6 +5577,7 @@ ApplicationWindow {
                                 icloudNotesPopup.selectedNoteSyncSource = "local_hub"
                                 icloudNotesPopup.selectedNoteRevision = noteDetailWindow.noteRevision
                                 icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                                icloudNotesPopup.selectedNoteHasServerConflict = false
                                 icloudNotesPopup.selectedNoteMutationSeq = noteDetailWindow.noteMutationSeq
                             }
                         }
@@ -5513,7 +5596,7 @@ ApplicationWindow {
                     onClicked: {
                         var isCopy = noteDetailWindow.noteSyncSource === "apple_notes_ro"
                         var targetId = isCopy ? "" : noteDetailWindow.noteId
-                        if (targetId !== "" && noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision) {
+                        if (targetId !== "" && (noteDetailWindow.noteHasServerConflict || noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision)) {
                             root.showToast(i18n.tr("Server conflict paused (rev %1). Choose Reload Latest, Save as Copy, or Overwrite.").arg(noteDetailWindow.noteConflictServerRevision))
                             return
                         }
@@ -5524,8 +5607,10 @@ ApplicationWindow {
                                 if (cur && cur.id === targetId) {
                                     var curSeq = Number(cur.clientMutationSeq || 0)
                                     var curConflictRev = Number(cur.conflictServerRevision || 0)
-                                    if (curConflictRev > noteDetailWindow.noteRevision) {
+                                    var curHasConflict = !!cur.hasServerConflict || (curConflictRev > noteDetailWindow.noteRevision)
+                                    if (curHasConflict) {
                                         noteDetailWindow.noteConflictServerRevision = curConflictRev
+                                        noteDetailWindow.noteHasServerConflict = true
                                         noteDetailWindow.noteConflictTitle = cur.conflictServerTitle || ""
                                         noteDetailWindow.noteConflictBody = cur.conflictServerBody || ""
                                         noteDetailWindow.noteConflictFolder = cur.conflictServerFolder || "Notes"
@@ -5573,8 +5658,7 @@ ApplicationWindow {
                             }
                         }
                         if (icloudNotesPopup.selectedNoteId === noteDetailWindow.noteId) {
-                            var popupCleanOnDetailSave = !icloudNotesPopup.visible ||
-                                                         (noteTitleInput.text === icloudNotesPopup.loadedTitle &&
+                            var popupCleanOnDetailSave = (noteTitleInput.text === icloudNotesPopup.loadedTitle &&
                                                           noteBodyInput.text === icloudNotesPopup.loadedBody &&
                                                           noteFolderInput.text === icloudNotesPopup.loadedFolder)
                             if (popupCleanOnDetailSave) {
@@ -5638,6 +5722,7 @@ ApplicationWindow {
                         noteDetailWindow.noteRevision = 0
                         noteDetailWindow.noteMutationSeq = 0
                         noteDetailWindow.noteConflictServerRevision = 0
+                        noteDetailWindow.noteHasServerConflict = false
                         noteDetailWindow.pendingHubConflictPrompt = false
                         noteDetailTitleInput.text = ""
                         noteDetailFolderInput.text = "Notes"
@@ -5651,6 +5736,7 @@ ApplicationWindow {
                             icloudNotesPopup.selectedNoteRevision = 0
                             icloudNotesPopup.selectedNoteMutationSeq = 0
                             icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                            icloudNotesPopup.selectedNoteHasServerConflict = false
                             icloudNotesPopup.pendingDetailConflictPrompt = false
                             noteTitleInput.text = ""
                             noteFolderInput.text = "Notes"
@@ -5694,6 +5780,7 @@ ApplicationWindow {
         property int selectedNoteRevision: 0
         property int selectedNoteMutationSeq: 0
         property int selectedNoteConflictServerRevision: 0
+        property bool selectedNoteHasServerConflict: false
         property string selectedNoteConflictTitle: ""
         property string selectedNoteConflictBody: ""
         property string selectedNoteConflictFolder: "Notes"
@@ -5724,6 +5811,7 @@ ApplicationWindow {
                         icloudNotesPopup.selectedNoteRevision = 0
                         icloudNotesPopup.selectedNoteMutationSeq = 0
                         icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                        icloudNotesPopup.selectedNoteHasServerConflict = false
                         icloudNotesPopup.selectedNoteConflictTitle = ""
                         icloudNotesPopup.selectedNoteConflictBody = ""
                         icloudNotesPopup.selectedNoteConflictFolder = "Notes"
@@ -5818,11 +5906,13 @@ ApplicationWindow {
                                     var loadedRev = Number(modelData.revision || modelData.baseRevision || 0)
                                     var loadedSeq = Number(modelData.clientMutationSeq || 0)
                                     var conflictRev = Number(modelData.conflictServerRevision || 0)
+                                    var hasConflict = !!modelData.hasServerConflict || (conflictRev > loadedRev)
                                     icloudNotesPopup.selectedNoteId = modelData.id || ""
                                     icloudNotesPopup.selectedNoteSyncSource = modelData.syncSource || "local_hub"
                                     icloudNotesPopup.selectedNoteRevision = loadedRev
                                     icloudNotesPopup.selectedNoteMutationSeq = loadedSeq
                                     icloudNotesPopup.selectedNoteConflictServerRevision = conflictRev
+                                    icloudNotesPopup.selectedNoteHasServerConflict = hasConflict
                                     icloudNotesPopup.selectedNoteConflictTitle = modelData.conflictServerTitle || ""
                                     icloudNotesPopup.selectedNoteConflictBody = modelData.conflictServerBody || ""
                                     icloudNotesPopup.selectedNoteConflictFolder = modelData.conflictServerFolder || "Notes"
@@ -5834,23 +5924,43 @@ ApplicationWindow {
                                     icloudNotesPopup.loadedFolder = noteFolderInput.text
                                     icloudNotesPopup.loadedBody = noteBodyInput.text
 
-                                    noteDetailWindow.noteId = modelData.id || ""
-                                    noteDetailWindow.noteSyncSource = modelData.syncSource || "local_hub"
-                                    noteDetailWindow.noteRevision = loadedRev
-                                    noteDetailWindow.noteMutationSeq = loadedSeq
-                                    noteDetailWindow.noteConflictServerRevision = conflictRev
-                                    noteDetailWindow.noteConflictTitle = modelData.conflictServerTitle || ""
-                                    noteDetailWindow.noteConflictBody = modelData.conflictServerBody || ""
-                                    noteDetailWindow.noteConflictFolder = modelData.conflictServerFolder || "Notes"
-                                    noteDetailWindow.pendingHubConflictPrompt = false
-                                    noteDetailWindow.targetChatGuid = backend.selectedChatGuid
-                                    noteDetailWindow.targetChatTitle = backend.selectedChatTitle
-                                    noteDetailTitleInput.text = modelData.title || ""
-                                    noteDetailFolderInput.text = modelData.folder || "Notes"
-                                    noteDetailBodyInput.text = modelData.body || modelData.snippet || ""
-                                    noteDetailWindow.loadedTitle = noteDetailTitleInput.text
-                                    noteDetailWindow.loadedFolder = noteDetailFolderInput.text
-                                    noteDetailWindow.loadedBody = noteDetailBodyInput.text
+                                    var detailHasUnsavedDraft = (noteDetailWindow.noteId !== "" ||
+                                                                 noteDetailTitleInput.text.length > 0 ||
+                                                                 noteDetailBodyInput.text.length > 0) &&
+                                                                (noteDetailTitleInput.text !== noteDetailWindow.loadedTitle ||
+                                                                 noteDetailBodyInput.text !== noteDetailWindow.loadedBody ||
+                                                                 noteDetailFolderInput.text !== noteDetailWindow.loadedFolder)
+                                    if (detailHasUnsavedDraft) {
+                                        if (noteDetailWindow.noteId === (modelData.id || "")) {
+                                            noteDetailWindow.noteConflictServerRevision = conflictRev
+                                            noteDetailWindow.noteHasServerConflict = hasConflict
+                                            noteDetailWindow.noteConflictTitle = modelData.conflictServerTitle || ""
+                                            noteDetailWindow.noteConflictBody = modelData.conflictServerBody || ""
+                                            noteDetailWindow.noteConflictFolder = modelData.conflictServerFolder || "Notes"
+                                        } else {
+                                            noteDetailWindow.pendingHubConflictPrompt = true
+                                            root.showToast(i18n.tr("Unsaved draft in Note Viewer preserved."))
+                                        }
+                                    } else {
+                                        noteDetailWindow.noteId = modelData.id || ""
+                                        noteDetailWindow.noteSyncSource = modelData.syncSource || "local_hub"
+                                        noteDetailWindow.noteRevision = loadedRev
+                                        noteDetailWindow.noteMutationSeq = loadedSeq
+                                        noteDetailWindow.noteConflictServerRevision = conflictRev
+                                        noteDetailWindow.noteHasServerConflict = hasConflict
+                                        noteDetailWindow.noteConflictTitle = modelData.conflictServerTitle || ""
+                                        noteDetailWindow.noteConflictBody = modelData.conflictServerBody || ""
+                                        noteDetailWindow.noteConflictFolder = modelData.conflictServerFolder || "Notes"
+                                        noteDetailWindow.pendingHubConflictPrompt = false
+                                        noteDetailWindow.targetChatGuid = backend.selectedChatGuid
+                                        noteDetailWindow.targetChatTitle = backend.selectedChatTitle
+                                        noteDetailTitleInput.text = modelData.title || ""
+                                        noteDetailFolderInput.text = modelData.folder || "Notes"
+                                        noteDetailBodyInput.text = modelData.body || modelData.snippet || ""
+                                        noteDetailWindow.loadedTitle = noteDetailTitleInput.text
+                                        noteDetailWindow.loadedFolder = noteDetailFolderInput.text
+                                        noteDetailWindow.loadedBody = noteDetailBodyInput.text
+                                    }
                                     noteDetailWindow.show()
                                     noteDetailWindow.raise()
                                     noteDetailWindow.requestActivate()
@@ -5908,7 +6018,8 @@ ApplicationWindow {
                         RowLayout {
                             visible: icloudNotesPopup.pendingDetailConflictPrompt ||
                                      (icloudNotesPopup.selectedNoteId !== "" &&
-                                      icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision)
+                                      (icloudNotesPopup.selectedNoteHasServerConflict ||
+                                       icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision))
                             Layout.fillWidth: true
                             spacing: 6
 
@@ -5916,7 +6027,9 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 text: icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision
                                       ? i18n.tr("Server conflict (rev %1). Resolve draft:").arg(icloudNotesPopup.selectedNoteConflictServerRevision)
-                                      : i18n.tr("Updated in detail window. Resolve draft:")
+                                      : (icloudNotesPopup.selectedNoteHasServerConflict
+                                         ? i18n.tr("Note deleted on server. Resolve draft:")
+                                         : i18n.tr("Updated in detail window. Resolve draft:"))
                                 font.pixelSize: theme.fontSize - 2
                                 color: "#f7768e"
                                 elide: Text.ElideRight
@@ -5925,20 +6038,29 @@ ApplicationWindow {
                             Button {
                                 text: i18n.tr("Reload Server")
                                 onClicked: {
-                                    if (icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision) {
+                                    if (icloudNotesPopup.selectedNoteHasServerConflict ||
+                                        icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision) {
                                         var srvTitle = icloudNotesPopup.selectedNoteConflictTitle
                                         var srvFolder = icloudNotesPopup.selectedNoteConflictFolder || "Notes"
                                         var srvBody = icloudNotesPopup.selectedNoteConflictBody
                                         var srvRev = icloudNotesPopup.selectedNoteConflictServerRevision
                                         backend.reloadConflictedIcloudNoteServerVersion(icloudNotesPopup.selectedNoteId)
+                                        if (srvRev <= 0) {
+                                            icloudNotesPopup.selectedNoteId = ""
+                                            icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                                            icloudNotesPopup.selectedNoteRevision = 0
+                                            icloudNotesPopup.selectedNoteMutationSeq = 0
+                                        } else {
+                                            icloudNotesPopup.selectedNoteRevision = srvRev
+                                        }
                                         noteTitleInput.text = srvTitle
                                         noteFolderInput.text = srvFolder
                                         noteBodyInput.text = srvBody
                                         icloudNotesPopup.loadedTitle = srvTitle
                                         icloudNotesPopup.loadedFolder = srvFolder
                                         icloudNotesPopup.loadedBody = srvBody
-                                        icloudNotesPopup.selectedNoteRevision = srvRev
                                         icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                                        icloudNotesPopup.selectedNoteHasServerConflict = false
                                         icloudNotesPopup.pendingDetailConflictPrompt = false
                                         return
                                     }
@@ -5965,15 +6087,19 @@ ApplicationWindow {
                                 text: i18n.tr("Save as Copy")
                                 onClicked: {
                                     var prevId = icloudNotesPopup.selectedNoteId
-                                    var hadServerConflict = (icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision && prevId !== "")
+                                    var hadServerConflict = ((icloudNotesPopup.selectedNoteHasServerConflict ||
+                                                              icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision) &&
+                                                             prevId !== "")
                                     var draftTitle = noteTitleInput.text
                                     var draftBody = noteBodyInput.text
                                     var draftFolder = noteFolderInput.text
                                     var copyId = backend.saveIcloudNote("", draftTitle, draftBody, draftFolder, 0)
+                                    var copyPersisted = (copyId !== "" && backend.isIcloudNoteDurablyPersisted(copyId))
                                     icloudNotesPopup.selectedNoteId = copyId
                                     icloudNotesPopup.selectedNoteSyncSource = "local_hub"
                                     icloudNotesPopup.selectedNoteRevision = 0
                                     icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                                    icloudNotesPopup.selectedNoteHasServerConflict = false
                                     icloudNotesPopup.pendingDetailConflictPrompt = false
                                     noteTitleInput.text = draftTitle
                                     noteFolderInput.text = draftFolder
@@ -5989,8 +6115,10 @@ ApplicationWindow {
                                             break
                                         }
                                     }
-                                    if (hadServerConflict) {
+                                    if (hadServerConflict && copyPersisted) {
                                         backend.reloadConflictedIcloudNoteServerVersion(prevId)
+                                    } else if (hadServerConflict && !copyPersisted) {
+                                        root.showToast(i18n.tr("Copy could not be saved to disk yet; original conflicted draft preserved."))
                                     }
                                 }
                             }
@@ -5998,19 +6126,23 @@ ApplicationWindow {
                             Button {
                                 text: i18n.tr("Overwrite Server")
                                 onClicked: {
-                                    var overwriteRev = Math.max(icloudNotesPopup.selectedNoteRevision, icloudNotesPopup.selectedNoteConflictServerRevision)
-                                    var existingList = backend.icloudNotes
-                                    for (var k = 0; k < existingList.length; ++k) {
-                                        var cur = existingList[k]
-                                        if (cur && cur.id === icloudNotesPopup.selectedNoteId) {
-                                            overwriteRev = Math.max(overwriteRev, Number(cur.revision || cur.baseRevision || 0))
-                                            break
+                                    var deletedOnServer = (icloudNotesPopup.selectedNoteHasServerConflict && icloudNotesPopup.selectedNoteConflictServerRevision <= 0)
+                                    var overwriteRev = deletedOnServer ? 0 : Math.max(icloudNotesPopup.selectedNoteRevision, icloudNotesPopup.selectedNoteConflictServerRevision)
+                                    if (!deletedOnServer) {
+                                        var existingList = backend.icloudNotes
+                                        for (var k = 0; k < existingList.length; ++k) {
+                                            var cur = existingList[k]
+                                            if (cur && cur.id === icloudNotesPopup.selectedNoteId) {
+                                                overwriteRev = Math.max(overwriteRev, Number(cur.revision || cur.baseRevision || 0))
+                                                break
+                                            }
                                         }
                                     }
                                     icloudNotesPopup.selectedNoteId = backend.saveIcloudNote(icloudNotesPopup.selectedNoteId, noteTitleInput.text, noteBodyInput.text, noteFolderInput.text, overwriteRev)
                                     icloudNotesPopup.selectedNoteSyncSource = "local_hub"
                                     icloudNotesPopup.selectedNoteRevision = overwriteRev
                                     icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                                    icloudNotesPopup.selectedNoteHasServerConflict = false
                                     icloudNotesPopup.pendingDetailConflictPrompt = false
                                     icloudNotesPopup.loadedTitle = noteTitleInput.text
                                     icloudNotesPopup.loadedFolder = noteFolderInput.text
@@ -6024,8 +6156,7 @@ ApplicationWindow {
                                         }
                                     }
                                     if (noteDetailWindow.noteId === icloudNotesPopup.selectedNoteId) {
-                                        var detailCleanOnPopupOverwrite = !noteDetailWindow.visible ||
-                                                                          (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
+                                        var detailCleanOnPopupOverwrite = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
                                                                            noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
                                                                            noteDetailFolderInput.text === noteDetailWindow.loadedFolder)
                                         if (detailCleanOnPopupOverwrite) {
@@ -6038,6 +6169,7 @@ ApplicationWindow {
                                             noteDetailWindow.noteSyncSource = "local_hub"
                                             noteDetailWindow.noteRevision = icloudNotesPopup.selectedNoteRevision
                                             noteDetailWindow.noteConflictServerRevision = 0
+                                            noteDetailWindow.noteHasServerConflict = false
                                             noteDetailWindow.noteMutationSeq = icloudNotesPopup.selectedNoteMutationSeq
                                             noteDetailWindow.pendingHubConflictPrompt = false
                                         }
@@ -6057,7 +6189,8 @@ ApplicationWindow {
                                 onClicked: {
                                     var isCopy = icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro"
                                     var targetId = isCopy ? "" : icloudNotesPopup.selectedNoteId
-                                    if (targetId !== "" && icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision) {
+                                    if (targetId !== "" && (icloudNotesPopup.selectedNoteHasServerConflict ||
+                                                            icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision)) {
                                         root.showToast(i18n.tr("Server conflict paused (rev %1). Choose Reload Server, Save as Copy, or Overwrite Server.").arg(icloudNotesPopup.selectedNoteConflictServerRevision))
                                         return
                                     }
@@ -6067,8 +6200,10 @@ ApplicationWindow {
                                             var curN = preList[k]
                                             if (curN && curN.id === targetId) {
                                                 var curConflictRev = Number(curN.conflictServerRevision || 0)
-                                                if (curConflictRev > icloudNotesPopup.selectedNoteRevision) {
+                                                var curHasConflict = !!curN.hasServerConflict || (curConflictRev > icloudNotesPopup.selectedNoteRevision)
+                                                if (curHasConflict) {
                                                     icloudNotesPopup.selectedNoteConflictServerRevision = curConflictRev
+                                                    icloudNotesPopup.selectedNoteHasServerConflict = true
                                                     icloudNotesPopup.selectedNoteConflictTitle = curN.conflictServerTitle || ""
                                                     icloudNotesPopup.selectedNoteConflictBody = curN.conflictServerBody || ""
                                                     icloudNotesPopup.selectedNoteConflictFolder = curN.conflictServerFolder || "Notes"
@@ -6117,8 +6252,7 @@ ApplicationWindow {
                                         }
                                     }
                                     if (noteDetailWindow.noteId === icloudNotesPopup.selectedNoteId) {
-                                        var detailCleanOnPopupSave = !noteDetailWindow.visible ||
-                                                                     (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
+                                        var detailCleanOnPopupSave = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
                                                                       noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
                                                                       noteDetailFolderInput.text === noteDetailWindow.loadedFolder)
                                         if (detailCleanOnPopupSave) {
@@ -6166,6 +6300,7 @@ ApplicationWindow {
                                     icloudNotesPopup.selectedNoteRevision = 0
                                     icloudNotesPopup.selectedNoteMutationSeq = 0
                                     icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                                    icloudNotesPopup.selectedNoteHasServerConflict = false
                                     icloudNotesPopup.pendingDetailConflictPrompt = false
                                     noteTitleInput.text = ""
                                     noteFolderInput.text = "Notes"
@@ -6179,6 +6314,7 @@ ApplicationWindow {
                                         noteDetailWindow.noteRevision = 0
                                         noteDetailWindow.noteMutationSeq = 0
                                         noteDetailWindow.noteConflictServerRevision = 0
+                                        noteDetailWindow.noteHasServerConflict = false
                                         noteDetailWindow.pendingHubConflictPrompt = false
                                         noteDetailTitleInput.text = ""
                                         noteDetailFolderInput.text = "Notes"
@@ -8210,7 +8346,11 @@ ApplicationWindow {
                             root.photoViewerPanY = 0
                             var cur = root.photoViewerItems[index]
                             if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0 && cur.canRequestAttachment) {
-                                backend.openAttachment(cur.guid, cur.name || "")
+                                if (cur.isCloudEvicted) {
+                                    backend.downloadCloudAttachment(cur.guid)
+                                } else {
+                                    backend.openAttachment(cur.guid, cur.name || "")
+                                }
                             }
                         }
                         onWheel: (wheel) => {
