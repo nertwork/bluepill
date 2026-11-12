@@ -3375,6 +3375,14 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("function cleanNoteDisplayBody(title, body)")));
         QVERIFY(qml.contains(QStringLiteral("id: icloudCalendarPopup")));
         QVERIFY(qml.contains(QStringLiteral("id: icloudPhotosPopup")));
+        // Verify compact non-fullscreen dimensions, interactive scrollbars, and pagination bars for Notes, Calendar, and Photos
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"notesListScrollBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"eventsListScrollBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photosGridScrollBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"notesPaginationBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"eventsPaginationBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photosPaginationBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photoViewerCard\"")));
     }
 
     void testIcloudNotesLifecycle() {
@@ -4106,6 +4114,102 @@ private slots:
         QVERIFY(reloadedBackend.icloudNotesEnabled());
         QVERIFY(reloadedBackend.icloudCalendarEnabled());
         QVERIFY(reloadedBackend.icloudPhotosEnabled());
+
+        // Verify iCloud Photos pagination (fetchIcloudPhotos(page), nextIcloudPhotosPage, prevIcloudPhotosPage, loadMoreIcloudPhotos)
+        QTcpServer photosServer;
+        QVERIFY(photosServer.listen(QHostAddress::LocalHost, 0));
+        QList<QString> requestedQueries;
+        QObject::connect(&photosServer, &QTcpServer::newConnection, &photosServer, [&]() {
+            while (QTcpSocket *sock = photosServer.nextPendingConnection()) {
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
+                    const QByteArray req = sock->readAll();
+                    const int firstLineEnd = req.indexOf("\r\n");
+                    const QString reqLine = QString::fromUtf8(firstLineEnd > 0 ? req.left(firstLineEnd) : req);
+                    if (reqLine.contains(QStringLiteral("/api/v1/icloud/photos"))) {
+                        requestedQueries.append(reqLine);
+                        const QUrl reqUrl(QStringLiteral("http://localhost") + reqLine.section(QLatin1Char(' '), 1, 1));
+                        const QUrlQuery q(reqUrl);
+                        const int limit = q.queryItemValue(QStringLiteral("limit")).toInt() > 0 ? q.queryItemValue(QStringLiteral("limit")).toInt() : 60;
+                        const int offset = q.queryItemValue(QStringLiteral("offset")).toInt();
+                        const int total = 150;
+                        QJsonArray items;
+                        const int count = qMax(0, qMin(limit, total - offset));
+                        for (int i = 0; i < count; ++i) {
+                            const int idx = offset + i;
+                            QJsonObject item;
+                            item.insert(QStringLiteral("guid"), QStringLiteral("plib:PHOTO-GUID-%1").arg(idx));
+                            item.insert(QStringLiteral("transferName"), QStringLiteral("IMG_%1.JPG").arg(1000 + idx));
+                            item.insert(QStringLiteral("mimeType"), QStringLiteral("image/jpeg"));
+                            item.insert(QStringLiteral("isCloudEvicted"), false);
+                            item.insert(QStringLiteral("width"), 4032);
+                            item.insert(QStringLiteral("height"), 3024);
+                            items.append(item);
+                        }
+                        QJsonObject resp;
+                        resp.insert(QStringLiteral("status"), 200);
+                        resp.insert(QStringLiteral("data"), items);
+                        resp.insert(QStringLiteral("total"), total);
+                        resp.insert(QStringLiteral("offset"), offset);
+                        resp.insert(QStringLiteral("limit"), limit);
+                        resp.insert(QStringLiteral("hasMore"), (offset + count) < total);
+                        const QByteArray body = QJsonDocument(resp).toJson(QJsonDocument::Compact);
+                        const QByteArray raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                               + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+                        sock->write(raw);
+                        sock->flush();
+                        sock->disconnectFromHost();
+                    } else {
+                        const QByteArray body = R"({"status":200,"data":[]})";
+                        const QByteArray raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                               + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+                        sock->write(raw);
+                        sock->flush();
+                        sock->disconnectFromHost();
+                    }
+                });
+            }
+        });
+
+        const QByteArray prevUrl = qgetenv("BLUEBUBBLES_URL");
+        const QByteArray prevPass = qgetenv("BLUEBUBBLES_PASSWORD");
+        qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(photosServer.serverPort()).toUtf8());
+        qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+
+        Backend pagedBackend(false);
+        pagedBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_photos_paged.json")));
+        pagedBackend.setStateFilePath(tempDir.filePath(QStringLiteral("state_photos_paged.json")));
+        pagedBackend.loadCredentials();
+
+        pagedBackend.fetchIcloudPhotos(0, false);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().size(), 60, 1500);
+        QCOMPARE(pagedBackend.icloudPhotosTotal(), 150);
+        QCOMPARE(pagedBackend.icloudPhotosPage(), 0);
+        QCOMPARE(pagedBackend.icloudPhotosPageSize(), 60);
+        QCOMPARE(pagedBackend.icloudPhotosPageCount(), 3);
+        QVERIFY(pagedBackend.icloudPhotosHasMore());
+        QVERIFY(pagedBackend.icloudPhotos().first().toMap().value(QStringLiteral("previewUrl")).toString().contains(QStringLiteral("height=360")));
+
+        // Next page -> page 1 (offset 60)
+        pagedBackend.nextIcloudPhotosPage();
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosPage(), 1, 1500);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().first().toMap().value(QStringLiteral("guid")).toString(),
+                                  QStringLiteral("plib:PHOTO-GUID-60"), 1500);
+        QCOMPARE(pagedBackend.icloudPhotos().size(), 60);
+        QVERIFY(pagedBackend.icloudPhotosHasMore());
+
+        // Load more -> appends page 2 (30 remaining items, total in list = 90 starting at page 1, hasMore = false)
+        pagedBackend.loadMoreIcloudPhotos();
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().size(), 90, 1500);
+        QCOMPARE(pagedBackend.icloudPhotosPage(), 1);
+        QVERIFY(!pagedBackend.icloudPhotosHasMore());
+
+        // Prev page -> page 0
+        pagedBackend.prevIcloudPhotosPage();
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosPage(), 0, 1500);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().size(), 60, 1500);
+
+        if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
+        if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);
     }
 
     void copyImageToClipboardAndPasteRoundtrip() {

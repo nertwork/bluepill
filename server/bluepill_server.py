@@ -3145,9 +3145,10 @@ class BluePillEngine:
             if zfn:
                 candidates.append(os.path.join(photos_lib, "resources", "derivatives", d, zfn))
         for cand in candidates:
-            real_cand = os.path.realpath(cand)
-            if os.path.exists(real_cand):
-                return real_cand
+            if os.path.exists(cand):
+                real_cand = os.path.realpath(cand)
+                if os.path.exists(real_cand):
+                    return real_cand
         return None
 
     def _resolve_photos_library_asset(self, guid: str) -> Optional[Tuple[str, str]]:
@@ -3441,12 +3442,13 @@ class BluePillEngine:
                     )
                     bucket_expr = "CASE WHEN transfer_state = 5 THEN 0 ELSE 1 END" if has_transfer_state else "0"
                     needed_chat = window_limit - len(chat_photos)
-                    batch_fetch = max(needed_chat * 2, 60)
+                    batch_fetch = max(min(needed_chat * 2, 500), 60)
+                    local_chat_cur = _cursor_state.get("chat_cursor") if use_cursor else None
 
                     while len(chat_photos) < window_limit:
                         query_clauses = list(where_clauses)
                         query_params: List[Any] = []
-                        chat_cur = _cursor_state.get("chat_cursor") if use_cursor else None
+                        chat_cur = _cursor_state.get("chat_cursor") if use_cursor else local_chat_cur
                         if chat_cur is not None:
                             last_bucket, last_rowid = chat_cur
                             if has_transfer_state:
@@ -3474,8 +3476,9 @@ class BluePillEngine:
                                 _cursor_state["chat_exhausted"] = True
                             break
                         for r in rows:
+                            local_chat_cur = (int(r["_bucket"]), int(r["_rowid"]))
                             if use_cursor:
-                                _cursor_state["chat_cursor"] = (int(r["_bucket"]), int(r["_rowid"]))
+                                _cursor_state["chat_cursor"] = local_chat_cur
                             g = str(r["guid"] or "").strip()
                             if not g or g in seen_chat_guids:
                                 continue
@@ -3525,8 +3528,8 @@ class BluePillEngine:
                             })
                             if len(chat_photos) >= window_limit:
                                 break
-                        if not use_cursor or len(rows) < batch_fetch:
-                            if use_cursor and len(rows) < batch_fetch:
+                        if len(rows) < batch_fetch:
+                            if use_cursor:
                                 _cursor_state["chat_exhausted"] = True
                             break
                 finally:
@@ -3546,11 +3549,12 @@ class BluePillEngine:
                     asset_count_row = pconn.execute("SELECT count(*) FROM ZASSET;").fetchone()
                     if asset_count_row and asset_count_row[0] > 0:
                         needed_lib = window_limit - len(lib_photos)
-                        lib_batch_fetch = max(needed_lib * 8, 400) if (photos_only and not use_cursor) else max(needed_lib, 60)
+                        lib_batch_fetch = max(min(needed_lib * 2, 600), 200) if (photos_only and not use_cursor) else max(needed_lib, 60)
                         evicted_lib_candidates: List[Dict[str, Any]] = []
                         seen_lib_paths: set[str] = set()
+                        local_lib_cur = _cursor_state.get("lib_cursor") if use_cursor else None
                         while len(lib_photos) < window_limit:
-                            lib_cur = _cursor_state.get("lib_cursor") if use_cursor else None
+                            lib_cur = _cursor_state.get("lib_cursor") if use_cursor else local_lib_cur
                             lib_cursor_sql = ""
                             lib_params: List[Any] = []
                             if lib_cur is not None:
@@ -3580,6 +3584,7 @@ class BluePillEngine:
                                   AND LOWER(ZFILENAME) NOT LIKE '%.m4v'
                                   AND LOWER(ZFILENAME) NOT LIKE '%.avi'
                                   AND LOWER(ZFILENAME) NOT LIKE '%.mkv'
+                                  AND LOWER(ZFILENAME) NOT LIKE '%.3gp'
                                   {lib_cursor_sql}
                                 ORDER BY COALESCE(ZDATECREATED, 0) DESC, ROWID DESC LIMIT ?
                                 """,
@@ -3590,14 +3595,19 @@ class BluePillEngine:
                                     _cursor_state["lib_exhausted"] = True
                                 break
                             for ar in rows:
+                                local_lib_cur = (float(ar["_zdate"] or 0.0), int(ar["_rowid"]))
                                 if use_cursor:
-                                    _cursor_state["lib_cursor"] = (float(ar["_zdate"] or 0.0), int(ar["_rowid"]))
+                                    _cursor_state["lib_cursor"] = local_lib_cur
                                 zuuid = str(ar["ZUUID"] or "").strip()
                                 if not zuuid or zuuid in seen_lib_guids:
                                     continue
                                 zfn = str(ar["ZFILENAME"] or f"asset_{zuuid[:8]}").strip()
                                 zdir = str(ar["ZDIRECTORY"] or "").strip()
-                                resolved_asset = self._find_photos_library_asset_file(photos_lib, zuuid, zfn, zdir)
+                                cached_pair = self._photos_library_assets.get(zuuid)
+                                if cached_pair and os.path.exists(cached_pair[0]):
+                                    resolved_asset: Optional[str] = cached_pair[0]
+                                else:
+                                    resolved_asset = self._find_photos_library_asset_file(photos_lib, zuuid, zfn, zdir)
                                 if resolved_asset and photos_only:
                                     if resolved_asset in seen_lib_paths:
                                         continue
@@ -3647,8 +3657,8 @@ class BluePillEngine:
                                     lib_photos.append(entry)
                                     if len(lib_photos) >= window_limit:
                                         break
-                            if not use_cursor or len(rows) < lib_batch_fetch:
-                                if use_cursor and len(rows) < lib_batch_fetch:
+                            if len(rows) < lib_batch_fetch:
+                                if use_cursor:
                                     _cursor_state["lib_exhausted"] = True
                                 break
                         if photos_only and not use_cursor and len(lib_photos) < window_limit and evicted_lib_candidates:
@@ -3716,6 +3726,62 @@ class BluePillEngine:
                 item["height"] = h
                 item["isPortrait"] = is_p
         return page_photos
+
+    def count_icloud_photos(self, source: str = "photos_library") -> int:
+        if not self.enable_photos:
+            return 0
+        photos_lib = os.path.expanduser(self.photos_library_path)
+        photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
+        source_mode = str(source or "all").strip().lower()
+        photos_only = source_mode in ("photos_library", "photos_only", "library")
+        total = 0
+        if os.path.exists(photos_db):
+            try:
+                pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+                try:
+                    row = pconn.execute(
+                        """
+                        SELECT count(*) FROM ZASSET
+                        WHERE ZFILENAME IS NOT NULL
+                          AND (ZTRASHEDSTATE IS NULL OR ZTRASHEDSTATE = 0)
+                          AND (
+                            ZUNIFORMTYPEIDENTIFIER IS NULL
+                            OR (
+                              LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%movie%'
+                              AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%video%'
+                              AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%mpeg%'
+                              AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%quicktime%'
+                              AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%audio%'
+                            )
+                          )
+                          AND LOWER(ZFILENAME) NOT LIKE '%.mov'
+                          AND LOWER(ZFILENAME) NOT LIKE '%.mp4'
+                          AND LOWER(ZFILENAME) NOT LIKE '%.m4v'
+                          AND LOWER(ZFILENAME) NOT LIKE '%.avi'
+                          AND LOWER(ZFILENAME) NOT LIKE '%.mkv'
+                          AND LOWER(ZFILENAME) NOT LIKE '%.3gp'
+                        """
+                    ).fetchone()
+                    if row and row[0]:
+                        total += int(row[0])
+                finally:
+                    pconn.close()
+            except sqlite3.Error:
+                pass
+        if not photos_only and os.path.exists(self.db_path):
+            try:
+                conn = self._open_chat_db()
+                try:
+                    row = conn.execute(
+                        "SELECT count(*) FROM attachment WHERE COALESCE(mime_type, '') IN ('image/heic', 'image/heif', 'image/jpeg', 'image/png')"
+                    ).fetchone()
+                    if row and row[0]:
+                        total += int(row[0])
+                finally:
+                    conn.close()
+            except sqlite3.Error:
+                pass
+        return total
 
     def sync_icloud_photos(
         self,
@@ -4258,7 +4324,7 @@ class BluePillEngine:
                             FROM ZICCLOUDSYNCINGOBJECT c
                             LEFT JOIN ZICNOTEDATA d ON c.ZNOTEDATA = d.Z_PK
                             WHERE c.ZTITLE1 IS NOT NULL AND (c.ZMARKEDFORDELETION IS NULL OR c.ZMARKEDFORDELETION != 1)
-                            ORDER BY c.ZMODIFICATIONDATE1 DESC LIMIT 150
+                            ORDER BY c.ZMODIFICATIONDATE1 DESC LIMIT 5000
                             """
                         ).fetchall()
                         for r in rows:
@@ -4499,7 +4565,7 @@ class BluePillEngine:
                     try:
                         conn.row_factory = sqlite3.Row
                         now_apple_ts = time.time() - 978307200.0
-                        window_start = now_apple_ts - (30 * 86400.0)
+                        window_start = now_apple_ts - (365 * 86400.0)
                         window_end = now_apple_ts + (365 * 86400.0)
                         occ_cols: set[str] = set()
                         try:
@@ -5262,18 +5328,18 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
   <!-- Notes Modal -->
   <div id="notesModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
-    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:820px;max-width:92vw;height:540px;display:flex;flex-direction:column;overflow:hidden;">
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:680px;max-width:84vw;height:460px;max-height:76vh;display:flex;flex-direction:column;overflow:hidden;">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);">
         <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📝 iCloud (Read-Only) & Local Hub Notes</span>
         <button onclick="closeNotesModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
       </div>
       <div style="display:flex;flex:1;overflow:hidden;">
-        <div style="width:280px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:rgba(255,255,255,0.02);">
+        <div style="width:250px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:rgba(255,255,255,0.02);">
           <div style="padding:10px;border-bottom:1px solid var(--border);display:flex;gap:6px;">
             <input id="notesSearchInput" oninput="filterNotes()" placeholder="Search notes..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px;" />
             <button onclick="newNote()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 10px;font-weight:600;font-size:12px;cursor:pointer;">+ New</button>
           </div>
-          <div id="notesList" style="flex:1;overflow-y:auto;padding:6px;"></div>
+          <div id="notesList" style="flex:1;overflow-y:scroll;padding:6px;"></div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;padding:14px;gap:10px;">
           <div id="noteConflictBanner" style="display:none;background:#3d2c12;border:1px solid #d29922;border-radius:6px;padding:8px 10px;font-size:12px;color:#f0f6fc;align-items:center;justify-content:space-between;gap:8px;">
@@ -5286,7 +5352,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           <div id="noteErrorBanner" style="display:none;background:#3d1418;border:1px solid #f85149;border-radius:6px;padding:8px 10px;font-size:12px;color:#f0f6fc;"></div>
           <input id="noteTitleInput" oninput="noteDraftToken += 1" placeholder="Note Title" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:14px;font-weight:600;" />
           <input id="noteFolderInput" oninput="noteDraftToken += 1" placeholder="Folder (e.g. Notes, Work)" value="Notes" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--muted);font-size:12px;" />
-          <textarea id="noteBodyInput" oninput="noteDraftToken += 1" placeholder="Write note content..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--text);font-size:13px;resize:none;font-family:inherit;"></textarea>
+          <textarea id="noteBodyInput" oninput="noteDraftToken += 1" placeholder="Write note content..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--text);font-size:13px;resize:none;font-family:inherit;overflow-y:scroll;"></textarea>
           <div style="display:flex;justify-content:space-between;align-items:center;">
             <div style="display:flex;gap:8px;">
               <button onclick="saveCurrentNote()" style="background:var(--green);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-weight:600;font-size:12px;cursor:pointer;">💾 Save</button>
@@ -5301,7 +5367,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
   <!-- Calendar Modal -->
   <div id="calendarModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
-    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:820px;max-width:92vw;height:540px;display:flex;flex-direction:column;overflow:hidden;">
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:660px;max-width:84vw;height:450px;max-height:76vh;display:flex;flex-direction:column;overflow:hidden;">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);">
         <div style="display:flex;align-items:center;gap:12px;">
           <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📅 iCloud (Read-Only) & Local Hub Calendar</span>
@@ -5315,13 +5381,13 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         <input id="evtDateInput" type="datetime-local" style="width:170px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:11px;" />
         <button onclick="saveNewEvent()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-weight:600;font-size:12px;cursor:pointer;">+ Add Event</button>
       </div>
-      <div id="eventsList" style="flex:1;overflow-y:auto;padding:12px 18px;display:flex;flex-direction:column;gap:8px;"></div>
+      <div id="eventsList" style="flex:1;overflow-y:scroll;padding:12px 18px;display:flex;flex-direction:column;gap:8px;"></div>
     </div>
   </div>
 
   <!-- Photos Modal -->
   <div id="photosModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
-    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:860px;max-width:92vw;height:560px;display:flex;flex-direction:column;overflow:hidden;">
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:700px;max-width:84vw;height:480px;max-height:76vh;display:flex;flex-direction:column;overflow:hidden;">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);">
         <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">☁️ iCloud Photos & Attachment Unpurge</span>
         <div style="display:flex;align-items:center;gap:8px;">
@@ -5330,7 +5396,14 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
       <div id="photosSyncStatusBanner" style="display:none;padding:8px 18px;font-size:12px;border-bottom:1px solid var(--border);"></div>
-      <div id="photosGrid" style="flex:1;overflow-y:auto;padding:14px;display:grid;grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));gap:12px;"></div>
+      <div id="photosGrid" style="flex:1;overflow-y:scroll;padding:14px;display:grid;grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));gap:10px;"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 16px;border-top:1px solid var(--border);background:rgba(255,255,255,0.02);font-size:12px;">
+        <span id="photosPageMeta" style="color:var(--muted);">Page 1</span>
+        <div style="display:flex;gap:6px;">
+          <button id="photosPrevBtn" onclick="changePhotosPage(-1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">‹ Prev</button>
+          <button id="photosNextBtn" onclick="changePhotosPage(1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">Next ›</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -5715,20 +5788,42 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       window.open(apiUrl('/api/v1/icloud/calendar.ics'), '_blank');
     }
 
+    let photosPage = 0;
+    const photosPageSize = 48;
+    let photosTotal = 0;
+    let photosHasMore = false;
     function openPhotosModal() {
       document.getElementById('photosModal').style.display = 'flex';
-      loadPhotos();
+      loadPhotos(0);
     }
     function closePhotosModal() {
       document.getElementById('photosModal').style.display = 'none';
     }
-    async function loadPhotos() {
+    function changePhotosPage(delta) {
+      const next = Math.max(0, photosPage + delta);
+      if (next === photosPage) return;
+      if (delta > 0 && !photosHasMore && (next * photosPageSize) >= photosTotal) return;
+      loadPhotos(next);
+    }
+    async function loadPhotos(page = photosPage) {
       try {
-        const resp = await fetch(apiUrl('/api/v1/icloud/photos'));
+        photosPage = Math.max(0, page);
+        const off = photosPage * photosPageSize;
+        const resp = await fetch(apiUrl('/api/v1/icloud/photos?limit=' + photosPageSize + '&offset=' + off));
         const j = await resp.json();
         const photos = j.data || [];
+        photosTotal = Number(j.total || photos.length);
+        photosHasMore = Boolean(j.hasMore);
+        const pageCount = Math.max(1, Math.ceil(photosTotal / photosPageSize));
+        const metaEl = document.getElementById('photosPageMeta');
+        if (metaEl) metaEl.textContent = 'Page ' + (photosPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
+        const prevBtn = document.getElementById('photosPrevBtn');
+        if (prevBtn) prevBtn.disabled = (photosPage <= 0);
+        const nextBtn = document.getElementById('photosNextBtn');
+        if (nextBtn) nextBtn.disabled = (!photosHasMore && (photosPage + 1) >= pageCount);
         const grid = document.getElementById('photosGrid');
         grid.innerHTML = '';
+        grid.scrollTop = 0;
         for (const p of photos) {
           const card = document.createElement('div');
           card.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px;';
@@ -5911,9 +6006,18 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                 elapsed_ms,
             )
 
-    def _send_json(self, status: int, data: Any, message: str = "Success") -> None:
+    def _send_json(
+        self,
+        status: int,
+        data: Any,
+        message: str = "Success",
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self._log_http(status)
-        body = json.dumps({"status": status, "message": message, "data": data}).encode("utf-8")
+        payload: Dict[str, Any] = {"status": status, "message": message, "data": data}
+        if extra:
+            payload.update(extra)
+        body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -6234,15 +6338,28 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             if not self._check_icloud_auth_and_transport(parsed):
                 return
             qs = urllib.parse.parse_qs(parsed.query)
-            lim = int((qs.get("limit") or [48])[0] or 48)
-            off = int((qs.get("offset") or [0])[0] or 0)
+            lim = max(1, min(int((qs.get("limit") or [48])[0] or 48), 250))
+            off = max(0, int((qs.get("offset") or [0])[0] or 0))
             src_param = str((qs.get("source") or [""])[0] or "").strip().lower()
             if not src_param:
                 photos_db_cand = os.path.join(
                     os.path.expanduser(self.engine.photos_library_path), "database", "Photos.sqlite"
                 )
                 src_param = "photos_library" if os.path.exists(photos_db_cand) else "all"
-            self._send_json(200, self.engine.query_icloud_photos(limit=lim, offset=off, source=src_param))
+            fetched = self.engine.query_icloud_photos(
+                limit=lim + 1,
+                offset=off,
+                source=src_param,
+                _max_limit=max(251, lim + 1),
+            )
+            has_more = len(fetched) > lim
+            page_items = fetched[:lim]
+            total_count = max(self.engine.count_icloud_photos(source=src_param), off + len(fetched))
+            self._send_json(
+                200,
+                page_items,
+                extra={"total": total_count, "offset": off, "limit": lim, "hasMore": has_more},
+            )
             return
 
         if path == "/api/v1/icloud/photos/sync":
@@ -6256,7 +6373,24 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/icloud/notes":
             if not self._check_icloud_auth_and_transport(parsed):
                 return
-            self._send_json(200, self.engine.query_icloud_notes())
+            qs = urllib.parse.parse_qs(parsed.query)
+            all_notes = self.engine.query_icloud_notes()
+            total_notes = len(all_notes)
+            raw_lim = (qs.get("limit") or [None])[0]
+            off = max(0, int((qs.get("offset") or [0])[0] or 0))
+            if raw_lim is not None and str(raw_lim).strip():
+                lim = max(1, min(int(raw_lim), 5000))
+                page_notes = all_notes[off : off + lim]
+                has_more = (off + lim) < total_notes
+            else:
+                lim = total_notes
+                page_notes = all_notes[off:] if off > 0 else all_notes
+                has_more = False
+            self._send_json(
+                200,
+                page_notes,
+                extra={"total": total_notes, "offset": off, "limit": lim, "hasMore": has_more},
+            )
             return
 
         if path == "/api/v1/icloud/calendars":
@@ -6269,8 +6403,16 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             if not self._check_icloud_auth_and_transport(parsed):
                 return
             qs = urllib.parse.parse_qs(parsed.query)
-            lim = int((qs.get("limit") or [250])[0] or 250)
-            self._send_json(200, self.engine.query_icloud_events(limit=lim))
+            lim = max(1, min(int((qs.get("limit") or [250])[0] or 250), 2500))
+            off = max(0, int((qs.get("offset") or [0])[0] or 0))
+            all_evts = self.engine.query_icloud_events(limit=off + lim + 1, max_limit=max(250, off + lim + 1))
+            has_more = len(all_evts) > (off + lim)
+            page_evts = all_evts[off : off + lim]
+            self._send_json(
+                200,
+                page_evts,
+                extra={"total": len(all_evts), "offset": off, "limit": lim, "hasMore": has_more},
+            )
             return
 
         if path == "/api/v1/icloud/calendar.ics":

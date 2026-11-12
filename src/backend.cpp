@@ -5048,23 +5048,26 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
         if (anyUpdated) {
             emit messagesChanged();
         }
-        bool photosUpdated = false;
+        bool photosEvictionResolved = false;
         for (int i = 0; i < m_icloudPhotos.size(); ++i) {
             QVariantMap pMap = m_icloudPhotos.at(i).toMap();
             const QString pg = pMap.value(QStringLiteral("guid")).toString();
             if (attachmentGuidsMatch(pg, attGuid)) {
+                const bool wasEvicted = pMap.value(QStringLiteral("isCloudEvicted")).toBool();
                 if (pMap.value(QStringLiteral("localUrl")).toString() != localUrl ||
                     pMap.value(QStringLiteral("previewUrl")).toString() != localUrl ||
-                    pMap.value(QStringLiteral("isCloudEvicted")).toBool()) {
+                    wasEvicted) {
                     pMap.insert(QStringLiteral("localUrl"), localUrl);
                     pMap.insert(QStringLiteral("previewUrl"), localUrl);
                     pMap.insert(QStringLiteral("isCloudEvicted"), false);
                     m_icloudPhotos[i] = pMap;
-                    photosUpdated = true;
+                    if (wasEvicted) {
+                        photosEvictionResolved = true;
+                    }
                 }
             }
         }
-        if (photosUpdated) {
+        if (photosEvictionResolved) {
             emit icloudPhotosChanged();
         }
         emit attachmentReady(attGuid, localUrl);
@@ -9704,7 +9707,7 @@ void Backend::fetchIcloudEvents() {
     if (!isSecureOrLocalIcloudEndpoint()) return;
     const quint64 gen = m_icloudEventsGeneration;
     const quint64 snapEpoch = m_icloudEventsSnapshotEpoch;
-    QNetworkReply *reply = m_nam.get(makeRequest(QStringLiteral("/api/v1/icloud/events")));
+    QNetworkReply *reply = m_nam.get(makeRequest(QStringLiteral("/api/v1/icloud/events?limit=500")));
     connect(reply, &QNetworkReply::finished, this, [this, reply, gen, snapEpoch]() {
         reply->deleteLater();
         if (gen != m_icloudEventsGeneration || snapEpoch != m_icloudEventsSnapshotEpoch) return;
@@ -10024,19 +10027,73 @@ void Backend::deleteIcloudEvent(const QString &id) {
     }
 }
 
-void Backend::fetchIcloudPhotos() {
+void Backend::setIcloudPhotosPageSize(int size) {
+    const int clamped = std::clamp(size, 12, 240);
+    if (m_icloudPhotosPageSize == clamped) return;
+    m_icloudPhotosPageSize = clamped;
+    m_icloudPhotosPage = 0;
+    emit icloudPhotosChanged();
+    if (m_icloudPhotosEnabled) {
+        fetchIcloudPhotos(0, false);
+    }
+}
+
+void Backend::nextIcloudPhotosPage() {
+    if (!m_icloudPhotosHasMore && (m_icloudPhotosPage + 1) >= icloudPhotosPageCount()) return;
+    fetchIcloudPhotos(m_icloudPhotosPage + 1, false);
+}
+
+void Backend::prevIcloudPhotosPage() {
+    if (m_icloudPhotosPage <= 0) return;
+    fetchIcloudPhotos(m_icloudPhotosPage - 1, false);
+}
+
+void Backend::loadMoreIcloudPhotos() {
+    if (m_icloudPhotosLoading || !m_icloudPhotosHasMore) return;
+    fetchIcloudPhotos(m_icloudPhotosPage, true);
+}
+
+void Backend::fetchIcloudPhotos(int page, bool append) {
     if (!m_icloudPhotosEnabled) return;
     if (!isSecureOrLocalIcloudEndpoint()) return;
-    QNetworkReply *reply = m_nam.get(makeRequest(QStringLiteral("/api/v1/icloud/photos?source=photos_library")));
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    const int pageSize = std::max(12, m_icloudPhotosPageSize);
+    const int targetPage = (page >= 0) ? page : m_icloudPhotosPage;
+    if (!append) {
+        m_icloudPhotosPage = std::max(0, targetPage);
+    }
+    const int offset = append
+                           ? (m_icloudPhotosPage * pageSize + int(m_icloudPhotos.size()))
+                           : (m_icloudPhotosPage * pageSize);
+    const quint64 reqSeq = ++m_icloudPhotosRequestSeq;
+    if (!m_icloudPhotosLoading) {
+        m_icloudPhotosLoading = true;
+        emit icloudPhotosLoadingChanged();
+    }
+    const QString path = QStringLiteral("/api/v1/icloud/photos?source=photos_library&limit=%1&offset=%2")
+                             .arg(pageSize)
+                             .arg(offset);
+    QNetworkReply *reply = m_nam.get(makeRequest(path));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reqSeq, append, offset, pageSize]() {
         reply->deleteLater();
+        if (reqSeq != m_icloudPhotosRequestSeq) return;
+        if (m_icloudPhotosLoading) {
+            m_icloudPhotosLoading = false;
+            emit icloudPhotosLoadingChanged();
+        }
         if (reply->error() == QNetworkReply::NoError) {
             const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
             const QJsonValue dataVal = doc.value(QStringLiteral("data"));
             if (doc.value(QStringLiteral("status")).toInt() == 200 && dataVal.isArray()) {
                 const QJsonArray data = dataVal.toArray();
-                m_icloudPhotos.clear();
                 QSet<QString> seenGuids;
+                if (!append) {
+                    m_icloudPhotos.clear();
+                } else {
+                    for (const QVariant &existing : m_icloudPhotos) {
+                        const QString eg = existing.toMap().value(QStringLiteral("guid")).toString().trimmed();
+                        if (!eg.isEmpty()) seenGuids.insert(eg);
+                    }
+                }
                 for (const QJsonValue &v : data) {
                     if (v.isObject()) {
                         QVariantMap m = v.toObject().toVariantMap();
@@ -10045,22 +10102,29 @@ void Backend::fetchIcloudPhotos() {
                             if (seenGuids.contains(guid)) continue;
                             seenGuids.insert(guid);
                         }
-                        const QString name = m.value(QStringLiteral("name")).toString();
-                        const bool isEvicted = m.value(QStringLiteral("isCloudEvicted")).toBool();
                         if (!guid.isEmpty()) {
-                            m.insert(QStringLiteral("previewUrl"), attachmentDownloadUrl(guid));
+                            const QString baseLiveUrl = attachmentDownloadUrl(guid);
+                            const QString thumbUrl = baseLiveUrl.startsWith(QStringLiteral("file://"))
+                                                         ? baseLiveUrl
+                                                         : (baseLiveUrl + (baseLiveUrl.contains(QLatin1Char('?')) ? QStringLiteral("&height=360") : QStringLiteral("?height=360")));
+                            m.insert(QStringLiteral("previewUrl"), thumbUrl);
                             const QString cached = lookupCachedAttachmentPath(m_attachmentPaths, guid);
                             if (!cached.isEmpty() && QFileInfo::exists(cached) && QFileInfo(cached).size() >= 100) {
                                 const QString localUrl = QUrl::fromLocalFile(cached).toString();
                                 m.insert(QStringLiteral("localUrl"), localUrl);
                                 m.insert(QStringLiteral("previewUrl"), localUrl);
                                 m.insert(QStringLiteral("isCloudEvicted"), false);
-                            } else if (!isEvicted) {
-                                downloadAttachment(guid, name, false);
                             }
                         }
                         m_icloudPhotos.append(m);
                     }
+                }
+                const int srvTotal = doc.value(QStringLiteral("total")).toInt(0);
+                m_icloudPhotosTotal = std::max(srvTotal, offset + int(data.size()));
+                if (doc.contains(QStringLiteral("hasMore"))) {
+                    m_icloudPhotosHasMore = doc.value(QStringLiteral("hasMore")).toBool();
+                } else {
+                    m_icloudPhotosHasMore = (int(data.size()) >= pageSize) && ((offset + int(data.size())) < m_icloudPhotosTotal);
                 }
                 emit icloudPhotosChanged();
             }

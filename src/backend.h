@@ -108,6 +108,12 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList icloudEvents READ icloudEvents NOTIFY icloudEventsChanged)
     Q_PROPERTY(QVariantList icloudCalendars READ icloudCalendars NOTIFY icloudEventsChanged)
     Q_PROPERTY(QVariantList icloudPhotos READ icloudPhotos NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(int icloudPhotosTotal READ icloudPhotosTotal NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(int icloudPhotosPage READ icloudPhotosPage NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(int icloudPhotosPageSize READ icloudPhotosPageSize WRITE setIcloudPhotosPageSize NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(int icloudPhotosPageCount READ icloudPhotosPageCount NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(bool icloudPhotosHasMore READ icloudPhotosHasMore NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(bool icloudPhotosLoading READ icloudPhotosLoading NOTIFY icloudPhotosLoadingChanged)
     Q_PROPERTY(bool icloudPhotosSyncing READ icloudPhotosSyncing NOTIFY icloudPhotosSyncingChanged)
     Q_PROPERTY(bool icloudNotesEnabled READ icloudNotesEnabled WRITE setIcloudNotesEnabled NOTIFY icloudHubModulesChanged)
     Q_PROPERTY(bool icloudCalendarEnabled READ icloudCalendarEnabled WRITE setIcloudCalendarEnabled NOTIFY icloudHubModulesChanged)
@@ -167,6 +173,17 @@ public:
     QVariantList icloudEvents() const { return m_icloudEvents; }
     QVariantList icloudCalendars() const { return m_icloudCalendars; }
     QVariantList icloudPhotos() const { return m_icloudPhotos; }
+    int icloudPhotosTotal() const { return std::max(int(m_icloudPhotos.size()), m_icloudPhotosTotal); }
+    int icloudPhotosPage() const { return m_icloudPhotosPage; }
+    int icloudPhotosPageSize() const { return m_icloudPhotosPageSize; }
+    void setIcloudPhotosPageSize(int size);
+    int icloudPhotosPageCount() const {
+        const int ps = std::max(1, m_icloudPhotosPageSize);
+        const int tot = icloudPhotosTotal();
+        return std::max(1, (tot + ps - 1) / ps);
+    }
+    bool icloudPhotosHasMore() const { return m_icloudPhotosHasMore; }
+    bool icloudPhotosLoading() const { return m_icloudPhotosLoading; }
     bool icloudPhotosSyncing() const { return m_icloudPhotosSyncInFlight; }
     bool icloudNotesEnabled() const { return m_icloudNotesEnabled; }
     bool icloudCalendarEnabled() const { return m_icloudCalendarEnabled; }
@@ -175,7 +192,11 @@ public:
     void setIcloudCalendarEnabled(bool enabled);
     void setIcloudPhotosEnabled(bool enabled);
     bool sendingMessage() const { return m_activeSendCount > 0; }
-    void setIcloudPhotosForTest(const QVariantList &list) { m_icloudPhotos = list; emit icloudPhotosChanged(); }
+    void setIcloudPhotosForTest(const QVariantList &list) {
+        m_icloudPhotos = list;
+        m_icloudPhotosTotal = list.size();
+        emit icloudPhotosChanged();
+    }
 
 
     void setWindowActive(bool active);
@@ -267,7 +288,10 @@ public:
     Q_INVOKABLE void fetchIcloudEvents();
     Q_INVOKABLE QString saveIcloudEvent(const QString &title, qint64 startMs, qint64 endMs, const QString &calendarName = QStringLiteral("Home"), const QString &notes = QString());
     Q_INVOKABLE void deleteIcloudEvent(const QString &id);
-    Q_INVOKABLE void fetchIcloudPhotos();
+    Q_INVOKABLE void fetchIcloudPhotos(int page = -1, bool append = false);
+    Q_INVOKABLE void nextIcloudPhotosPage();
+    Q_INVOKABLE void prevIcloudPhotosPage();
+    Q_INVOKABLE void loadMoreIcloudPhotos();
     Q_INVOKABLE void downloadCloudAttachment(const QString &attachmentGuid);
     Q_INVOKABLE void syncIcloudPhotos();
     Q_INVOKABLE void shareIcloudPhotoToChat(const QString &chatGuid, const QString &attachmentGuid, const QString &fileName = QString());
@@ -356,6 +380,7 @@ signals:
     void icloudNotesChanged();
     void icloudEventsChanged();
     void icloudPhotosChanged();
+    void icloudPhotosLoadingChanged();
     void icloudPhotosSyncingChanged();
     void icloudHubModulesChanged();
     void sendingMessageChanged();
@@ -551,6 +576,12 @@ private:
     qint64 m_icloudMutationRetryArmedDeadlineMs = 0;
     bool m_icloudMutationRetryScheduled = false;
     bool m_icloudPhotosSyncInFlight = false;
+    int m_icloudPhotosTotal = 0;
+    int m_icloudPhotosPage = 0;
+    int m_icloudPhotosPageSize = 60;
+    bool m_icloudPhotosHasMore = false;
+    bool m_icloudPhotosLoading = false;
+    quint64 m_icloudPhotosRequestSeq = 0;
     bool m_icloudNotesEnabled = true;
     bool m_icloudCalendarEnabled = true;
     bool m_icloudPhotosEnabled = true;

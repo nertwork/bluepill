@@ -289,6 +289,7 @@ ApplicationWindow {
                     guid: it.guid || "",
                     name: it.name || ("Photo " + (i + 1)),
                     localUrl: it.localUrl || "",
+                    previewUrl: it.previewUrl || "",
                     isCloudEvicted: !!it.isCloudEvicted,
                     canUnpurge: it.canUnpurge !== false,
                     canRequestAttachment: !it.isCloudEvicted || it.canUnpurge !== false
@@ -5334,11 +5335,13 @@ ApplicationWindow {
     Window {
         id: noteDetailWindow
         objectName: "noteDetailWindow"
+        transientParent: root
+        flags: Qt.Dialog
         title: (noteDetailTitleInput.text.trim().length > 0 ? noteDetailTitleInput.text.trim() : i18n.tr("Note Viewer")) + " - BluePill Notes"
-        width: Math.min(Math.max(Math.round(root.width * 0.85), 860), 1160)
-        height: Math.min(Math.max(Math.round(root.height * 0.85), 680), 900)
-        minimumWidth: 640
-        minimumHeight: 500
+        width: Math.min(640, Math.max(460, Math.round(root.width * 0.62)))
+        height: Math.min(480, Math.max(360, Math.round(root.height * 0.62)))
+        minimumWidth: 440
+        minimumHeight: 340
         color: theme.darkBackground
 
         property string noteId: ""
@@ -5536,6 +5539,8 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
+                ScrollBar.vertical.policy: ScrollBar.AlwaysOn
+                ScrollBar.vertical.interactive: true
 
                 TextArea {
                     id: noteDetailBodyInput
@@ -5894,9 +5899,22 @@ ApplicationWindow {
         modal: true
         focus: true
         anchors.centerIn: parent
-        width: Math.max(460, root.width - 24)
-        height: Math.max(420, root.height - 24)
+        width: Math.min(720, Math.max(460, root.width - 120))
+        height: Math.min(500, Math.max(360, root.height - 120))
         readonly property bool compactNotesLayout: width < 780
+        property int notesPage: 0
+        readonly property int notesPageSize: 20
+        readonly property var filteredNotes: {
+            var q = noteSearchInput.text.trim().toLowerCase()
+            var all = backend.icloudNotes || []
+            if (q.length === 0) return all
+            return all.filter(function(n) {
+                var t = (n.title || "").toLowerCase()
+                var b = (n.body || n.snippet || "").toLowerCase()
+                return t.indexOf(q) !== -1 || b.indexOf(q) !== -1
+            })
+        }
+        readonly property int notesPageCount: Math.max(1, Math.ceil(filteredNotes.length / notesPageSize))
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         background: Rectangle {
             color: theme.darkBackground
@@ -5979,28 +5997,35 @@ ApplicationWindow {
                         placeholderText: i18n.tr("Search notes...")
                         font.pixelSize: theme.fontSize
                         color: theme.foreground
+                        onTextChanged: icloudNotesPopup.notesPage = 0
                     }
 
                     ListView {
                         id: notesListView
+                        objectName: "notesListView"
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: ScrollBar {
+                            id: notesListScrollBar
+                            objectName: "notesListScrollBar"
+                            policy: ScrollBar.AlwaysOn
+                            interactive: true
+                            width: 10
+                        }
                         model: {
-                            var q = noteSearchInput.text.trim().toLowerCase()
-                            var all = backend.icloudNotes
-                            if (q.length === 0) return all
-                            return all.filter(function(n) {
-                                var t = (n.title || "").toLowerCase()
-                                var b = (n.body || n.snippet || "").toLowerCase()
-                                return t.indexOf(q) !== -1 || b.indexOf(q) !== -1
-                            })
+                            var all = icloudNotesPopup.filteredNotes
+                            var maxPage = Math.max(0, icloudNotesPopup.notesPageCount - 1)
+                            var pg = Math.min(Math.max(0, icloudNotesPopup.notesPage), maxPage)
+                            var startIdx = pg * icloudNotesPopup.notesPageSize
+                            return all.slice(startIdx, startIdx + icloudNotesPopup.notesPageSize)
                         }
                         spacing: 8
 
                         delegate: Rectangle {
-                            width: notesListView.width
-                            height: Math.max(78, noteCardCol.implicitHeight + 20)
+                            width: Math.max(120, notesListView.width - 14)
+                            height: Math.max(70, noteCardCol.implicitHeight + 16)
                             radius: 8
                             color: icloudNotesPopup.selectedNoteId === (modelData.id || "")
                                    ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.25)
@@ -6097,9 +6122,50 @@ ApplicationWindow {
                                         noteDetailWindow.loadedFolder = noteDetailFolderInput.text
                                         noteDetailWindow.loadedBody = noteDetailBodyInput.text
                                     }
+                                    if (noteDetailWindow.visible) {
+                                        noteDetailWindow.raise()
+                                        noteDetailWindow.requestActivate()
+                                    }
+                                }
+                                onDoubleClicked: {
                                     noteDetailWindow.show()
                                     noteDetailWindow.raise()
                                     noteDetailWindow.requestActivate()
+                                }
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        id: notesPaginationBar
+                        objectName: "notesPaginationBar"
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Button {
+                            text: "‹ Prev"
+                            enabled: icloudNotesPopup.notesPage > 0
+                            onClicked: {
+                                if (icloudNotesPopup.notesPage > 0) {
+                                    icloudNotesPopup.notesPage -= 1
+                                    notesListView.positionViewAtBeginning()
+                                }
+                            }
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: "Page " + (icloudNotesPopup.notesPage + 1) + " / " + icloudNotesPopup.notesPageCount + " (" + icloudNotesPopup.filteredNotes.length + ")"
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.darkForeground
+                            elide: Text.ElideRight
+                        }
+                        Button {
+                            text: "Next ›"
+                            enabled: (icloudNotesPopup.notesPage + 1) < icloudNotesPopup.notesPageCount
+                            onClicked: {
+                                if ((icloudNotesPopup.notesPage + 1) < icloudNotesPopup.notesPageCount) {
+                                    icloudNotesPopup.notesPage += 1
+                                    notesListView.positionViewAtBeginning()
                                 }
                             }
                         }
@@ -6159,6 +6225,8 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             clip: true
+                            ScrollBar.vertical.policy: ScrollBar.AlwaysOn
+                            ScrollBar.vertical.interactive: true
                             TextArea {
                                 id: noteBodyInput
                                 placeholderText: i18n.tr("Write note content here...")
@@ -6444,6 +6512,34 @@ ApplicationWindow {
                                 }
                             }
 
+                            Button {
+                                text: "⤢ " + i18n.tr("Pop Out")
+                                enabled: icloudNotesPopup.selectedNoteId !== "" || noteTitleInput.text.trim().length > 0 || noteBodyInput.text.trim().length > 0
+                                onClicked: {
+                                    noteDetailWindow.noteId = icloudNotesPopup.selectedNoteId
+                                    noteDetailWindow.noteSyncSource = icloudNotesPopup.selectedNoteSyncSource
+                                    noteDetailWindow.noteRevision = icloudNotesPopup.selectedNoteRevision
+                                    noteDetailWindow.noteMutationSeq = icloudNotesPopup.selectedNoteMutationSeq
+                                    noteDetailWindow.noteConflictServerRevision = icloudNotesPopup.selectedNoteConflictServerRevision
+                                    noteDetailWindow.noteHasServerConflict = icloudNotesPopup.selectedNoteHasServerConflict
+                                    noteDetailWindow.noteConflictTitle = icloudNotesPopup.selectedNoteConflictTitle
+                                    noteDetailWindow.noteConflictBody = icloudNotesPopup.selectedNoteConflictBody
+                                    noteDetailWindow.noteConflictFolder = icloudNotesPopup.selectedNoteConflictFolder
+                                    noteDetailWindow.pendingHubConflictPrompt = false
+                                    noteDetailWindow.targetChatGuid = backend.selectedChatGuid
+                                    noteDetailWindow.targetChatTitle = backend.selectedChatTitle
+                                    noteDetailTitleInput.text = noteTitleInput.text
+                                    noteDetailFolderInput.text = noteFolderInput.text
+                                    noteDetailBodyInput.text = noteBodyInput.text
+                                    noteDetailWindow.loadedTitle = icloudNotesPopup.loadedTitle
+                                    noteDetailWindow.loadedFolder = icloudNotesPopup.loadedFolder
+                                    noteDetailWindow.loadedBody = icloudNotesPopup.loadedBody
+                                    noteDetailWindow.show()
+                                    noteDetailWindow.raise()
+                                    noteDetailWindow.requestActivate()
+                                }
+                            }
+
                             Item { Layout.fillWidth: true }
 
                             Button {
@@ -6498,8 +6594,11 @@ ApplicationWindow {
         modal: true
         focus: true
         anchors.centerIn: parent
-        width: Math.min(880, root.width - 40)
-        height: Math.min(620, root.height - 40)
+        width: Math.min(680, Math.max(440, root.width - 120))
+        height: Math.min(480, Math.max(360, root.height - 120))
+        property int eventsPage: 0
+        readonly property int eventsPageSize: 25
+        readonly property int eventsPageCount: Math.max(1, Math.ceil((backend.icloudEvents ? backend.icloudEvents.length : 0) / eventsPageSize))
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         background: Rectangle {
             color: theme.darkBackground
@@ -6586,15 +6685,30 @@ ApplicationWindow {
 
             ListView {
                 id: eventsListView
+                objectName: "eventsListView"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
-                model: backend.icloudEvents
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ScrollBar {
+                    id: eventsListScrollBar
+                    objectName: "eventsListScrollBar"
+                    policy: ScrollBar.AlwaysOn
+                    interactive: true
+                    width: 10
+                }
+                model: {
+                    var all = backend.icloudEvents || []
+                    var maxPage = Math.max(0, icloudCalendarPopup.eventsPageCount - 1)
+                    var pg = Math.min(Math.max(0, icloudCalendarPopup.eventsPage), maxPage)
+                    var startIdx = pg * icloudCalendarPopup.eventsPageSize
+                    return all.slice(startIdx, startIdx + icloudCalendarPopup.eventsPageSize)
+                }
                 spacing: 6
 
                 delegate: Rectangle {
-                    width: eventsListView.width
-                    height: 56
+                    width: Math.max(180, eventsListView.width - 14)
+                    height: 54
                     radius: 6
                     color: theme.background
                     border.color: Qt.rgba(1, 1, 1, 0.08)
@@ -6653,6 +6767,41 @@ ApplicationWindow {
                     }
                 }
             }
+
+            RowLayout {
+                id: eventsPaginationBar
+                objectName: "eventsPaginationBar"
+                Layout.fillWidth: true
+                spacing: 8
+                Button {
+                    text: "‹ Prev"
+                    enabled: icloudCalendarPopup.eventsPage > 0
+                    onClicked: {
+                        if (icloudCalendarPopup.eventsPage > 0) {
+                            icloudCalendarPopup.eventsPage -= 1
+                            eventsListView.positionViewAtBeginning()
+                        }
+                    }
+                }
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "Page " + (icloudCalendarPopup.eventsPage + 1) + " / " + icloudCalendarPopup.eventsPageCount + " (" + (backend.icloudEvents ? backend.icloudEvents.length : 0) + " events)"
+                    font.pixelSize: theme.fontSize - 2
+                    color: theme.darkForeground
+                    elide: Text.ElideRight
+                }
+                Button {
+                    text: "Next ›"
+                    enabled: (icloudCalendarPopup.eventsPage + 1) < icloudCalendarPopup.eventsPageCount
+                    onClicked: {
+                        if ((icloudCalendarPopup.eventsPage + 1) < icloudCalendarPopup.eventsPageCount) {
+                            icloudCalendarPopup.eventsPage += 1
+                            eventsListView.positionViewAtBeginning()
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -6663,8 +6812,8 @@ ApplicationWindow {
         modal: true
         focus: true
         anchors.centerIn: parent
-        width: Math.min(880, root.width - 40)
-        height: Math.min(620, root.height - 40)
+        width: Math.min(720, Math.max(460, root.width - 120))
+        height: Math.min(500, Math.max(360, root.height - 120))
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         background: Rectangle {
             color: theme.darkBackground
@@ -6675,22 +6824,29 @@ ApplicationWindow {
 
         contentItem: ColumnLayout {
             anchors.fill: parent
-            anchors.margins: 16
-            spacing: 12
+            anchors.margins: 14
+            spacing: 10
 
             RowLayout {
                 Layout.fillWidth: true
+                spacing: 8
                 Text {
                     text: "☁️ " + i18n.tr("iCloud & iMessage Photos")
-                    font.pixelSize: theme.fontSize + 3
+                    font.pixelSize: theme.fontSize + 2
                     font.bold: true
                     color: theme.brightForeground
+                }
+                Text {
+                    visible: backend.icloudPhotosTotal > 0 || backend.icloudPhotos.length > 0
+                    text: "(" + (backend.icloudPhotosTotal > 0 ? backend.icloudPhotosTotal : backend.icloudPhotos.length) + ")"
+                    font.pixelSize: theme.fontSize - 1
+                    color: theme.darkForeground
                 }
                 Item { Layout.fillWidth: true }
                 Button {
                     text: backend.icloudPhotosSyncing
-                          ? ("⏳ " + i18n.tr("Syncing Photos..."))
-                          : ("⬇ " + i18n.tr("Sync All Photos"))
+                          ? ("⏳ " + i18n.tr("Syncing..."))
+                          : ("⬇ " + i18n.tr("Sync All"))
                     enabled: !backend.icloudPhotosSyncing
                     onClicked: {
                         if (backend.icloudPhotosSyncing) return
@@ -6699,7 +6855,7 @@ ApplicationWindow {
                 }
                 Button {
                     text: "🔄 " + i18n.tr("Refresh")
-                    onClicked: backend.fetchIcloudPhotos()
+                    onClicked: backend.fetchIcloudPhotos(backend.icloudPhotosPage, false)
                 }
                 Button {
                     text: "✕"
@@ -6709,20 +6865,43 @@ ApplicationWindow {
 
             GridView {
                 id: photosGridView
+                objectName: "photosGridView"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
-                cellWidth: 170
-                cellHeight: 250
+                boundsBehavior: Flickable.StopAtBounds
+                cellWidth: 156
+                cellHeight: 210
                 model: backend.icloudPhotos
+                ScrollBar.vertical: ScrollBar {
+                    id: photosGridScrollBar
+                    objectName: "photosGridScrollBar"
+                    policy: ScrollBar.AlwaysOn
+                    interactive: true
+                    width: 10
+                }
+                onAtYEndChanged: {
+                    if (atYEnd && moving && backend.icloudPhotosHasMore && !backend.icloudPhotosLoading) {
+                        backend.loadMoreIcloudPhotos()
+                    }
+                }
 
                 delegate: Rectangle {
-                    width: 160
-                    height: 240
+                    width: 146
+                    height: 200
                     radius: 8
                     color: theme.background
                     border.color: Qt.rgba(1, 1, 1, 0.1)
                     border.width: 1
+
+                    Connections {
+                        target: backend
+                        function onAttachmentReady(guid, localUrl) {
+                            if (modelData && modelData.guid === guid && localUrl && localUrl.length > 0) {
+                                thumbImg.source = localUrl
+                            }
+                        }
+                    }
 
                     ColumnLayout {
                         anchors.fill: parent
@@ -6731,7 +6910,7 @@ ApplicationWindow {
 
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: modelData.isPortrait ? 170 : 130
+                            Layout.preferredHeight: modelData.isPortrait ? 132 : 104
                             radius: 6
                             color: theme.darkBackground
                             clip: true
@@ -6745,6 +6924,7 @@ ApplicationWindow {
                                 smooth: true
                                 source: modelData.localUrl || modelData.previewUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
                                 asynchronous: true
+                                cache: true
                             }
 
                             Text {
@@ -6843,6 +7023,57 @@ ApplicationWindow {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            RowLayout {
+                id: photosPaginationBar
+                objectName: "photosPaginationBar"
+                Layout.fillWidth: true
+                spacing: 8
+
+                Button {
+                    text: "‹ Prev"
+                    enabled: backend.icloudPhotosPage > 0 && !backend.icloudPhotosLoading
+                    onClicked: {
+                        photosGridView.positionViewAtBeginning()
+                        backend.prevIcloudPhotosPage()
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: {
+                        var total = backend.icloudPhotosTotal > 0 ? backend.icloudPhotosTotal : backend.icloudPhotos.length
+                        var pg = backend.icloudPhotosPage + 1
+                        var pgCount = Math.max(1, backend.icloudPhotosPageCount)
+                        var startNum = total > 0 ? (backend.icloudPhotosPage * backend.icloudPhotosPageSize + 1) : 0
+                        var endNum = Math.min(total, startNum + backend.icloudPhotos.length - 1)
+                        if (backend.icloudPhotosLoading) {
+                            return "Loading page " + pg + " / " + pgCount + "..."
+                        }
+                        return "Page " + pg + " / " + pgCount + (total > 0 ? (" · Showing " + startNum + "–" + Math.max(startNum, endNum) + " of " + total) : "")
+                    }
+                    font.pixelSize: theme.fontSize - 2
+                    color: theme.darkForeground
+                    elide: Text.ElideRight
+                }
+
+                Button {
+                    text: "+ Load More"
+                    visible: backend.icloudPhotosHasMore
+                    enabled: backend.icloudPhotosHasMore && !backend.icloudPhotosLoading
+                    onClicked: backend.loadMoreIcloudPhotos()
+                }
+
+                Button {
+                    text: "Next ›"
+                    enabled: ((backend.icloudPhotosPage + 1) < backend.icloudPhotosPageCount || backend.icloudPhotosHasMore) && !backend.icloudPhotosLoading
+                    onClicked: {
+                        photosGridView.positionViewAtBeginning()
+                        backend.nextIcloudPhotosPage()
                     }
                 }
             }
@@ -8191,7 +8422,27 @@ ApplicationWindow {
 
         readonly property var currentPhoto: (root.photoViewerItems && root.photoViewerIndex >= 0 && root.photoViewerIndex < root.photoViewerItems.length)
                                             ? root.photoViewerItems[root.photoViewerIndex]
-                                            : ({ guid: "", name: "", localUrl: "", isCloudEvicted: false, canUnpurge: true, canRequestAttachment: true })
+                                            : ({ guid: "", name: "", localUrl: "", previewUrl: "", isCloudEvicted: false, canUnpurge: true, canRequestAttachment: true })
+
+        Connections {
+            target: backend
+            function onAttachmentReady(guid, localUrl) {
+                if (!root.showPhotoViewer || !guid || !localUrl) return
+                var items = root.photoViewerItems ? root.photoViewerItems.slice() : []
+                var changed = false
+                for (var i = 0; i < items.length; ++i) {
+                    if (items[i] && items[i].guid === guid && items[i].localUrl !== localUrl) {
+                        var copy = Object.assign({}, items[i])
+                        copy.localUrl = localUrl
+                        items[i] = copy
+                        changed = true
+                    }
+                }
+                if (changed) {
+                    root.photoViewerItems = items
+                }
+            }
+        }
 
         // Backdrop click to close
         MouseArea {
@@ -8206,13 +8457,28 @@ ApplicationWindow {
             }
         }
 
+        // Compact Centered Lightbox Card (instead of fullscreen edge-to-edge)
+        Rectangle {
+            id: photoViewerCard
+            objectName: "photoViewerCard"
+            anchors.centerIn: parent
+            width: Math.min(760, Math.max(460, root.width - 100))
+            height: Math.min(540, Math.max(360, root.height - 100))
+            radius: 12
+            color: theme.darkBackground
+            border.width: 1
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.45)
+            clip: true
+
+            MouseArea { anchors.fill: parent }
+
         // Top Header Bar (Filename, Index Counter, Zoom Controls, Close Button)
         Rectangle {
             id: photoViewerTopBar
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
-            height: 56
+            height: 50
             color: "#cc131620"
             z: 5
 
@@ -8403,9 +8669,9 @@ ApplicationWindow {
                 anchors.centerIn: parent
                 anchors.horizontalCenterOffset: root.photoViewerPanX
                 anchors.verticalCenterOffset: root.photoViewerPanY
-                width: Math.max(120, parent.width - (root.photoViewerItems.length > 1 ? 140 : 32))
-                height: Math.max(120, parent.height - 24)
-                source: photoViewerModal.currentPhoto.localUrl || ""
+                width: Math.max(120, parent.width - (root.photoViewerItems.length > 1 ? 120 : 24))
+                height: Math.max(120, parent.height - 16)
+                source: photoViewerModal.currentPhoto.localUrl || photoViewerModal.currentPhoto.previewUrl || ((photoViewerModal.currentPhoto.guid && !photoViewerModal.currentPhoto.isCloudEvicted) ? backend.attachmentDownloadUrl(photoViewerModal.currentPhoto.guid) : "")
                 asynchronous: true
                 cache: true
                 autoTransform: true
@@ -8605,7 +8871,7 @@ ApplicationWindow {
                     Image {
                         anchors.fill: parent
                         anchors.margins: 2
-                        source: modelData.localUrl || ""
+                        source: modelData.localUrl || modelData.previewUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
                         asynchronous: true
                         cache: true
                         autoTransform: true
@@ -8641,6 +8907,7 @@ ApplicationWindow {
                     }
                 }
             }
+        }
         }
     }
 
