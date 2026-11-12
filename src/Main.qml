@@ -5295,8 +5295,9 @@ ApplicationWindow {
 
                             Button {
                                 text: "🗑 " + i18n.tr("Delete")
-                                enabled: icloudNotesPopup.selectedNoteId !== ""
+                                enabled: icloudNotesPopup.selectedNoteId !== "" && icloudNotesPopup.selectedNoteSyncSource !== "apple_notes_ro"
                                 onClicked: {
+                                    if (icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro") return
                                     backend.deleteIcloudNote(icloudNotesPopup.selectedNoteId)
                                     icloudNotesPopup.selectedNoteId = ""
                                     icloudNotesPopup.selectedNoteSyncSource = "local_hub"
@@ -5465,8 +5466,9 @@ ApplicationWindow {
 
                         Button {
                             text: "🗑"
+                            enabled: !!modelData.id && modelData.syncSource !== "apple_calendar_ro"
                             onClicked: {
-                                if (modelData.id) backend.deleteIcloudEvent(modelData.id)
+                                if (modelData.id && modelData.syncSource !== "apple_calendar_ro") backend.deleteIcloudEvent(modelData.id)
                             }
                         }
                     }
@@ -5590,10 +5592,12 @@ ApplicationWindow {
 
                             Button {
                                 Layout.fillWidth: true
-                                text: modelData.isCloudEvicted ? "☁ Unpurge" : "View"
+                                enabled: !modelData.isCloudEvicted || modelData.canUnpurge !== false
+                                text: modelData.isCloudEvicted ? (modelData.canUnpurge === false ? "☁ iCloud Only" : "☁ Unpurge") : "View"
                                 onClicked: {
                                     if (!modelData.guid) return
                                     if (modelData.isCloudEvicted) {
+                                        if (modelData.canUnpurge === false) return
                                         backend.downloadCloudAttachment(modelData.guid)
                                     } else {
                                         backend.openAttachment(modelData.guid, modelData.name || "photo.jpg")

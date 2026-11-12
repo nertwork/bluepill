@@ -3411,6 +3411,49 @@ private slots:
         backend.deleteIcloudEvent(evtId);
         backend.deleteIcloudEvent(QStringLiteral("evt_remote_99"));
         QCOMPARE(backend.icloudEvents().size(), 0);
+
+        // Verify 250-event capped window reconciliation drops remotely deleted in-window events while preserving out-of-window events
+        QJsonArray initial250;
+        for (int i = 0; i < 250; ++i) {
+            QJsonObject e;
+            e.insert(QStringLiteral("id"), QStringLiteral("evt_win_%1").arg(i));
+            e.insert(QStringLiteral("title"), QStringLiteral("Event %1").arg(i));
+            e.insert(QStringLiteral("startMs"), 1700000000000LL + i * 3600000LL);
+            e.insert(QStringLiteral("endMs"), 1700003600000LL + i * 3600000LL);
+            initial250.append(e);
+        }
+        QJsonObject outOfWindowEvt;
+        outOfWindowEvt.insert(QStringLiteral("id"), QStringLiteral("evt_out_of_win"));
+        outOfWindowEvt.insert(QStringLiteral("title"), QStringLiteral("Far Future Out-Of-Window Event"));
+        outOfWindowEvt.insert(QStringLiteral("startMs"), 1800000000000LL);
+        outOfWindowEvt.insert(QStringLiteral("endMs"), 1800003600000LL);
+        QJsonArray withOut = initial250;
+        withOut.append(outOfWindowEvt);
+        backend.reconcileRemoteIcloudEventsForTest(withOut);
+        QCOMPARE(backend.icloudEvents().size(), 251);
+
+        // Next 250-item snapshot omits in-window evt_win_10 (deleted remotely) and shifts window by 1
+        QJsonArray next250;
+        for (int i = 0; i < 251; ++i) {
+            if (i == 10) continue; // deleted remotely inside the returned [minRemoteStartMs, maxRemoteStartMs] window
+            QJsonObject e;
+            e.insert(QStringLiteral("id"), QStringLiteral("evt_win_%1").arg(i));
+            e.insert(QStringLiteral("title"), QStringLiteral("Event %1").arg(i));
+            e.insert(QStringLiteral("startMs"), 1700000000000LL + i * 3600000LL);
+            e.insert(QStringLiteral("endMs"), 1700003600000LL + i * 3600000LL);
+            next250.append(e);
+        }
+        QCOMPARE(next250.size(), 250);
+        backend.reconcileRemoteIcloudEventsForTest(next250);
+        bool foundDeletedInWindow = false;
+        bool foundOutOfWindow = false;
+        for (const QVariant &v : backend.icloudEvents()) {
+            const QString id = v.toMap().value(QStringLiteral("id")).toString();
+            if (id == QStringLiteral("evt_win_10")) foundDeletedInWindow = true;
+            if (id == QStringLiteral("evt_out_of_win")) foundOutOfWindow = true;
+        }
+        QVERIFY(!foundDeletedInWindow);
+        QVERIFY(foundOutOfWindow);
     }
 
     void testIcloudPhotosAndUnpurge() {

@@ -2767,37 +2767,73 @@ class BluePillEngine:
 
         helper_ok = self._send_private_api_action("download-purged-attachment", {"attachmentGuid": clean_guid})
         fallback_used = False
-        if not helper_ok and sys.platform == "darwin" and os.path.exists(self.db_path):
-            try:
-                conn = self._open_chat_db()
+        if not helper_ok and sys.platform == "darwin":
+            if os.path.exists(self.db_path):
                 try:
-                    suffix_uuid = clean_guid.split("_")[-1] if "_" in clean_guid else clean_guid
-                    row = conn.execute(
-                        """
-                        SELECT filename FROM attachment
-                        WHERE guid = ? OR original_guid = ? OR guid LIKE ?
-                        ORDER BY ROWID DESC LIMIT 1
-                        """,
-                        (clean_guid, clean_guid, f"%{suffix_uuid}"),
-                    ).fetchone()
-                    if row and row["filename"]:
-                        raw_p = os.path.realpath(os.path.expanduser(str(row["filename"])))
-                        att_root = os.path.realpath(os.path.expanduser("~/Library/Messages/Attachments"))
-                        if raw_p.startswith(att_root + os.sep) and os.path.exists("/usr/bin/brctl"):
-                            res = subprocess.run(
-                                ["/usr/bin/brctl", "download", raw_p],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                timeout=8.0,
-                                check=False,
-                            )
-                            fallback_used = res.returncode == 0
-                finally:
-                    conn.close()
-            except (sqlite3.Error, OSError, subprocess.SubprocessError) as exc:
-                self.logger.debug("[photos] SIP brctl fallback failed for %s: %s", clean_guid, exc)
+                    conn = self._open_chat_db()
+                    try:
+                        suffix_uuid = clean_guid.split("_")[-1] if "_" in clean_guid else clean_guid
+                        row = conn.execute(
+                            """
+                            SELECT filename FROM attachment
+                            WHERE guid = ? OR original_guid = ? OR guid LIKE ?
+                            ORDER BY ROWID DESC LIMIT 1
+                            """,
+                            (clean_guid, clean_guid, f"%{suffix_uuid}"),
+                        ).fetchone()
+                        if row and row["filename"]:
+                            raw_p = os.path.realpath(os.path.expanduser(str(row["filename"])))
+                            att_root = os.path.realpath(os.path.expanduser("~/Library/Messages/Attachments"))
+                            if raw_p.startswith(att_root + os.sep) and os.path.exists("/usr/bin/brctl"):
+                                res = subprocess.run(
+                                    ["/usr/bin/brctl", "download", raw_p],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=8.0,
+                                    check=False,
+                                )
+                                fallback_used = res.returncode == 0
+                    finally:
+                        conn.close()
+                except (sqlite3.Error, OSError, subprocess.SubprocessError) as exc:
+                    self.logger.debug("[photos] SIP brctl fallback failed for %s: %s", clean_guid, exc)
 
-        if (helper_ok or fallback_used) and sys.platform == "darwin" and os.path.exists(self.db_path):
+            photos_lib = os.path.expanduser("~/Pictures/Photos Library.photoslibrary")
+            photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
+            if not fallback_used and os.path.exists(photos_db) and os.path.exists("/usr/bin/brctl"):
+                try:
+                    pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+                    try:
+                        pconn.row_factory = sqlite3.Row
+                        prow = pconn.execute(
+                            "SELECT ZFILENAME, ZDIRECTORY FROM ZASSET WHERE ZUUID = ? LIMIT 1",
+                            (clean_guid,),
+                        ).fetchone()
+                        if prow and prow["ZFILENAME"]:
+                            zfn = str(prow["ZFILENAME"]).strip()
+                            zdir = str(prow["ZDIRECTORY"] or "").strip()
+                            cand = (
+                                os.path.join(photos_lib, "originals", zdir, zfn)
+                                if zdir
+                                else os.path.join(photos_lib, "originals", clean_guid[0].upper(), zfn)
+                            )
+                            real_cand = os.path.realpath(cand)
+                            real_lib = os.path.realpath(photos_lib)
+                            if real_cand.startswith(real_lib + os.sep):
+                                res = subprocess.run(
+                                    ["/usr/bin/brctl", "download", real_cand],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=8.0,
+                                    check=False,
+                                )
+                                fallback_used = res.returncode == 0
+                    finally:
+                        pconn.close()
+                except (sqlite3.Error, OSError, subprocess.SubprocessError) as exc:
+                    self.logger.debug("[photos] Photos.sqlite brctl fallback failed for %s: %s", clean_guid, exc)
+
+        if (helper_ok or fallback_used) and sys.platform == "darwin":
             for _ in range(8):
                 time.sleep(0.35)
                 resolved = self.resolve_attachment_file(clean_guid)
@@ -2865,6 +2901,8 @@ class BluePillEngine:
                             "mimeType": str(r["mime_type"] or "image/jpeg"),
                             "totalBytes": int(r["total_bytes"] or 0),
                             "isCloudEvicted": (not exists_on_disk),
+                            "canUnpurge": True,
+                            "source": "chat_attachment",
                             "transferState": t_state,
                             "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(g)}/live",
                         })
@@ -2886,6 +2924,21 @@ class BluePillEngine:
                             SELECT ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY
                             FROM ZASSET
                             WHERE ZFILENAME IS NOT NULL
+                              AND (
+                                ZUNIFORMTYPEIDENTIFIER IS NULL
+                                OR (
+                                  LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%movie%'
+                                  AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%video%'
+                                  AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%mpeg%'
+                                  AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%quicktime%'
+                                  AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%audio%'
+                                )
+                              )
+                              AND LOWER(ZFILENAME) NOT LIKE '%.mov'
+                              AND LOWER(ZFILENAME) NOT LIKE '%.mp4'
+                              AND LOWER(ZFILENAME) NOT LIKE '%.m4v'
+                              AND LOWER(ZFILENAME) NOT LIKE '%.avi'
+                              AND LOWER(ZFILENAME) NOT LIKE '%.mkv'
                             ORDER BY ZDATECREATED DESC LIMIT ?
                             """,
                             (clamped_limit,),
@@ -2910,6 +2963,8 @@ class BluePillEngine:
                                     resolved_asset = rc
                                     break
                             mime = (mimetypes.guess_type(resolved_asset or zfn)[0] or "image/jpeg")
+                            if not mime.startswith("image/"):
+                                continue
                             size_bytes = 0
                             if resolved_asset:
                                 self._photos_library_assets[zuuid] = (resolved_asset, mime)
@@ -2917,6 +2972,10 @@ class BluePillEngine:
                                     size_bytes = int(os.path.getsize(resolved_asset))
                                 except OSError:
                                     size_bytes = 0
+                            can_unpurge = bool(
+                                resolved_asset is not None
+                                or (sys.platform == "darwin" and bool(zdir and zfn) and os.path.exists("/usr/bin/brctl"))
+                            )
                             seen_guids.add(zuuid)
                             lib_photos.append({
                                 "guid": zuuid,
@@ -2924,6 +2983,8 @@ class BluePillEngine:
                                 "mimeType": mime,
                                 "totalBytes": size_bytes,
                                 "isCloudEvicted": resolved_asset is None,
+                                "canUnpurge": can_unpurge,
+                                "source": "photos_library",
                                 "transferState": 5 if resolved_asset else 0,
                                 "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(zuuid)}/live",
                             })
@@ -2984,6 +3045,30 @@ class BluePillEngine:
             data = json.load(f)
         return data if isinstance(data, list) else []
 
+    def _read_deleted_map_strict(self, path: str) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        if not os.path.exists(path):
+            return out
+        try:
+            raw_list = self._read_json_list_strict(path)
+            for entry in raw_list:
+                if isinstance(entry, dict):
+                    item_id = str(entry.get("id") or "").strip()
+                    ts = int(entry.get("deletedAtMs") or 0)
+                    if item_id:
+                        out[item_id] = max(out.get(item_id, 0), ts)
+                elif entry is not None:
+                    item_id = str(entry).strip()
+                    if item_id:
+                        out.setdefault(item_id, 0)
+        except (OSError, ValueError) as exc:
+            self.logger.debug("[icloud] deleted map read warning (%s): %s", path, exc)
+        return out
+
+    def _write_deleted_map(self, path: str, del_map: Dict[str, int]) -> None:
+        serialized = [{"id": k, "deletedAtMs": int(v)} for k, v in del_map.items() if k]
+        self._atomic_write_json(path, serialized)
+
     @staticmethod
     def _extract_utf8_note_body(zdata: bytes, fallback_snippet: str) -> str:
         try:
@@ -3009,12 +3094,8 @@ class BluePillEngine:
         with self._icloud_store_lock:
             notes_path = self._get_notes_json_path()
             deleted_path = self._get_deleted_notes_json_path()
-            deleted_ids: set[str] = set()
-            if os.path.exists(deleted_path):
-                try:
-                    deleted_ids = {str(x) for x in self._read_json_list_strict(deleted_path)}
-                except (OSError, ValueError) as exc:
-                    self.logger.debug("[notes] deleted_notes read warning: %s", exc)
+            deleted_map = self._read_deleted_map_strict(deleted_path)
+            deleted_ids: set[str] = set(deleted_map.keys())
 
             local_notes: List[Dict[str, Any]] = []
             if os.path.exists(notes_path):
@@ -3093,15 +3174,29 @@ class BluePillEngine:
         title = str(note.get("title") or "Untitled Note").strip()
         body = str(note.get("body") or "").strip()
         folder = str(note.get("folder") or "Notes").strip()
-        updated_at = int(note.get("updatedAtMs") or int(time.time() * 1000))
+        explicit_ts = note.get("updatedAtMs")
+        updated_at = int(explicit_ts) if explicit_ts is not None else int(time.time() * 1000)
 
         with self._icloud_store_lock:
+            deleted_path = self._get_deleted_notes_json_path()
+            del_map = self._read_deleted_map_strict(deleted_path)
+            if nid in del_map:
+                if explicit_ts is not None and updated_at <= del_map[nid]:
+                    return self.query_icloud_notes()
+                del del_map[nid]
+                try:
+                    self._write_deleted_map(deleted_path, del_map)
+                except OSError as exc:
+                    self.logger.debug("[notes] deleted_notes update skipped: %s", exc)
+
             notes_path = self._get_notes_json_path()
             notes = self._read_json_list_strict(notes_path)
 
             found = False
             for item in notes:
                 if isinstance(item, dict) and item.get("id") == nid:
+                    if explicit_ts is not None and int(item.get("updatedAtMs") or 0) > updated_at:
+                        return self.query_icloud_notes()
                     item["title"] = title
                     item["body"] = body
                     item["folder"] = folder
@@ -3120,32 +3215,26 @@ class BluePillEngine:
                 })
 
             self._atomic_write_json(notes_path, notes)
-
-            deleted_path = self._get_deleted_notes_json_path()
-            if os.path.exists(deleted_path):
-                try:
-                    del_ids = self._read_json_list_strict(deleted_path)
-                    if nid in del_ids:
-                        del_ids = [d for d in del_ids if d != nid]
-                        self._atomic_write_json(deleted_path, del_ids)
-                except (OSError, ValueError) as exc:
-                    self.logger.debug("[notes] deleted_notes update skipped: %s", exc)
-
             return self.query_icloud_notes()
 
     def delete_icloud_note(self, note_id: str) -> List[Dict[str, Any]]:
         clean_id = str(note_id).strip()
         with self._icloud_store_lock:
             notes_path = self._get_notes_json_path()
+            max_existing_ts = 0
             if os.path.exists(notes_path):
-                notes = [n for n in self._read_json_list_strict(notes_path) if isinstance(n, dict) and n.get("id") != clean_id]
+                existing = self._read_json_list_strict(notes_path)
+                for n in existing:
+                    if isinstance(n, dict) and n.get("id") == clean_id:
+                        max_existing_ts = max(max_existing_ts, int(n.get("updatedAtMs") or 0))
+                notes = [n for n in existing if isinstance(n, dict) and n.get("id") != clean_id]
                 self._atomic_write_json(notes_path, notes)
 
             deleted_path = self._get_deleted_notes_json_path()
-            del_ids = self._read_json_list_strict(deleted_path) if os.path.exists(deleted_path) else []
-            if clean_id not in del_ids:
-                del_ids.append(clean_id)
-                self._atomic_write_json(deleted_path, del_ids)
+            del_map = self._read_deleted_map_strict(deleted_path)
+            deleted_at = max(int(time.time() * 1000), max_existing_ts + 1)
+            del_map[clean_id] = max(del_map.get(clean_id, 0), deleted_at)
+            self._write_deleted_map(deleted_path, del_map)
 
             return self.query_icloud_notes()
 
@@ -3194,12 +3283,8 @@ class BluePillEngine:
         with self._icloud_store_lock:
             events_path = self._get_calendar_events_json_path()
             deleted_path = self._get_deleted_events_json_path()
-            deleted_ids: set[str] = set()
-            if os.path.exists(deleted_path):
-                try:
-                    deleted_ids = {str(x) for x in self._read_json_list_strict(deleted_path)}
-                except (OSError, ValueError) as exc:
-                    self.logger.debug("[calendar] deleted_events read warning: %s", exc)
+            deleted_map = self._read_deleted_map_strict(deleted_path)
+            deleted_ids: set[str] = set(deleted_map.keys())
 
             events_by_id: Dict[str, Dict[str, Any]] = {}
 
@@ -3229,23 +3314,76 @@ class BluePillEngine:
                         now_apple_ts = time.time() - 978307200.0
                         window_start = now_apple_ts - (30 * 86400.0)
                         window_end = now_apple_ts + (365 * 86400.0)
-                        rows = conn.execute(
-                            """
-                            SELECT ci.ROWID, ci.summary, ci.description, ci.start_date, ci.end_date, ci.all_day, ci.calendar_id, ci.unique_identifier, c.title as calendar_title, c.color as calendar_color
-                            FROM CalendarItem ci
-                            LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
-                            WHERE ci.summary IS NOT NULL AND ci.start_date >= ? AND ci.start_date <= ?
-                            ORDER BY CASE WHEN ci.start_date >= ? THEN 0 ELSE 1 END ASC, ABS(ci.start_date - ?) ASC
-                            LIMIT ?
-                            """,
-                            (window_start, window_end, now_apple_ts - 86400.0, now_apple_ts, max(150, clamped_limit)),
-                        ).fetchall()
+                        occ_cols: set[str] = set()
+                        try:
+                            occ_cols = {
+                                str(col[1]).lower()
+                                for col in conn.execute("PRAGMA table_info(OccurrenceCache)").fetchall()
+                            }
+                        except sqlite3.Error:
+                            occ_cols = set()
+                        has_occ_cache = "calendar_item_id" in occ_cols and "occurrence_date" in occ_cols
+                        if has_occ_cache:
+                            rows = conn.execute(
+                                """
+                                SELECT ci.ROWID, ci.summary, ci.description,
+                                       COALESCE(MIN(oc.occurrence_date), ci.start_date) AS effective_start_date,
+                                       ci.start_date, ci.end_date, ci.all_day, ci.calendar_id, ci.unique_identifier,
+                                       c.title as calendar_title, c.color as calendar_color
+                                FROM CalendarItem ci
+                                LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
+                                LEFT JOIN OccurrenceCache oc
+                                  ON oc.calendar_item_id = ci.ROWID
+                                  AND oc.occurrence_date >= ? AND oc.occurrence_date <= ?
+                                WHERE ci.summary IS NOT NULL
+                                  AND (
+                                    (ci.start_date >= ? AND ci.start_date <= ?)
+                                    OR oc.occurrence_date IS NOT NULL
+                                  )
+                                GROUP BY ci.ROWID
+                                ORDER BY CASE WHEN COALESCE(MIN(oc.occurrence_date), ci.start_date) >= ? THEN 0 ELSE 1 END ASC,
+                                         ABS(COALESCE(MIN(oc.occurrence_date), ci.start_date) - ?) ASC
+                                LIMIT ?
+                                """,
+                                (
+                                    window_start,
+                                    window_end,
+                                    window_start,
+                                    window_end,
+                                    now_apple_ts - 86400.0,
+                                    now_apple_ts,
+                                    max(150, clamped_limit),
+                                ),
+                            ).fetchall()
+                        else:
+                            rows = conn.execute(
+                                """
+                                SELECT ci.ROWID, ci.summary, ci.description,
+                                       ci.start_date AS effective_start_date,
+                                       ci.start_date, ci.end_date, ci.all_day, ci.calendar_id, ci.unique_identifier,
+                                       c.title as calendar_title, c.color as calendar_color
+                                FROM CalendarItem ci
+                                LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
+                                WHERE ci.summary IS NOT NULL AND ci.start_date >= ? AND ci.start_date <= ?
+                                ORDER BY CASE WHEN ci.start_date >= ? THEN 0 ELSE 1 END ASC, ABS(ci.start_date - ?) ASC
+                                LIMIT ?
+                                """,
+                                (window_start, window_end, now_apple_ts - 86400.0, now_apple_ts, max(150, clamped_limit)),
+                            ).fetchall()
                         for r in rows:
                             eid = str(r["unique_identifier"] or r["ROWID"]).strip()
                             if not eid or eid in deleted_ids:
                                 continue
-                            start_date = float(r["start_date"] or 0)
-                            end_date = float(r["end_date"] or start_date + 3600)
+                            orig_start = float(r["start_date"] or 0)
+                            orig_end = float(r["end_date"] or orig_start + 3600)
+                            duration = max(0.0, orig_end - orig_start)
+                            eff_start = float(
+                                r["effective_start_date"]
+                                if "effective_start_date" in r.keys() and r["effective_start_date"] is not None
+                                else orig_start
+                            )
+                            start_date = eff_start
+                            end_date = eff_start + duration
                             start_ms = int((start_date + 978307200) * 1000)
                             end_ms = int((end_date + 978307200) * 1000)
                             cal_title = str(r["calendar_title"] or "Home")
@@ -3268,9 +3406,17 @@ class BluePillEngine:
                 except sqlite3.Error as exc:
                     self.logger.debug("[calendar] CalendarItem query failed: %s", exc)
 
+            now_ms = int(time.time() * 1000)
             res = list(events_by_id.values())
-            res.sort(key=lambda x: x.get("startMs", 0), reverse=True)
-            return res[:clamped_limit]
+            res.sort(
+                key=lambda x: (
+                    0 if int(x.get("startMs", 0)) >= now_ms - 86400000 else 1,
+                    abs(int(x.get("startMs", 0)) - now_ms),
+                )
+            )
+            selected = res[:clamped_limit]
+            selected.sort(key=lambda x: int(x.get("startMs", 0)))
+            return selected
 
     def save_icloud_event(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
         eid = str(event.get("id") or f"evt-{uuid.uuid4()}").strip()
@@ -3281,8 +3427,21 @@ class BluePillEngine:
         location = str(event.get("location") or "").strip()
         notes = str(event.get("notes") or "").strip()
         all_day = bool(event.get("allDay", False))
+        explicit_ts = event.get("updatedAtMs")
+        updated_at = int(explicit_ts) if explicit_ts is not None else int(time.time() * 1000)
 
         with self._icloud_store_lock:
+            deleted_path = self._get_deleted_events_json_path()
+            del_map = self._read_deleted_map_strict(deleted_path)
+            if eid in del_map:
+                if explicit_ts is not None and updated_at <= del_map[eid]:
+                    return self.query_icloud_events()
+                del del_map[eid]
+                try:
+                    self._write_deleted_map(deleted_path, del_map)
+                except OSError as exc:
+                    self.logger.debug("[calendar] deleted_events update skipped: %s", exc)
+
             events_path = self._get_calendar_events_json_path()
             events = self._read_json_list_strict(events_path)
 
@@ -3298,9 +3457,12 @@ class BluePillEngine:
                 "notes": notes,
                 "allDay": all_day,
                 "syncSource": "local_hub",
+                "updatedAtMs": updated_at,
             }
             for i, item in enumerate(events):
                 if isinstance(item, dict) and item.get("id") == eid:
+                    if explicit_ts is not None and int(item.get("updatedAtMs") or 0) > updated_at:
+                        return self.query_icloud_events()
                     events[i] = new_item
                     found = True
                     break
@@ -3308,32 +3470,26 @@ class BluePillEngine:
                 events.insert(0, new_item)
 
             self._atomic_write_json(events_path, events)
-
-            deleted_path = self._get_deleted_events_json_path()
-            if os.path.exists(deleted_path):
-                try:
-                    del_ids = self._read_json_list_strict(deleted_path)
-                    if eid in del_ids:
-                        del_ids = [d for d in del_ids if d != eid]
-                        self._atomic_write_json(deleted_path, del_ids)
-                except (OSError, ValueError) as exc:
-                    self.logger.debug("[calendar] deleted_events update skipped: %s", exc)
-
             return self.query_icloud_events()
 
     def delete_icloud_event(self, event_id: str) -> List[Dict[str, Any]]:
         clean_id = str(event_id).strip()
         with self._icloud_store_lock:
             events_path = self._get_calendar_events_json_path()
+            max_existing_ts = 0
             if os.path.exists(events_path):
-                events = [e for e in self._read_json_list_strict(events_path) if isinstance(e, dict) and e.get("id") != clean_id]
+                existing = self._read_json_list_strict(events_path)
+                for e in existing:
+                    if isinstance(e, dict) and e.get("id") == clean_id:
+                        max_existing_ts = max(max_existing_ts, int(e.get("updatedAtMs") or 0))
+                events = [e for e in existing if isinstance(e, dict) and e.get("id") != clean_id]
                 self._atomic_write_json(events_path, events)
 
             deleted_path = self._get_deleted_events_json_path()
-            del_ids = self._read_json_list_strict(deleted_path) if os.path.exists(deleted_path) else []
-            if clean_id not in del_ids:
-                del_ids.append(clean_id)
-                self._atomic_write_json(deleted_path, del_ids)
+            del_map = self._read_deleted_map_strict(deleted_path)
+            deleted_at = max(int(time.time() * 1000), max_existing_ts + 1)
+            del_map[clean_id] = max(del_map.get(clean_id, 0), deleted_at)
+            self._write_deleted_map(deleted_path, del_map)
 
             return self.query_icloud_events()
 
@@ -4126,9 +4282,15 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           badgeEl.style.cssText = 'font-size:10px;padding:1px 6px;border-radius:4px;' + (isEvicted ? 'background:#3d2c12;color:#d29922;' : 'background:#1c3322;color:#3fb950;');
           badgeEl.textContent = isEvicted ? '☁️ iCloud' : '✓ Local';
           const liveBtn = document.createElement('button');
-          liveBtn.style.cssText = 'background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:10px;cursor:pointer;';
-          liveBtn.textContent = isEvicted ? '☁️ Unpurge' : '⬇ Live';
-          liveBtn.addEventListener('click', () => downloadAttachmentLive(p.guid));
+          const canUnpurge = p.canUnpurge !== false;
+          liveBtn.style.cssText = 'background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:10px;' + ((isEvicted && !canUnpurge) ? 'opacity:0.5;cursor:not-allowed;' : 'cursor:pointer;');
+          if (isEvicted && !canUnpurge) {
+            liveBtn.textContent = '☁️ iCloud Only';
+            liveBtn.disabled = true;
+          } else {
+            liveBtn.textContent = isEvicted ? '☁️ Unpurge' : '⬇ Live';
+            liveBtn.addEventListener('click', () => downloadAttachmentLive(p.guid));
+          }
           footerRow.appendChild(badgeEl);
           footerRow.appendChild(liveBtn);
 
@@ -4831,10 +4993,12 @@ def run_selftest(engine: BluePillEngine) -> int:
         # iCloud Notes Verification
         notes_init = test_eng.query_icloud_notes()
         assert isinstance(notes_init, list), "query_icloud_notes must return list"
-        saved_notes = test_eng.save_icloud_note({"id": "st-note-direct", "title": "Direct Note", "body": "Body Direct"})
+        saved_notes = test_eng.save_icloud_note({"id": "st-note-direct", "title": "Direct Note", "body": "Body Direct", "updatedAtMs": 1700000001000})
         assert any(n.get("id") == "st-note-direct" for n in saved_notes), "Direct note save failed"
         del_notes = test_eng.delete_icloud_note("st-note-direct")
         assert not any(n.get("id") == "st-note-direct" for n in del_notes), "Direct note delete failed"
+        stale_resave_notes = test_eng.save_icloud_note({"id": "st-note-direct", "title": "Stale Delayed Save", "body": "Should be ignored", "updatedAtMs": 1700000001000})
+        assert not any(n.get("id") == "st-note-direct" for n in stale_resave_notes), "Stale note save resurrected deleted note"
 
         # HTTP Notes verification
         req_post_note = urllib.request.Request(
@@ -4864,12 +5028,35 @@ def run_selftest(engine: BluePillEngine) -> int:
         assert isinstance(cals, list), "query_icloud_calendars must return list"
         evts = test_eng.query_icloud_events()
         assert isinstance(evts, list), "query_icloud_events must return list"
-        saved_evts = test_eng.save_icloud_event({"id": "st-evt-direct", "title": "Direct Event", "startMs": 1700000000000, "endMs": 1700003600000})
+        saved_evts = test_eng.save_icloud_event({"id": "st-evt-direct", "title": "Direct Event", "startMs": 1700000000000, "endMs": 1700003600000, "updatedAtMs": 1700000001000})
         assert any(e.get("id") == "st-evt-direct" for e in saved_evts), "Direct event save failed"
         ics_data = test_eng.generate_calendar_ics()
         assert "BEGIN:VCALENDAR" in ics_data and "st-evt-direct" in ics_data, "ICS generator missing event"
         del_evts = test_eng.delete_icloud_event("st-evt-direct")
         assert not any(e.get("id") == "st-evt-direct" for e in del_evts), "Direct event delete failed"
+        stale_resave_evts = test_eng.save_icloud_event({"id": "st-evt-direct", "title": "Stale Delayed Event", "startMs": 1700000000000, "endMs": 1700003600000, "updatedAtMs": 1700000001000})
+        assert not any(e.get("id") == "st-evt-direct" for e in stale_resave_evts), "Stale event save resurrected deleted event"
+
+        # Verify proximity ordering before slicing when limit < total events
+        now_selftest_ms = int(time.time() * 1000)
+        for idx in range(5):
+            test_eng.save_icloud_event({
+                "id": f"st-evt-far-{idx}",
+                "title": f"Far Future {idx}",
+                "startMs": now_selftest_ms + (200 + idx) * 86400000,
+                "endMs": now_selftest_ms + (200 + idx) * 86400000 + 3600000,
+            })
+        test_eng.save_icloud_event({
+            "id": "st-evt-tomorrow",
+            "title": "Tomorrow Event",
+            "startMs": now_selftest_ms + 86400000,
+            "endMs": now_selftest_ms + 86400000 + 3600000,
+        })
+        prox_evts = test_eng.query_icloud_events(limit=3)
+        assert any(e.get("id") == "st-evt-tomorrow" for e in prox_evts), f"Proximity sort dropped tomorrow event: {prox_evts}"
+        for idx in range(5):
+            test_eng.delete_icloud_event(f"st-evt-far-{idx}")
+        test_eng.delete_icloud_event("st-evt-tomorrow")
 
         # HTTP Events verification
         req_post_evt = urllib.request.Request(
