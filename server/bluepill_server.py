@@ -4617,6 +4617,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     let conflictSelectionToken = 0;
     let conflictSaveAttemptSeq = 0;
     let conflictNoteDeleted = false;
+    const deletedNoteSeqById = {};
     let allEvents = [];
 
     function openNotesModal() {
@@ -4732,7 +4733,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       });
       const j = await resp.json();
       if (reqToken !== noteSelectionToken || selectedNoteId !== nid) {
-        if (Array.isArray(j.data)) {
+        if (Array.isArray(j.data) && (deletedNoteSeqById[nid] || 0) <= reqAttemptSeq) {
           const updatedTarget = j.data.find(item => item && item.id === nid);
           if (updatedTarget) {
             const idx = allNotes.findIndex(item => item && item.id === nid);
@@ -4748,12 +4749,15 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         renderNotesList();
         return;
       }
+      let responseSavedNote = null;
       if (Array.isArray(j.data)) {
+        responseSavedNote = j.data.find(item => item && item.id === nid) || null;
         if (reqAttemptSeq >= noteSaveAttemptSeq) {
-          allNotes = j.data;
+          allNotes = j.data.filter(item => item && (deletedNoteSeqById[item.id] || 0) <= reqAttemptSeq);
         } else {
           for (const item of j.data) {
             if (!item || !item.id) continue;
+            if ((deletedNoteSeqById[item.id] || 0) > reqAttemptSeq) continue;
             const idx = allNotes.findIndex(existing => existing && existing.id === item.id);
             if (idx >= 0) {
               const curRev = typeof allNotes[idx].revision === 'number' ? allNotes[idx].revision : 0;
@@ -4768,6 +4772,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const banner = document.getElementById('noteConflictBanner');
       const errBanner = document.getElementById('noteErrorBanner');
       if (resp.ok && j.status === 200) {
+        delete deletedNoteSeqById[nid];
         if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
         const canClearConflict = (reqAttemptSeq >= conflictSaveAttemptSeq);
         if (canClearConflict) {
@@ -4781,9 +4786,8 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         if (reqDraftToken === noteDraftToken && canClearConflict) {
           selectNote(nid);
         } else {
-          const savedNote = allNotes.find(item => item.id === nid);
-          if (savedNote && typeof savedNote.revision === 'number') {
-            selectedNoteRevision = Math.max(selectedNoteRevision || 0, savedNote.revision);
+          if (canClearConflict && !conflictNoteId && responseSavedNote && typeof responseSavedNote.revision === 'number') {
+            selectedNoteRevision = Math.max(selectedNoteRevision || 0, responseSavedNote.revision);
           }
           const delBtn = document.getElementById('deleteNoteBtn');
           if (delBtn) delBtn.style.display = 'inline-block';
@@ -4842,14 +4846,21 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
     async function deleteCurrentNote() {
       if (!selectedNoteId) return;
-      const n = allNotes.find(item => item.id === selectedNoteId);
+      const delTargetId = selectedNoteId;
+      const n = allNotes.find(item => item.id === delTargetId);
       if (!n || (n.syncSource && n.syncSource !== 'local_hub')) return;
-      const resp = await fetch(apiUrl('/api/v1/icloud/notes/' + encodeURIComponent(selectedNoteId)), { method: 'DELETE' });
+      const delSeq = ++noteSaveAttemptSeq;
+      const resp = await fetch(apiUrl('/api/v1/icloud/notes/' + encodeURIComponent(delTargetId)), { method: 'DELETE' });
       const j = await resp.json();
       if (!resp.ok || j.status !== 200) return;
-      allNotes = j.data || [];
-      selectedNoteId = allNotes.length > 0 ? allNotes[0].id : null;
-      if (selectedNoteId) selectNote(selectedNoteId); else newNote();
+      deletedNoteSeqById[delTargetId] = delSeq;
+      allNotes = (j.data || []).filter(item => item && (deletedNoteSeqById[item.id] || 0) <= delSeq);
+      if (selectedNoteId === delTargetId) {
+        selectedNoteId = allNotes.length > 0 ? allNotes[0].id : null;
+        if (selectedNoteId) selectNote(selectedNoteId); else newNote();
+      } else {
+        renderNotesList();
+      }
     }
     function sendNoteToChat() {
       const title = document.getElementById('noteTitleInput').value;
@@ -5581,7 +5592,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_json(200, self.engine.save_icloud_note(body, raise_on_conflict=True))
-            except ValueError as exc:
+            except (ValueError, OverflowError) as exc:
                 status_code = 409 if str(exc).startswith("Conflict:") else 400
                 data = self.engine.query_icloud_notes() if status_code == 409 else None
                 self._send_json(status_code, data, str(exc))
@@ -5592,7 +5603,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_json(200, self.engine.save_icloud_event(body, raise_on_conflict=True))
-            except ValueError as exc:
+            except (ValueError, OverflowError) as exc:
                 status_code = 409 if str(exc).startswith("Conflict:") else 400
                 data = self.engine.query_icloud_events() if status_code == 409 else None
                 self._send_json(status_code, data, str(exc))
@@ -5629,7 +5640,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"id": req_id, "data": data})
             except PermissionError as exc:
                 self._send_json(403, {"id": req_id, "data": None}, str(exc))
-            except ValueError as exc:
+            except (ValueError, OverflowError) as exc:
                 status_code = 409 if str(exc).startswith("Conflict:") else 400
                 self._send_json(status_code, {"id": req_id, "data": None}, str(exc))
             except (KeyError, TypeError, OSError, RuntimeError, sqlite3.Error) as exc:
@@ -5717,7 +5728,7 @@ def run_stdio_loop(engine: BluePillEngine) -> int:
             resp = {"id": req_id, "status": 200, "data": data}
         except PermissionError as exc:
             resp = {"id": req_id, "status": 403, "message": str(exc), "data": None}
-        except ValueError as exc:
+        except (ValueError, OverflowError) as exc:
             status_code = 409 if str(exc).startswith("Conflict:") else 400
             resp = {"id": req_id, "status": status_code, "message": str(exc), "data": None}
         except (KeyError, TypeError, OSError, RuntimeError, sqlite3.Error) as exc:

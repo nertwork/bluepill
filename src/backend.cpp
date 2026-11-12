@@ -7963,6 +7963,7 @@ void Backend::replayPendingIcloudMutations() {
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && !m_pendingIcloudNoteDeletes.contains(noteId)) {
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && doc.value(QStringLiteral("data")).isArray()) {
                     const QJsonArray dataArr = doc.value(QStringLiteral("data")).toArray();
+                    ++m_icloudNotesSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
                     if (sameMutation) {
                         m_pendingIcloudNoteSaves.remove(noteId);
@@ -7994,6 +7995,7 @@ void Backend::replayPendingIcloudMutations() {
                 }
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
+                ++m_icloudNotesSnapshotEpoch;
                 if (sameMutation && m_pendingIcloudNoteSaves.contains(noteId)) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
@@ -8017,6 +8019,7 @@ void Backend::replayPendingIcloudMutations() {
                 return;
             }
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudNoteDeletes.contains(noteId)) {
+                ++m_icloudNotesSnapshotEpoch;
                 clearIcloudMutationRetryState(mutKey);
                 scheduleIcloudMutationRetry(true);
                 return;
@@ -8054,6 +8057,7 @@ void Backend::replayPendingIcloudMutations() {
             const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && !m_pendingIcloudNoteSaves.contains(noteId)) {
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && doc.value(QStringLiteral("data")).isArray()) {
+                    ++m_icloudNotesSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
                     m_pendingIcloudNoteDeletes.remove(noteId);
                     if (gen == m_icloudNotesGeneration) {
@@ -8066,6 +8070,7 @@ void Backend::replayPendingIcloudMutations() {
                 }
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
+                ++m_icloudNotesSnapshotEpoch;
                 if (httpStatus == 401) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
@@ -8085,6 +8090,7 @@ void Backend::replayPendingIcloudMutations() {
                 return;
             }
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudNoteSaves.contains(noteId)) {
+                ++m_icloudNotesSnapshotEpoch;
                 clearIcloudMutationRetryState(mutKey);
                 scheduleIcloudMutationRetry(true);
                 return;
@@ -8138,6 +8144,7 @@ void Backend::replayPendingIcloudMutations() {
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && !m_pendingIcloudEventDeletes.contains(evtId)) {
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && doc.value(QStringLiteral("data")).isArray()) {
                     const QJsonArray dataArr = doc.value(QStringLiteral("data")).toArray();
+                    ++m_icloudEventsSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
                     if (sameMutation) {
                         m_pendingIcloudEventSaves.remove(evtId);
@@ -8169,6 +8176,7 @@ void Backend::replayPendingIcloudMutations() {
                 }
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
+                ++m_icloudEventsSnapshotEpoch;
                 if (sameMutation && m_pendingIcloudEventSaves.contains(evtId)) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
@@ -8192,6 +8200,7 @@ void Backend::replayPendingIcloudMutations() {
                 return;
             }
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudEventDeletes.contains(evtId)) {
+                ++m_icloudEventsSnapshotEpoch;
                 clearIcloudMutationRetryState(mutKey);
                 scheduleIcloudMutationRetry(true);
                 return;
@@ -8229,6 +8238,7 @@ void Backend::replayPendingIcloudMutations() {
             const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && !m_pendingIcloudEventSaves.contains(evtId)) {
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && doc.value(QStringLiteral("data")).isArray()) {
+                    ++m_icloudEventsSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
                     m_pendingIcloudEventDeletes.remove(evtId);
                     if (gen == m_icloudEventsGeneration) {
@@ -8241,6 +8251,7 @@ void Backend::replayPendingIcloudMutations() {
                 }
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
+                ++m_icloudEventsSnapshotEpoch;
                 if (httpStatus == 401) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
@@ -8260,6 +8271,7 @@ void Backend::replayPendingIcloudMutations() {
                 return;
             }
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudEventSaves.contains(evtId)) {
+                ++m_icloudEventsSnapshotEpoch;
                 clearIcloudMutationRetryState(mutKey);
                 scheduleIcloudMutationRetry(true);
                 return;
@@ -8272,10 +8284,11 @@ void Backend::replayPendingIcloudMutations() {
 void Backend::fetchIcloudNotes() {
     if (!isSecureOrLocalIcloudEndpoint()) return;
     const quint64 gen = m_icloudNotesGeneration;
+    const quint64 snapEpoch = m_icloudNotesSnapshotEpoch;
     QNetworkReply *reply = m_nam.get(makeRequest(QStringLiteral("/api/v1/icloud/notes")));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, gen]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, gen, snapEpoch]() {
         reply->deleteLater();
-        if (gen != m_icloudNotesGeneration) return;
+        if (gen != m_icloudNotesGeneration || snapEpoch != m_icloudNotesSnapshotEpoch) return;
         if (reply->error() == QNetworkReply::NoError) {
             const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
             const QJsonValue dataVal = doc.value(QStringLiteral("data"));
@@ -8389,6 +8402,7 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && !m_pendingIcloudNoteDeletes.contains(actualId)) {
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && dataVal.isArray()) {
                     const QJsonArray dataArr = dataVal.toArray();
+                    ++m_icloudNotesSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
                     if (sameMutation) {
                         m_pendingIcloudNoteSaves.remove(actualId);
@@ -8420,6 +8434,7 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
                 }
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
+                ++m_icloudNotesSnapshotEpoch;
                 if (sameMutation && m_pendingIcloudNoteSaves.contains(actualId)) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
@@ -8443,6 +8458,7 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
                 return;
             }
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudNoteDeletes.contains(actualId)) {
+                ++m_icloudNotesSnapshotEpoch;
                 clearIcloudMutationRetryState(mutKey);
                 scheduleIcloudMutationRetry(true);
                 return;
@@ -8492,6 +8508,7 @@ void Backend::deleteIcloudNote(const QString &id) {
             const QJsonValue dataVal = doc.value(QStringLiteral("data"));
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && !m_pendingIcloudNoteSaves.contains(id)) {
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && dataVal.isArray()) {
+                    ++m_icloudNotesSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
                     m_pendingIcloudNoteDeletes.remove(id);
                     if (gen == m_icloudNotesGeneration) {
@@ -8504,6 +8521,7 @@ void Backend::deleteIcloudNote(const QString &id) {
                 }
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
+                ++m_icloudNotesSnapshotEpoch;
                 if (httpStatus == 401) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
@@ -8523,6 +8541,7 @@ void Backend::deleteIcloudNote(const QString &id) {
                 return;
             }
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudNoteSaves.contains(id)) {
+                ++m_icloudNotesSnapshotEpoch;
                 clearIcloudMutationRetryState(mutKey);
                 scheduleIcloudMutationRetry(true);
                 return;
@@ -8535,10 +8554,11 @@ void Backend::deleteIcloudNote(const QString &id) {
 void Backend::fetchIcloudEvents() {
     if (!isSecureOrLocalIcloudEndpoint()) return;
     const quint64 gen = m_icloudEventsGeneration;
+    const quint64 snapEpoch = m_icloudEventsSnapshotEpoch;
     QNetworkReply *reply = m_nam.get(makeRequest(QStringLiteral("/api/v1/icloud/events")));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, gen]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, gen, snapEpoch]() {
         reply->deleteLater();
-        if (gen != m_icloudEventsGeneration) return;
+        if (gen != m_icloudEventsGeneration || snapEpoch != m_icloudEventsSnapshotEpoch) return;
         if (reply->error() == QNetworkReply::NoError) {
             const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
             const QJsonValue dataVal = doc.value(QStringLiteral("data"));
@@ -8632,6 +8652,7 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && !m_pendingIcloudEventDeletes.contains(id)) {
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && dataVal.isArray()) {
                     const QJsonArray dataArr = dataVal.toArray();
+                    ++m_icloudEventsSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
                     if (sameMutation) {
                         m_pendingIcloudEventSaves.remove(id);
@@ -8663,6 +8684,7 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
                 }
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
+                ++m_icloudEventsSnapshotEpoch;
                 if (sameMutation && m_pendingIcloudEventSaves.contains(id)) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
@@ -8686,6 +8708,7 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
                 return;
             }
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudEventDeletes.contains(id)) {
+                ++m_icloudEventsSnapshotEpoch;
                 clearIcloudMutationRetryState(mutKey);
                 scheduleIcloudMutationRetry(true);
                 return;
@@ -8735,6 +8758,7 @@ void Backend::deleteIcloudEvent(const QString &id) {
             const QJsonValue dataVal = doc.value(QStringLiteral("data"));
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && !m_pendingIcloudEventSaves.contains(id)) {
                 if (doc.value(QStringLiteral("status")).toInt() == 200 && dataVal.isArray()) {
+                    ++m_icloudEventsSnapshotEpoch;
                     clearIcloudMutationRetryState(mutKey);
                     m_pendingIcloudEventDeletes.remove(id);
                     if (gen == m_icloudEventsGeneration) {
@@ -8747,6 +8771,7 @@ void Backend::deleteIcloudEvent(const QString &id) {
                 }
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
+                ++m_icloudEventsSnapshotEpoch;
                 if (httpStatus == 401) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
@@ -8766,6 +8791,7 @@ void Backend::deleteIcloudEvent(const QString &id) {
                 return;
             }
             if (reply->error() == QNetworkReply::NoError && httpStatus == 200 && m_pendingIcloudEventSaves.contains(id)) {
+                ++m_icloudEventsSnapshotEpoch;
                 clearIcloudMutationRetryState(mutKey);
                 scheduleIcloudMutationRetry(true);
                 return;

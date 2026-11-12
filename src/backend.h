@@ -510,6 +510,8 @@ private:
     QVariantList m_icloudPhotos;
     quint64 m_icloudNotesGeneration = 0;
     quint64 m_icloudEventsGeneration = 0;
+    quint64 m_icloudNotesSnapshotEpoch = 0;
+    quint64 m_icloudEventsSnapshotEpoch = 0;
     QHash<QString, QVariantMap> m_pendingIcloudNoteSaves;
     QSet<QString> m_pendingIcloudNoteDeletes;
     QHash<QString, QVariantMap> m_pendingIcloudEventSaves;
