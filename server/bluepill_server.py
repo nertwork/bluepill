@@ -1616,14 +1616,20 @@ class BluePillEngine:
         transcode_audio: bool = False,
     ) -> Tuple[str, str]:
         lower_ext = os.path.splitext(real_path)[1].lower()
+        lower_mime = (mime or "").lower()
+        is_convertible_img = lower_ext in (".heic", ".heif", ".tiff", ".tif") or lower_mime in (
+            "image/heic",
+            "image/heif",
+            "image/tiff",
+        )
         if (
             sys.platform == "darwin"
             and (convert_heic or resize)
-            and lower_ext in (".heic", ".heif", ".tiff", ".tif")
+            and is_convertible_img
             and os.path.exists("/usr/bin/sips")
         ):
             cached_jpg = self._cached_converted_jpeg_path(real_path, resize)
-            if not os.path.exists(cached_jpg):
+            if not os.path.exists(cached_jpg) or os.path.getsize(cached_jpg) < 64:
                 cmd = ["/usr/bin/sips", "-s", "format", "jpeg"]
                 if resize and resize > 0:
                     cmd.extend(["-Z", str(int(resize))])
@@ -1635,7 +1641,7 @@ class BluePillEngine:
                     timeout=10.0,
                     check=False,
                 )
-            if os.path.exists(cached_jpg):
+            if os.path.exists(cached_jpg) and os.path.getsize(cached_jpg) >= 64:
                 return cached_jpg, "image/jpeg"
         if transcode_audio and lower_ext == ".caf":
             tc = self._transcode_caf_if_needed(real_path)
@@ -1688,15 +1694,26 @@ class BluePillEngine:
         conn = self._open_chat_db()
         try:
             suffix_uuid = clean_guid.split("_")[-1] if "_" in clean_guid else clean_guid
-            row = conn.execute(
+            rows = conn.execute(
                 """
                 SELECT filename, mime_type, transfer_name, transfer_state, total_bytes
                 FROM attachment
                 WHERE guid = ? OR original_guid = ? OR guid LIKE ?
-                ORDER BY ROWID DESC LIMIT 1
+                ORDER BY CASE WHEN guid = ? THEN 0 ELSE 1 END,
+                         CASE WHEN filename IS NOT NULL AND filename != '' THEN 0 ELSE 1 END,
+                         ROWID DESC
                 """,
-                (clean_guid, clean_guid, f"%{suffix_uuid}"),
-            ).fetchone()
+                (clean_guid, clean_guid, f"%{suffix_uuid}", clean_guid),
+            ).fetchall()
+            row = None
+            for cand in rows:
+                cand_raw = os.path.expanduser(str(cand["filename"] or ""))
+                cand_real = os.path.realpath(cand_raw) if cand_raw else ""
+                if cand_real and os.path.exists(cand_real):
+                    row = cand
+                    break
+            if row is None and rows:
+                row = rows[0]
             if not row:
                 if not allow_photos_library:
                     return None
@@ -3735,6 +3752,35 @@ class BluePillEngine:
         return fields
 
     @staticmethod
+    def _clean_note_body_text(title: str, body: str) -> str:
+        clean_title = (title or "").replace("\ufffc", "").replace("\r", "").strip()
+        clean_body = (body or "").replace("\ufffc", "").replace("\r", "").strip()
+        if not clean_body:
+            return ""
+        # Strip legacy protobuf/CRDT trailer noise if cached from an earlier raw regex scan
+        clean_body = re.sub(
+            r"(?:\n+\s*(?:Wz&M|\}\$\}h|dNP\}M|P\.qFB|sqeL|iL\tH)[\s\S]*)$",
+            "",
+            clean_body,
+        ).strip()
+        if clean_title:
+            # Strip 1-byte protobuf length prefix before title (e.g. "OChips Saturday")
+            if (
+                len(clean_body) > len(clean_title)
+                and clean_body[1:].startswith(clean_title)
+                and (
+                    len(clean_body) == len(clean_title) + 1
+                    or clean_body[1 + len(clean_title) :].startswith("\n")
+                )
+            ):
+                clean_body = clean_body[1:].strip()
+            if clean_body == clean_title:
+                return ""
+            if clean_body.startswith(clean_title + "\n"):
+                clean_body = clean_body[len(clean_title) + 1 :].lstrip("\n").strip()
+        return clean_body
+
+    @staticmethod
     def _decode_notestore_protobuf_text(zdata: bytes, fallback_snippet: str = "") -> str:
         if not zdata:
             return fallback_snippet
@@ -3768,24 +3814,8 @@ class BluePillEngine:
                     for fnum, wtype, val in note_fields:
                         if fnum == 2 and wtype == 2:
                             text = val.decode("utf-8", errors="replace").replace("\ufffc", "")
-                            if text.strip():
-                                return text.strip()
+                            return text.strip()
         except (zlib.error, OSError, EOFError, ValueError, UnicodeError, IndexError):
-            pass
-
-        # Fallback to UTF-8 regex scan if structured protobuf unpack failed
-        try:
-            decomp = gzip.decompress(zdata)
-            utf8_runs = re.findall(
-                rb"(?:[\x20-\x7E\n\t]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}){4,}",
-                decomp,
-            )
-            text_parts = [s.decode("utf-8", errors="strict").strip() for s in utf8_runs if s.strip()]
-            if text_parts:
-                candidate = "\n\n".join(text_parts).strip().replace("\ufffc", "")
-                if len(candidate) >= len(fallback_snippet):
-                    return candidate
-        except (zlib.error, OSError, EOFError, ValueError, UnicodeError):
             pass
         return fallback_snippet
 
@@ -3834,6 +3864,13 @@ class BluePillEngine:
                 if type(raw_rev) is not int or raw_rev < 1:
                     n["revision"] = 1
                     dirty_revs = True
+                cleaned_local_body = self._clean_note_body_text(
+                    str(n.get("title") or ""),
+                    str(n.get("body") or ""),
+                )
+                if cleaned_local_body != str(n.get("body") or ""):
+                    n["body"] = cleaned_local_body
+                    dirty_revs = True
                 nid = str(n.get("id") or "").strip()
                 if nid and nid not in deleted_ids:
                     notes_by_id[nid] = n
@@ -3873,12 +3910,13 @@ class BluePillEngine:
                             title = str(r["ZTITLE1"] or "").strip()
                             snippet = str(r["ZSNIPPET"] or "").strip()
                             zdata = r["ZDATA"]
-                            body = self._decode_notestore_protobuf_text(bytes(zdata), snippet) if zdata else snippet
+                            raw_body = self._decode_notestore_protobuf_text(bytes(zdata), snippet) if zdata else snippet
+                            clean_body = self._clean_note_body_text(title, raw_body if raw_body is not None else snippet)
                             if nid not in notes_by_id or notes_by_id[nid].get("updatedAtMs", 0) < updated_ms:
                                 notes_by_id[nid] = {
                                     "id": nid,
                                     "title": title or "Untitled Note",
-                                    "body": body or snippet or "",
+                                    "body": clean_body,
                                     "folder": "Notes",
                                     "syncSource": "apple_notes_ro",
                                     "updatedAtMs": updated_ms,
@@ -5544,8 +5582,21 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
     def _is_secure_or_loopback(self) -> bool:
         if isinstance(self.connection, ssl.SSLSocket):
             return True
-        client_ip = str(self.client_address[0] if self.client_address else "")
-        if client_ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        client_ip = str(self.client_address[0] if self.client_address else "").strip()
+        if client_ip.startswith("::ffff:"):
+            client_ip = client_ip[7:]
+        if client_ip in ("127.0.0.1", "::1"):
+            return True
+        trusted_env = os.environ.get("BLUEPILL_TRUSTED_PROXIES", "172.28.255.27,172.28.255.28,172.28.255.50,172.28.255.202")
+        trusted_ips = {ip.strip() for ip in trusted_env.split(",") if ip.strip()}
+        if client_ip in trusted_ips:
+            return True
+        xfp = str(self.headers.get("X-Forwarded-Proto", "") or "").strip().lower()
+        if xfp == "https" and (
+            client_ip.startswith("172.28.")
+            or client_ip.startswith("10.")
+            or client_ip.startswith("192.168.")
+        ):
             return True
         return False
 
@@ -5722,7 +5773,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         if m_att:
             att_guid = urllib.parse.unquote(m_att.group(1))
             qs = urllib.parse.parse_qs(parsed.query)
-            original_flag = str((qs.get("original") or ["false"])[0]).lower() == "true"
+            original_flag = str((qs.get("raw_heic") or ["false"])[0]).lower() == "true"
             resize_val = int((qs.get("height") or qs.get("width") or ["0"])[0] or 0) or None
             try:
                 resolved = self.engine.resolve_attachment_file(
@@ -6359,6 +6410,11 @@ def run_selftest(engine: BluePillEngine) -> int:
         gz_data = zlib.compress(top_payload)
         decoded_text = BluePillEngine._decode_notestore_protobuf_text(gz_data)
         assert "Synthetic Note Title" in decoded_text, f"Decoded protobuf mismatch: {decoded_text}"
+        cleaned_chips = BluePillEngine._clean_note_body_text(
+            "Chips Saturday",
+            "OChips Saturday\n3yrs x2\n30 days x 30\n9 months x 25\n6 months x 25\n\n18 months x 20\n\nWz&M\n\n}$}h",
+        )
+        assert cleaned_chips == "3yrs x2\n30 days x 30\n9 months x 25\n6 months x 25\n\n18 months x 20", f"Unexpected cleaned_chips: {cleaned_chips!r}"
         assert "￼" not in decoded_text, "Attachment placeholder was not stripped"
 
         # Selftest: Verify sync_icloud_photos doesn't crash in test harness

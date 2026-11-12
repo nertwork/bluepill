@@ -259,6 +259,24 @@ ApplicationWindow {
     property real photoViewerPanX: 0
     property real photoViewerPanY: 0
 
+    function cleanNoteDisplayBody(title, body) {
+        var t = String(title || "").replace(/\ufffc/g, "").replace(/\r/g, "").trim()
+        var b = String(body || "").replace(/\ufffc/g, "").replace(/\r/g, "").trim()
+        if (!b) return ""
+        b = b.replace(/(?:\n+\s*(?:Wz&M|\}\$\}h|dNP\}M|P\.qFB|sqeL|iL\tH)[\s\S]*)$/, "").trim()
+        if (t.length > 0) {
+            if (b.length > t.length && b.slice(1).indexOf(t) === 0 &&
+                (b.length === t.length + 1 || b.charAt(1 + t.length) === "\n")) {
+                b = b.slice(1).trim()
+            }
+            if (b === t) return ""
+            if (b.indexOf(t + "\n") === 0) {
+                b = b.slice(t.length + 1).replace(/^\n+/, "").trim()
+            }
+        }
+        return b
+    }
+
     function openPhotoViewer(items, startIndex) {
         var list = []
         if (items && items.length !== undefined) {
@@ -5353,6 +5371,18 @@ ApplicationWindow {
             anchors.margins: 16
             spacing: 12
 
+            Text {
+                id: noteDetailHeadlineText
+                objectName: "noteDetailHeadlineText"
+                Layout.fillWidth: true
+                visible: noteDetailTitleInput.text.trim().length > 0
+                text: noteDetailTitleInput.text.trim()
+                font.bold: true
+                font.pixelSize: theme.fontSize + 6
+                color: theme.brightForeground
+                elide: Text.ElideRight
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 10
@@ -5884,13 +5914,13 @@ ApplicationWindow {
                                     Layout.fillWidth: true
                                     text: modelData.title || i18n.tr("Untitled Note")
                                     font.bold: true
-                                    font.pixelSize: theme.fontSize
+                                    font.pixelSize: theme.fontSize + 1
                                     color: theme.brightForeground
                                     elide: Text.ElideRight
                                 }
                                 Text {
                                     Layout.fillWidth: true
-                                    text: modelData.snippet || modelData.body || ""
+                                    text: root.cleanNoteDisplayBody(modelData.title, modelData.body || modelData.snippet || "").replace(/\r?\n+/g, " · ")
                                     font.pixelSize: theme.fontSize - 2
                                     color: theme.darkForeground
                                     elide: Text.ElideRight
@@ -5919,7 +5949,7 @@ ApplicationWindow {
                                     icloudNotesPopup.pendingDetailConflictPrompt = false
                                     noteTitleInput.text = modelData.title || ""
                                     noteFolderInput.text = modelData.folder || "Notes"
-                                    noteBodyInput.text = modelData.body || modelData.snippet || ""
+                                    noteBodyInput.text = root.cleanNoteDisplayBody(modelData.title, modelData.body || modelData.snippet || "")
                                     icloudNotesPopup.loadedTitle = noteTitleInput.text
                                     icloudNotesPopup.loadedFolder = noteFolderInput.text
                                     icloudNotesPopup.loadedBody = noteBodyInput.text
@@ -5956,7 +5986,7 @@ ApplicationWindow {
                                         noteDetailWindow.targetChatTitle = backend.selectedChatTitle
                                         noteDetailTitleInput.text = modelData.title || ""
                                         noteDetailFolderInput.text = modelData.folder || "Notes"
-                                        noteDetailBodyInput.text = modelData.body || modelData.snippet || ""
+                                        noteDetailBodyInput.text = root.cleanNoteDisplayBody(modelData.title, modelData.body || modelData.snippet || "")
                                         noteDetailWindow.loadedTitle = noteDetailTitleInput.text
                                         noteDetailWindow.loadedFolder = noteDetailFolderInput.text
                                         noteDetailWindow.loadedBody = noteDetailBodyInput.text
@@ -5982,6 +6012,18 @@ ApplicationWindow {
                         anchors.fill: parent
                         anchors.margins: 12
                         spacing: 8
+
+                        Text {
+                            id: notePopupHeadlineText
+                            objectName: "notePopupHeadlineText"
+                            Layout.fillWidth: true
+                            visible: noteTitleInput.text.trim().length > 0
+                            text: noteTitleInput.text.trim()
+                            font.bold: true
+                            font.pixelSize: theme.fontSize + 5
+                            color: theme.brightForeground
+                            elide: Text.ElideRight
+                        }
 
                         RowLayout {
                             Layout.fillWidth: true
@@ -6585,7 +6627,7 @@ ApplicationWindow {
                                 fillMode: Image.PreserveAspectFit
                                 autoTransform: true
                                 smooth: true
-                                source: (modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : ""
+                                source: modelData.localUrl || modelData.previewUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
                                 asynchronous: true
                             }
 

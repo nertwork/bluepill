@@ -13,6 +13,112 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QImageReader>
+
+static QString cleanIcloudNoteBody(const QString &title, const QString &body) {
+    QString cleanTitle = title;
+    cleanTitle.remove(QChar(0xFFFC));
+    cleanTitle.remove(QLatin1Char('\r'));
+    cleanTitle = cleanTitle.trimmed();
+
+    QString cleanBody = body;
+    cleanBody.remove(QChar(0xFFFC));
+    cleanBody.remove(QLatin1Char('\r'));
+    cleanBody = cleanBody.trimmed();
+    if (cleanBody.isEmpty()) return QString();
+
+    static const QRegularExpression reCrdtNoise(
+        QStringLiteral(R"((?:\n+\s*(?:Wz&M|\}\$\}h|dNP\}M|P\.qFB|sqeL|iL\tH)[\s\S]*)$)")
+    );
+    cleanBody.remove(reCrdtNoise);
+    cleanBody = cleanBody.trimmed();
+
+    if (!cleanTitle.isEmpty()) {
+        if (cleanBody.size() > cleanTitle.size() &&
+            cleanBody.mid(1).startsWith(cleanTitle) &&
+            (cleanBody.size() == cleanTitle.size() + 1 ||
+             cleanBody.mid(1 + cleanTitle.size()).startsWith(QLatin1Char('\n')))) {
+            cleanBody = cleanBody.mid(1).trimmed();
+        }
+        if (cleanBody == cleanTitle) {
+            return QString();
+        }
+        if (cleanBody.startsWith(cleanTitle + QLatin1Char('\n'))) {
+            cleanBody = cleanBody.mid(cleanTitle.size() + 1).trimmed();
+        }
+    }
+    return cleanBody;
+}
+
+static QString stripAttachmentGuidPrefix(const QString &guid) {
+    const QString g = guid.trimmed();
+    static const QRegularExpression reAtPrefix(
+        QStringLiteral(R"(^at_\d+_)"),
+        QRegularExpression::CaseInsensitiveOption
+    );
+    const QRegularExpressionMatch m = reAtPrefix.match(g);
+    if (m.hasMatch()) {
+        return g.mid(m.capturedLength());
+    }
+    if (g.startsWith(QStringLiteral("at_"), Qt::CaseInsensitive)) {
+        return g.mid(3);
+    }
+    return g;
+}
+
+static bool attachmentGuidsMatch(const QString &g1, const QString &g2) {
+    if (g1.isEmpty() || g2.isEmpty()) return false;
+    if (g1 == g2) return true;
+    if (g1.size() >= 11 && g2.size() >= 11 && g1.left(16) == g2.left(16)) return true;
+    const QString b1 = stripAttachmentGuidPrefix(g1);
+    const QString b2 = stripAttachmentGuidPrefix(g2);
+    if (!b1.isEmpty() && b1 == b2) return true;
+    if (b1.size() >= 16 && b2.size() >= 16 && b1.left(16) == b2.left(16)) return true;
+    if (b1.size() >= 11 && b2.size() >= 11 && b1.left(11) == b2.left(11)) return true;
+    return false;
+}
+
+static QString lookupCachedAttachmentPath(const QHash<QString, QString> &cache, const QString &guid) {
+    if (guid.isEmpty()) return QString();
+    QString p = cache.value(guid);
+    if (!p.isEmpty()) return p;
+    p = cache.value(guid.left(16));
+    if (!p.isEmpty()) return p;
+    const QString bare = stripAttachmentGuidPrefix(guid);
+    if (!bare.isEmpty()) {
+        p = cache.value(bare);
+        if (!p.isEmpty()) return p;
+        p = cache.value(bare.left(16));
+        if (!p.isEmpty()) return p;
+        if (bare.size() >= 11) {
+            p = cache.value(bare.left(11));
+            if (!p.isEmpty()) return p;
+        }
+    }
+    return QString();
+}
+
+static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QString &key, const QString &path) {
+    if (key.isEmpty() || path.isEmpty()) return;
+    const bool isJpg = path.endsWith(QStringLiteral(".jpg"), Qt::CaseInsensitive) ||
+                       path.endsWith(QStringLiteral(".jpeg"), Qt::CaseInsensitive);
+    auto putKey = [&](const QString &k) {
+        if (k.size() < 6) return;
+        if (!cache.contains(k) || isJpg) {
+            cache.insert(k, path);
+        }
+    };
+    putKey(key);
+    putKey(key.left(16));
+    const QString bare = stripAttachmentGuidPrefix(key);
+    if (!bare.isEmpty()) {
+        putKey(bare);
+        putKey(bare.left(16));
+        if (bare.size() >= 11) {
+            putKey(bare.left(11));
+        }
+    }
+}
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -266,8 +372,11 @@ void Backend::loadAppState() {
     const QJsonArray notesArr = obj.value(QStringLiteral("icloudNotes")).toArray();
     for (const QJsonValue &v : notesArr) {
         if (v.isObject()) {
-            const QVariantMap m = v.toObject().toVariantMap();
+            QVariantMap m = v.toObject().toVariantMap();
             const QString id = m.value(QStringLiteral("id")).toString();
+            const QString title = m.value(QStringLiteral("title")).toString();
+            const QString body = m.value(QStringLiteral("body")).toString();
+            m.insert(QStringLiteral("body"), cleanIcloudNoteBody(title, body));
             m_icloudNotesGeneration = qMax(
                 m_icloudNotesGeneration,
                 qMax(m.value(QStringLiteral("clientMutationSeq")).toULongLong(),
@@ -605,17 +714,19 @@ void Backend::indexCachedAttachmentsOnDisk() {
                 continue;
             }
         }
+        if ((lower.endsWith(QStringLiteral(".jpg")) || lower.endsWith(QStringLiteral(".jpeg")) ||
+             lower.endsWith(QStringLiteral(".png")) || lower.endsWith(QStringLiteral(".gif")) ||
+             lower.endsWith(QStringLiteral(".webp"))) && !isNativeQtRaster) {
+            continue;
+        }
         if (fname.size() > 17 && fname.at(16) == QLatin1Char('_')) {
             const QString prefix16 = fname.left(16);
-            if (!m_attachmentPaths.contains(prefix16) || path.endsWith(QStringLiteral(".jpg"), Qt::CaseInsensitive)) {
-                m_attachmentPaths.insert(prefix16, path);
-            }
-        }
-        const int underIdx = fname.indexOf(QLatin1Char('_'));
-        if (underIdx > 0) {
-            const QString prefix = fname.left(underIdx);
-            if (!m_attachmentPaths.contains(prefix) || path.endsWith(QStringLiteral(".jpg"), Qt::CaseInsensitive)) {
-                m_attachmentPaths.insert(prefix, path);
+            insertCachedAttachmentPath(m_attachmentPaths, prefix16, path);
+        } else {
+            const int underIdx = fname.indexOf(QLatin1Char('_'));
+            if (underIdx >= 6) {
+                const QString prefix = fname.left(underIdx);
+                insertCachedAttachmentPath(m_attachmentPaths, prefix, path);
             }
         }
     }
@@ -3954,15 +4065,9 @@ QVariantList Backend::buildMessageListFromApi(
                     waveformBars = computeWaveformBars(aGuid.isEmpty() ? tName : aGuid, 28);
                 }
                 const QString origGuid = aObj.value(QStringLiteral("originalGuid")).toString();
-                QString cachedPath = attachmentCache.value(aGuid);
-                if (cachedPath.isEmpty() && !aGuid.isEmpty()) {
-                    cachedPath = attachmentCache.value(aGuid.left(16));
-                }
+                QString cachedPath = lookupCachedAttachmentPath(attachmentCache, aGuid);
                 if (cachedPath.isEmpty() && !origGuid.isEmpty()) {
-                    cachedPath = attachmentCache.value(origGuid);
-                    if (cachedPath.isEmpty()) {
-                        cachedPath = attachmentCache.value(origGuid.left(16));
-                    }
+                    cachedPath = lookupCachedAttachmentPath(attachmentCache, origGuid);
                 }
                 QString localUrl;
                 if (!cachedPath.isEmpty()) {
@@ -4740,9 +4845,11 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
     if (m_missingAttachmentCooldownUntilMs.value(attachmentGuid, 0) > nowMs) {
         return;
     }
-    const QString existingCached = m_attachmentPaths.value(attachmentGuid, m_attachmentPaths.value(attachmentGuid.left(16)));
+    const QString existingCached = lookupCachedAttachmentPath(m_attachmentPaths, attachmentGuid);
     if (!existingCached.isEmpty() && QFileInfo::exists(existingCached) && QFileInfo(existingCached).size() >= 100) {
-        return;
+        if (!isImageMimeOrExt(QString(), existingCached) || QImageReader(existingCached).canRead()) {
+            return;
+        }
     }
 
     const QString cacheDir = QDir::homePath() + QStringLiteral("/.cache/imsg/attachments");
@@ -4755,15 +4862,14 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
         m_attemptedAttachments.remove(attGuid);
         m_missingAttachmentCooldownUntilMs.remove(attGuid);
         m_attachmentRetryCount.remove(attGuid);
-        m_attachmentPaths.insert(attGuid, effectivePath);
-        m_attachmentPaths.insert(attGuid.left(16), effectivePath);
+        insertCachedAttachmentPath(m_attachmentPaths, attGuid, effectivePath);
         const QString localUrl = QUrl::fromLocalFile(effectivePath).toString();
         bool anyUpdated = false;
         for (int i = 0; i < m_messages.size(); ++i) {
             QVariantMap map = m_messages[i].toMap();
             bool msgModified = false;
             const QString msgAttGuid = map.value(QStringLiteral("attachmentGuid")).toString();
-            if (msgAttGuid == attGuid || (!msgAttGuid.isEmpty() && msgAttGuid.left(16) == attGuid.left(16))) {
+            if (attachmentGuidsMatch(msgAttGuid, attGuid)) {
                 if (map.value(QStringLiteral("attachmentLocalUrl")).toString() != localUrl) {
                     map.insert(QStringLiteral("attachmentLocalUrl"), localUrl);
                     msgModified = true;
@@ -4775,7 +4881,7 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
                 for (int j = 0; j < list.size(); ++j) {
                     QVariantMap aMap = list[j].toMap();
                     const QString g = aMap.value(QStringLiteral("guid")).toString();
-                    if (g == attGuid || (!g.isEmpty() && g.left(16) == attGuid.left(16))) {
+                    if (attachmentGuidsMatch(g, attGuid)) {
                         if (aMap.value(QStringLiteral("localUrl")).toString() != localUrl) {
                             aMap.insert(QStringLiteral("localUrl"), localUrl);
                             list[j] = aMap;
@@ -4805,10 +4911,12 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
         for (int i = 0; i < m_icloudPhotos.size(); ++i) {
             QVariantMap pMap = m_icloudPhotos.at(i).toMap();
             const QString pg = pMap.value(QStringLiteral("guid")).toString();
-            if (pg == attGuid || (!pg.isEmpty() && pg.left(16) == attGuid.left(16))) {
+            if (attachmentGuidsMatch(pg, attGuid)) {
                 if (pMap.value(QStringLiteral("localUrl")).toString() != localUrl ||
+                    pMap.value(QStringLiteral("previewUrl")).toString() != localUrl ||
                     pMap.value(QStringLiteral("isCloudEvicted")).toBool()) {
                     pMap.insert(QStringLiteral("localUrl"), localUrl);
+                    pMap.insert(QStringLiteral("previewUrl"), localUrl);
                     pMap.insert(QStringLiteral("isCloudEvicted"), false);
                     m_icloudPhotos[i] = pMap;
                     photosUpdated = true;
@@ -4913,17 +5021,17 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
 
     m_downloadingAttachments.insert(attachmentGuid);
     const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(attachmentGuid));
-    // Pass force=false&original=true so BlueBubbles Server streams existing files directly from disk in ~5-50ms
-    // without locking Private API (downloadPurged) or spawning /usr/bin/sips on the headless macOS VM.
+    // Request /api/v1/attachment/%1/live so macOS bluepill-server converts .heic/.tiff to cached JPEG via sips
     QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/attachment/%1/download?force=false&original=true").arg(encoded));
     req.setPriority(highPriority ? QNetworkRequest::HighPriority : QNetworkRequest::LowPriority);
-    req.setTransferTimeout(10000);
+    req.setTransferTimeout(15000);
     QNetworkReply *reply = m_mediaNam.get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, attachmentGuid, transferName, highPriority, destPath, resolveOrConvertAsync]() {
         reply->deleteLater();
         m_downloadingAttachments.remove(attachmentGuid);
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QByteArray bytes = reply->isOpen() ? reply->readAll() : QByteArray();
-        if (reply->error() != QNetworkReply::NoError || bytes.size() < 100) {
+        if (reply->error() != QNetworkReply::NoError || (httpStatus != 0 && httpStatus != 200) || bytes.size() < 100) {
             const qint64 finishedMs = QDateTime::currentMSecsSinceEpoch();
             const bool isLiveIncoming = m_liveIncomingAttachments.contains(attachmentGuid);
             const bool permanentlyMissingOnDisk = bytes.contains("does not exist") && !isLiveIncoming;
@@ -4985,7 +5093,7 @@ void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
             QJsonObject obj = QJsonDocument::fromJson(jf.readAll()).object();
             jf.close();
             QVariantMap previewData = obj.toVariantMap();
-            if (QFileInfo::exists(thumbPath) && QFileInfo(thumbPath).size() > 0) {
+            if (QFileInfo::exists(thumbPath) && QFileInfo(thumbPath).size() > 64 && QImageReader(thumbPath).canRead()) {
                 previewData.insert(QStringLiteral("thumbnail"), QUrl::fromLocalFile(thumbPath).toString());
             }
             applyPreview(previewData);
@@ -6520,10 +6628,7 @@ bool Backend::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void Backend::openAttachment(const QString &guid, const QString &transferName) {
-    QString filePath = m_attachmentPaths.value(guid);
-    if (filePath.isEmpty() && !guid.isEmpty()) {
-        filePath = m_attachmentPaths.value(guid.left(16));
-    }
+    const QString filePath = lookupCachedAttachmentPath(m_attachmentPaths, guid);
     if (!filePath.isEmpty() && QFileInfo::exists(filePath)) {
         const QString lower = filePath.toLower();
         if (isImageMimeOrExt(QString(), transferName) ||
@@ -7853,8 +7958,13 @@ bool Backend::isSecureOrLocalIcloudEndpoint() const {
 }
 
 QString Backend::attachmentDownloadUrl(const QString &guid) const {
-    if (guid.isEmpty() || !isSecureOrLocalIcloudEndpoint()) return QString();
-    return m_serverUrl + QStringLiteral("/api/v1/attachment/") + guid + QStringLiteral("/download?password=") + QString::fromUtf8(QUrl::toPercentEncoding(m_password));
+    if (guid.isEmpty()) return QString();
+    const QString cached = lookupCachedAttachmentPath(m_attachmentPaths, guid);
+    if (!cached.isEmpty() && QFileInfo::exists(cached) && QFileInfo(cached).size() >= 100) {
+        return QUrl::fromLocalFile(cached).toString();
+    }
+    if (!isSecureOrLocalIcloudEndpoint()) return QString();
+    return m_serverUrl + QStringLiteral("/api/v1/attachment/") + QString::fromUtf8(QUrl::toPercentEncoding(guid)) + QStringLiteral("/live?password=") + QString::fromUtf8(QUrl::toPercentEncoding(m_password));
 }
 
 void Backend::applyRemoteIcloudNotes(const QJsonArray &data, const QString &acknowledgedNoteId, quint64 acknowledgedMutationSeq) {
@@ -7883,6 +7993,13 @@ void Backend::applyRemoteIcloudNotes(const QJsonArray &data, const QString &ackn
         if (id.isEmpty()) continue;
         if (m_pendingIcloudNoteDeletes.contains(id)) continue;
         if (seenIds.contains(id)) continue;
+        m.insert(
+            QStringLiteral("body"),
+            cleanIcloudNoteBody(
+                m.value(QStringLiteral("title")).toString(),
+                m.value(QStringLiteral("body")).toString()
+            )
+        );
         const qint64 remoteRev = m.value(QStringLiteral("revision")).toLongLong();
         if (remoteRev > 0 && !m.contains(QStringLiteral("baseRevision"))) {
             m.insert(QStringLiteral("baseRevision"), remoteRev);
@@ -9403,7 +9520,25 @@ void Backend::fetchIcloudPhotos() {
                 const QJsonArray data = dataVal.toArray();
                 m_icloudPhotos.clear();
                 for (const QJsonValue &v : data) {
-                    if (v.isObject()) m_icloudPhotos.append(v.toObject().toVariantMap());
+                    if (v.isObject()) {
+                        QVariantMap m = v.toObject().toVariantMap();
+                        const QString guid = m.value(QStringLiteral("guid")).toString();
+                        const QString name = m.value(QStringLiteral("name")).toString();
+                        const bool isEvicted = m.value(QStringLiteral("isCloudEvicted")).toBool();
+                        if (!guid.isEmpty()) {
+                            m.insert(QStringLiteral("previewUrl"), attachmentDownloadUrl(guid));
+                            const QString cached = lookupCachedAttachmentPath(m_attachmentPaths, guid);
+                            if (!cached.isEmpty() && QFileInfo::exists(cached) && QFileInfo(cached).size() >= 100) {
+                                const QString localUrl = QUrl::fromLocalFile(cached).toString();
+                                m.insert(QStringLiteral("localUrl"), localUrl);
+                                m.insert(QStringLiteral("previewUrl"), localUrl);
+                                m.insert(QStringLiteral("isCloudEvicted"), false);
+                            } else if (!isEvicted) {
+                                downloadAttachment(guid, name, false);
+                            }
+                        }
+                        m_icloudPhotos.append(m);
+                    }
                 }
                 emit icloudPhotosChanged();
             }

@@ -3333,6 +3333,9 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("id: icloudHubBar")));
         QVERIFY(qml.contains(QStringLiteral("id: icloudPhotosBtn")));
         QVERIFY(qml.contains(QStringLiteral("id: icloudNotesPopup")));
+        QVERIFY(qml.contains(QStringLiteral("id: notePopupHeadlineText")));
+        QVERIFY(qml.contains(QStringLiteral("id: noteDetailHeadlineText")));
+        QVERIFY(qml.contains(QStringLiteral("function cleanNoteDisplayBody(title, body)")));
         QVERIFY(qml.contains(QStringLiteral("id: icloudCalendarPopup")));
         QVERIFY(qml.contains(QStringLiteral("id: icloudPhotosPopup")));
     }
