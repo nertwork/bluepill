@@ -450,6 +450,12 @@ class BluePillEngine:
         self.scheduled_messages_path: Optional[str] = (
             None if is_ephemeral else os.path.expanduser("~/.config/bluepill/scheduled_messages.json")
         )
+        self.server_config_path: Optional[str] = (
+            None if is_ephemeral else os.path.expanduser("~/.config/bluepill/server.json")
+        )
+        self.enable_notes: bool = True
+        self.enable_calendar: bool = True
+        self.enable_photos: bool = True
         self.pinned_chat_guids: List[str] = []
         self.muted_chat_guids: set[str] = set()
         self.archived_chat_guids: set[str] = set()
@@ -465,17 +471,254 @@ class BluePillEngine:
         self._load_chat_state()
         self._load_scheduled_messages()
         self.logger, self.log_file_path = setup_logging(log_to_stderr=enable_background_daemons)
+        self._load_module_config()
 
         if enable_background_daemons:
             self.logger.info(
-                "[startup] BluePillEngine v%s initialized (db=%s helper_port=%d)",
+                "[startup] BluePillEngine v%s initialized (db=%s helper_port=%d notes=%s calendar=%s photos=%s)",
                 VERSION,
                 self.db_path,
                 self.helper_port,
+                self.enable_notes,
+                self.enable_calendar,
+                self.enable_photos,
             )
+            if sys.platform == "darwin":
+                try:
+                    self.run_preflight(fix=True)
+                except Exception as exc:
+                    self.logger.warning("[preflight] startup check warning: %s", exc)
             self._start_helper_listener()
             self._start_wal_watcher()
             self._start_scheduler_loop()
+
+    @staticmethod
+    def _parse_bool_flag(val: Any, default: bool = True) -> bool:
+        if isinstance(val, bool):
+            return val
+        if val is None:
+            return default
+        s = str(val).strip().lower()
+        if s in ("1", "true", "yes", "on", "enabled"):
+            return True
+        if s in ("0", "false", "no", "off", "disabled"):
+            return False
+        return default
+
+    def _load_module_config(self) -> None:
+        if self.server_config_path and os.path.exists(self.server_config_path):
+            try:
+                with open(self.server_config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self.enable_notes = self._parse_bool_flag(data.get("enableNotes"), True)
+                    self.enable_calendar = self._parse_bool_flag(data.get("enableCalendar"), True)
+                    self.enable_photos = self._parse_bool_flag(data.get("enablePhotos"), True)
+            except Exception:
+                pass
+        if "BLUEPILL_ENABLE_NOTES" in os.environ:
+            self.enable_notes = self._parse_bool_flag(os.environ.get("BLUEPILL_ENABLE_NOTES"), self.enable_notes)
+        if "BLUEPILL_ENABLE_CALENDAR" in os.environ:
+            self.enable_calendar = self._parse_bool_flag(os.environ.get("BLUEPILL_ENABLE_CALENDAR"), self.enable_calendar)
+        if "BLUEPILL_ENABLE_PHOTOS" in os.environ:
+            self.enable_photos = self._parse_bool_flag(os.environ.get("BLUEPILL_ENABLE_PHOTOS"), self.enable_photos)
+
+    def set_module_config(
+        self,
+        notes: Optional[bool] = None,
+        calendar: Optional[bool] = None,
+        photos: Optional[bool] = None,
+        persist: bool = True,
+    ) -> Dict[str, bool]:
+        if notes is not None:
+            self.enable_notes = bool(notes)
+        if calendar is not None:
+            self.enable_calendar = bool(calendar)
+        if photos is not None:
+            self.enable_photos = bool(photos)
+        if persist and self.server_config_path:
+            try:
+                existing: Dict[str, Any] = {}
+                if os.path.exists(self.server_config_path):
+                    try:
+                        with open(self.server_config_path, "r", encoding="utf-8") as f:
+                            loaded = json.load(f)
+                            if isinstance(loaded, dict):
+                                existing = loaded
+                    except Exception:
+                        existing = {}
+                existing["enableNotes"] = self.enable_notes
+                existing["enableCalendar"] = self.enable_calendar
+                existing["enablePhotos"] = self.enable_photos
+                os.makedirs(os.path.dirname(self.server_config_path), exist_ok=True)
+                with open(self.server_config_path, "w", encoding="utf-8") as f:
+                    json.dump(existing, f, indent=2)
+            except OSError as exc:
+                self.logger.warning("[config] Failed to save server.json: %s", exc)
+        return {
+            "enableNotes": self.enable_notes,
+            "enableCalendar": self.enable_calendar,
+            "enablePhotos": self.enable_photos,
+        }
+
+    def run_preflight(self, fix: bool = True) -> Dict[str, Any]:
+        actions_taken: List[str] = []
+        warnings: List[str] = []
+        uid = os.getuid() if hasattr(os, "getuid") else 501
+
+        # 1. Notes preflight
+        notes_db = os.path.expanduser("~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")
+        notes_readable = False
+        notes_count = 0
+        if self.enable_notes:
+            if os.path.exists(notes_db):
+                try:
+                    nconn = sqlite3.connect(f"file:{notes_db}?mode=ro", uri=True)
+                    try:
+                        row = nconn.execute(
+                            "SELECT count(*) FROM ZICCLOUDSYNCINGOBJECT WHERE ZTITLE1 IS NOT NULL AND COALESCE(ZMARKEDFORDELETION, 0) = 0;"
+                        ).fetchone()
+                        notes_count = int(row[0] or 0) if row else 0
+                        notes_readable = True
+                    finally:
+                        nconn.close()
+                except sqlite3.Error as exc:
+                    warnings.append(f"NoteStore.sqlite not readable (check Full Disk Access): {exc}")
+            elif sys.platform == "darwin":
+                warnings.append(f"NoteStore.sqlite not found at {notes_db}")
+
+        # 2. Calendar preflight
+        cal_candidates = [
+            os.path.expanduser("~/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb"),
+            os.path.expanduser("~/Library/Calendars/Calendar.sqlitedb"),
+        ]
+        cal_db = next((p for p in cal_candidates if os.path.exists(p)), cal_candidates[0])
+        cal_readable = False
+        cal_events_count = 0
+        if self.enable_calendar:
+            if os.path.exists(cal_db):
+                try:
+                    cconn = sqlite3.connect(f"file:{cal_db}?mode=ro", uri=True)
+                    try:
+                        row = cconn.execute("SELECT count(*) FROM CalendarItem;").fetchone()
+                        cal_events_count = int(row[0] or 0) if row else 0
+                        cal_readable = True
+                    finally:
+                        cconn.close()
+                except sqlite3.Error as exc:
+                    warnings.append(f"Calendar.sqlitedb not readable (check Full Disk Access): {exc}")
+            elif sys.platform == "darwin":
+                warnings.append("Calendar.sqlitedb not found in Group Containers or ~/Library/Calendars")
+
+        # 3. Photos preflight + daemon auto-enable on macOS
+        photos_lib = os.path.expanduser(self.photos_library_path)
+        photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
+        photos_readable = False
+        photos_asset_count = 0
+        photos_local_derivatives = 0
+        daemons_status: Dict[str, bool] = {"photolibraryd": False, "cloudphotod": False}
+        if self.enable_photos:
+            if sys.platform == "darwin":
+                for svc in ("com.apple.photolibraryd", "com.apple.cloudphotod"):
+                    short_name = svc.split(".")[-1]
+                    is_running = False
+                    try:
+                        pr = subprocess.run(
+                            ["/bin/launchctl", "print", f"gui/{uid}/{svc}"],
+                            capture_output=True,
+                            text=True,
+                            timeout=4.0,
+                            check=False,
+                        )
+                        is_running = pr.returncode == 0 and ("state = running" in pr.stdout or "pid =" in pr.stdout)
+                    except Exception:
+                        is_running = False
+                    if not is_running and fix:
+                        plist = f"/System/Library/LaunchAgents/{svc}.plist"
+                        try:
+                            subprocess.run(
+                                ["/bin/launchctl", "enable", f"gui/{uid}/{svc}"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=4.0,
+                                check=False,
+                            )
+                            if os.path.exists(plist):
+                                subprocess.run(
+                                    ["/bin/launchctl", "bootstrap", f"gui/{uid}", plist],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=4.0,
+                                    check=False,
+                                )
+                            ks = subprocess.run(
+                                ["/bin/launchctl", "kickstart", "-k", f"gui/{uid}/{svc}"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=4.0,
+                                check=False,
+                            )
+                            is_running = ks.returncode == 0
+                            actions_taken.append(f"Enabled and kickstarted gui/{uid}/{svc}")
+                        except Exception as exc:
+                            warnings.append(f"Failed to enable {svc}: {exc}")
+                    daemons_status[short_name] = is_running
+
+            if os.path.exists(photos_db):
+                try:
+                    pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+                    try:
+                        row = pconn.execute(
+                            "SELECT count(*) FROM ZASSET WHERE ZFILENAME IS NOT NULL AND (ZTRASHEDSTATE IS NULL OR ZTRASHEDSTATE = 0);"
+                        ).fetchone()
+                        photos_asset_count = int(row[0] or 0) if row else 0
+                        photos_readable = True
+                    finally:
+                        pconn.close()
+                except sqlite3.Error as exc:
+                    warnings.append(f"Photos.sqlite not readable: {exc}")
+            elif sys.platform == "darwin":
+                warnings.append(f"Photos.sqlite not found at {photos_db}")
+
+            masters_dir = os.path.join(photos_lib, "resources", "derivatives", "masters")
+            if os.path.isdir(masters_dir):
+                try:
+                    for root_d, _, files in os.walk(masters_dir):
+                        photos_local_derivatives += sum(
+                            1 for fn in files if fn.lower().endswith((".jpeg", ".jpg", ".heic", ".png"))
+                        )
+                except OSError:
+                    pass
+
+        status_str = "ok" if not warnings else "warn"
+        return {
+            "status": status_str,
+            "platform": sys.platform,
+            "modules": {
+                "notes": {
+                    "enabled": self.enable_notes,
+                    "dbPath": notes_db,
+                    "dbReadable": notes_readable,
+                    "syncedCount": notes_count,
+                },
+                "calendar": {
+                    "enabled": self.enable_calendar,
+                    "dbPath": cal_db,
+                    "dbReadable": cal_readable,
+                    "syncedEventsCount": cal_events_count,
+                },
+                "photos": {
+                    "enabled": self.enable_photos,
+                    "dbPath": photos_db,
+                    "dbReadable": photos_readable,
+                    "assetCount": photos_asset_count,
+                    "localDerivativesCount": photos_local_derivatives,
+                    "daemons": daemons_status,
+                },
+            },
+            "actionsTaken": actions_taken,
+            "warnings": warnings,
+        }
 
     def get_recent_logs(self, lines: int = 200) -> Dict[str, Any]:
         limit = max(1, min(int(lines or 200), 2000))
@@ -2795,6 +3038,37 @@ class BluePillEngine:
             transcode_audio=transcode_audio,
         )
 
+    @staticmethod
+    def _find_photos_library_asset_file(
+        photos_lib: str, zuuid: str, zfn: str, zdir: str
+    ) -> Optional[str]:
+        candidates: List[str] = []
+        dirs_to_check: List[str] = []
+        if zdir:
+            dirs_to_check.append(zdir)
+        if zuuid:
+            first_ch = zuuid[0].upper()
+            if first_ch not in dirs_to_check:
+                dirs_to_check.append(first_ch)
+        for d in dirs_to_check:
+            if zfn:
+                candidates.append(os.path.join(photos_lib, "originals", d, zfn))
+                candidates.append(os.path.join(photos_lib, "resources", "renders", d, zfn))
+            if zuuid:
+                candidates.append(
+                    os.path.join(photos_lib, "resources", "derivatives", "masters", d, f"{zuuid}_4_5005_c.jpeg")
+                )
+                candidates.append(
+                    os.path.join(photos_lib, "resources", "derivatives", d, f"{zuuid}_1_105_c.jpeg")
+                )
+            if zfn:
+                candidates.append(os.path.join(photos_lib, "resources", "derivatives", d, zfn))
+        for cand in candidates:
+            real_cand = os.path.realpath(cand)
+            if os.path.exists(real_cand):
+                return real_cand
+        return None
+
     def _resolve_photos_library_asset(self, guid: str) -> Optional[Tuple[str, str]]:
         clean_guid = urllib.parse.unquote(guid).strip()
         if not clean_guid:
@@ -2824,19 +3098,11 @@ class BluePillEngine:
                     return None
                 zfn = str(row["ZFILENAME"] or "").strip()
                 zdir = str(row["ZDIRECTORY"] or "").strip()
-                candidates = []
-                if zdir and zfn:
-                    candidates.append(os.path.join(photos_lib, "originals", zdir, zfn))
-                    candidates.append(os.path.join(photos_lib, "resources", "renders", zdir, zfn))
-                    candidates.append(os.path.join(photos_lib, "resources", "derivatives", zdir, zfn))
-                if zfn and clean_guid:
-                    candidates.append(os.path.join(photos_lib, "originals", clean_guid[0].upper(), zfn))
-                for cand in candidates:
-                    real_cand = os.path.realpath(cand)
-                    if os.path.exists(real_cand):
-                        mime = mimetypes.guess_type(real_cand)[0] or "image/jpeg"
-                        self._photos_library_assets[clean_guid] = (real_cand, mime)
-                        return real_cand, mime
+                real_cand = self._find_photos_library_asset_file(photos_lib, clean_guid, zfn, zdir)
+                if real_cand:
+                    mime = mimetypes.guess_type(real_cand)[0] or "image/jpeg"
+                    self._photos_library_assets[clean_guid] = (real_cand, mime)
+                    return real_cand, mime
             finally:
                 pconn.close()
         except sqlite3.Error as exc:
@@ -3034,9 +3300,12 @@ class BluePillEngine:
         limit: int = 48,
         offset: int = 0,
         include_dimensions: bool = True,
+        source: str = "all",
         _max_limit: int = 250,
         _cursor_state: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        if not self.enable_photos:
+            return []
         effective_max = max(1, min(int(_max_limit or 250), 251))
         clamped_limit = max(1, min(int(limit or 48), effective_max))
         clamped_offset = max(0, int(offset or 0))
@@ -3045,6 +3314,8 @@ class BluePillEngine:
         photos_lib = os.path.expanduser(self.photos_library_path)
         photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
         has_photos_db = os.path.exists(photos_db)
+        source_mode = str(source or "all").strip().lower()
+        photos_only = source_mode in ("photos_library", "photos_only", "library")
         if use_cursor:
             seen_chat_guids: set[str] = _cursor_state.setdefault("seen_chat_guids", set())
             seen_lib_guids: set[str] = _cursor_state.setdefault("seen_lib_guids", set())
@@ -3056,8 +3327,8 @@ class BluePillEngine:
             chat_photos = []
             lib_photos = []
 
-        # 1. Query chat.db image attachments strictly filtered to iCloud CloudKit camera photos
-        if os.path.exists(self.db_path) and len(chat_photos) < window_limit and (not use_cursor or not _cursor_state.get("chat_exhausted")):
+        # 1. Query chat.db image attachments strictly filtered to iCloud CloudKit camera photos (skipped when photos_only=True)
+        if (not photos_only) and os.path.exists(self.db_path) and len(chat_photos) < window_limit and (not use_cursor or not _cursor_state.get("chat_exhausted")):
             try:
                 conn = self._open_chat_db()
                 try:
@@ -3188,10 +3459,15 @@ class BluePillEngine:
                 pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
                 try:
                     pconn.row_factory = sqlite3.Row
+                    zcols = {c[1] for c in pconn.execute("PRAGMA table_info(ZASSET)").fetchall()}
+                    has_zdims = "ZWIDTH" in zcols and "ZHEIGHT" in zcols
+                    zdim_select = ", COALESCE(ZWIDTH, 0) AS _zw, COALESCE(ZHEIGHT, 0) AS _zh" if has_zdims else ", 0 AS _zw, 0 AS _zh"
                     asset_count_row = pconn.execute("SELECT count(*) FROM ZASSET;").fetchone()
                     if asset_count_row and asset_count_row[0] > 0:
                         needed_lib = window_limit - len(lib_photos)
-                        lib_batch_fetch = max(needed_lib, 60)
+                        lib_batch_fetch = max(needed_lib * 8, 400) if (photos_only and not use_cursor) else max(needed_lib, 60)
+                        evicted_lib_candidates: List[Dict[str, Any]] = []
+                        seen_lib_paths: set[str] = set()
                         while len(lib_photos) < window_limit:
                             lib_cur = _cursor_state.get("lib_cursor") if use_cursor else None
                             lib_cursor_sql = ""
@@ -3204,7 +3480,7 @@ class BluePillEngine:
                             rows = pconn.execute(
                                 f"""
                                 SELECT ROWID AS _rowid, COALESCE(ZDATECREATED, 0) AS _zdate,
-                                       ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY
+                                       ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY{zdim_select}
                                 FROM ZASSET
                                 WHERE ZFILENAME IS NOT NULL
                                   AND (ZTRASHEDSTATE IS NULL OR ZTRASHEDSTATE = 0)
@@ -3240,24 +3516,18 @@ class BluePillEngine:
                                     continue
                                 zfn = str(ar["ZFILENAME"] or f"asset_{zuuid[:8]}").strip()
                                 zdir = str(ar["ZDIRECTORY"] or "").strip()
-                                resolved_asset: Optional[str] = None
-                                candidates = []
-                                if zdir and zfn:
-                                    candidates.append(os.path.join(photos_lib, "originals", zdir, zfn))
-                                    candidates.append(os.path.join(photos_lib, "resources", "renders", zdir, zfn))
-                                    candidates.append(os.path.join(photos_lib, "resources", "derivatives", zdir, zfn))
-                                if zfn and zuuid:
-                                    candidates.append(os.path.join(photos_lib, "originals", zuuid[0].upper(), zfn))
-                                for cand in candidates:
-                                    rc = os.path.realpath(cand)
-                                    if os.path.exists(rc):
-                                        resolved_asset = rc
-                                        break
+                                resolved_asset = self._find_photos_library_asset_file(photos_lib, zuuid, zfn, zdir)
+                                if resolved_asset and photos_only:
+                                    if resolved_asset in seen_lib_paths:
+                                        continue
+                                    seen_lib_paths.add(resolved_asset)
                                 mime = (mimetypes.guess_type(resolved_asset or zfn)[0] or "image/jpeg")
                                 if not mime.startswith("image/"):
                                     continue
                                 size_bytes = 0
                                 dim_path = ""
+                                zw = int(ar["_zw"] or 0)
+                                zh = int(ar["_zh"] or 0)
                                 if resolved_asset:
                                     self._photos_library_assets[zuuid] = (resolved_asset, mime)
                                     try:
@@ -3275,7 +3545,7 @@ class BluePillEngine:
                                     or (sys.platform == "darwin" and bool(zdir and zfn) and os.path.exists("/usr/bin/brctl"))
                                 )
                                 seen_lib_guids.add(zuuid)
-                                lib_photos.append({
+                                entry = {
                                     "guid": zuuid,
                                     "name": zfn,
                                     "mimeType": mime,
@@ -3285,17 +3555,23 @@ class BluePillEngine:
                                     "source": "photos_library",
                                     "transferState": 5 if resolved_asset else 0,
                                     "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(zuuid)}/live",
-                                    "width": 0,
-                                    "height": 0,
-                                    "isPortrait": False,
-                                    "_dimPath": dim_path,
-                                })
-                                if len(lib_photos) >= window_limit:
-                                    break
+                                    "width": zw if zw > 0 else 0,
+                                    "height": zh if zh > 0 else 0,
+                                    "isPortrait": bool(zh > zw) if (zw > 0 and zh > 0) else False,
+                                    "_dimPath": dim_path if (zw <= 0 or zh <= 0) else "",
+                                }
+                                if photos_only and not use_cursor and resolved_asset is None:
+                                    evicted_lib_candidates.append(entry)
+                                else:
+                                    lib_photos.append(entry)
+                                    if len(lib_photos) >= window_limit:
+                                        break
                             if not use_cursor or len(rows) < lib_batch_fetch:
                                 if use_cursor and len(rows) < lib_batch_fetch:
                                     _cursor_state["lib_exhausted"] = True
                                 break
+                        if photos_only and not use_cursor and len(lib_photos) < window_limit and evicted_lib_candidates:
+                            lib_photos.extend(evicted_lib_candidates[: window_limit - len(lib_photos)])
                 finally:
                     pconn.close()
             except sqlite3.Error as exc:
@@ -3825,6 +4101,8 @@ class BluePillEngine:
         return BluePillEngine._decode_notestore_protobuf_text(zdata, fallback_snippet)
 
     def query_icloud_notes(self) -> List[Dict[str, Any]]:
+        if not self.enable_notes:
+            return []
         with self._icloud_store_lock:
             notes_path = self._get_notes_json_path()
             deleted_path = self._get_deleted_notes_json_path()
@@ -4087,6 +4365,8 @@ class BluePillEngine:
         max_limit: int = 250,
         include_event_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        if not self.enable_calendar:
+            return []
         effective_cap = max(1, min(int(max_limit or 250), 5000))
         clamped_limit = max(1, min(int(limit or 250), effective_cap))
         with self._icloud_store_lock:
@@ -4460,10 +4740,17 @@ class BluePillEngine:
             return self.get_attachment_waveform(str(params.get("guid") or ""))
         if method in ("chat.state", "api.chat.state"):
             return self.get_chat_state()
+        if method in ("icloud.preflight", "api.icloud.preflight"):
+            return self.run_preflight(fix=bool(params.get("fix", False)))
         if method in ("icloud.photos", "api.icloud.photos"):
+            src_arg = str(params.get("source") or "").strip().lower()
+            if not src_arg:
+                photos_db_cand = os.path.join(os.path.expanduser(self.photos_library_path), "database", "Photos.sqlite")
+                src_arg = "photos_library" if os.path.exists(photos_db_cand) else "all"
             return self.query_icloud_photos(
                 limit=int(params.get("limit", 48) or 48),
                 offset=int(params.get("offset", 0) or 0),
+                source=src_arg,
             )
         if method in ("icloud.photos.sync", "api.icloud.photos.sync"):
             job_id = str(params.get("jobId") or "").strip()
@@ -5854,13 +6141,27 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, self.engine.get_chat_state())
             return
 
+        if path == "/api/v1/icloud/preflight":
+            if not self._check_icloud_auth_and_transport(parsed):
+                return
+            qs = urllib.parse.parse_qs(parsed.query)
+            fix_flag = str((qs.get("fix") or ["0"])[0] or "0").strip().lower() in ("1", "true", "yes")
+            self._send_json(200, self.engine.run_preflight(fix=fix_flag))
+            return
+
         if path == "/api/v1/icloud/photos":
             if not self._check_icloud_auth_and_transport(parsed):
                 return
             qs = urllib.parse.parse_qs(parsed.query)
             lim = int((qs.get("limit") or [48])[0] or 48)
             off = int((qs.get("offset") or [0])[0] or 0)
-            self._send_json(200, self.engine.query_icloud_photos(limit=lim, offset=off))
+            src_param = str((qs.get("source") or [""])[0] or "").strip().lower()
+            if not src_param:
+                photos_db_cand = os.path.join(
+                    os.path.expanduser(self.engine.photos_library_path), "database", "Photos.sqlite"
+                )
+                src_param = "photos_library" if os.path.exists(photos_db_cand) else "all"
+            self._send_json(200, self.engine.query_icloud_photos(limit=lim, offset=off, source=src_param))
             return
 
         if path == "/api/v1/icloud/photos/sync":
@@ -6489,6 +6790,37 @@ def run_selftest(engine: BluePillEngine) -> int:
         assert sum(1 for g in paged_guids if g.startswith("chat-guid-")) == 138
         assert sum(1 for g in paged_guids if g.startswith("lib-guid-")) == 138
 
+        # Verify source="photos_library" returns ONLY Photos.sqlite assets (zero chat.db attachments) and resolves derivative files
+        deriv_dir = os.path.join(test_eng.photos_library_path, "resources", "derivatives", "masters", "0")
+        os.makedirs(deriv_dir, exist_ok=True)
+        shutil.copy2(sample_jpg, os.path.join(deriv_dir, "deriv-only-guid_4_5005_c.jpeg"))
+        pconn_d = sqlite3.connect(photos_db_file)
+        try:
+            pconn_d.execute(
+                "INSERT INTO ZASSET (ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY, ZTRASHEDSTATE, ZDATECREATED) VALUES ('deriv-only-guid', 'IMG_DERIV_9999.HEIC', 'public.heic', '0', 0, 2000.0);"
+            )
+            pconn_d.commit()
+        finally:
+            pconn_d.close()
+        lib_only_page = test_eng.query_icloud_photos(limit=50, offset=0, source="photos_library")
+        assert lib_only_page and all(p.get("source") == "photos_library" for p in lib_only_page), "photos_library filter leaked chat attachments"
+        assert any(p.get("guid") == "deriv-only-guid" and not p.get("isCloudEvicted") for p in lib_only_page), "Derivative master JPEG was not resolved"
+        pconn_d2 = sqlite3.connect(photos_db_file)
+        try:
+            pconn_d2.execute("DELETE FROM ZASSET WHERE ZUUID = 'deriv-only-guid';")
+            pconn_d2.commit()
+        finally:
+            pconn_d2.close()
+
+        # Verify run_preflight and module enable/disable toggles
+        pf_res = test_eng.run_preflight(fix=False)
+        assert pf_res.get("modules", {}).get("photos", {}).get("enabled") is True
+        test_eng.set_module_config(notes=False, calendar=False, photos=False, persist=False)
+        assert test_eng.query_icloud_notes() == []
+        assert test_eng.query_icloud_events() == []
+        assert test_eng.query_icloud_photos(limit=10) == []
+        test_eng.set_module_config(notes=True, calendar=True, photos=True, persist=False)
+
         # Verify sync_icloud_photos(limit=250) preserves the 251st lookahead record (hasMore=True, nextOffset=250)
         batch1 = test_eng.sync_icloud_photos(limit=250, offset=0)
         assert batch1["hasMore"] is True and batch1["nextOffset"] == 250, f"Expected hasMore=True at limit=250, got {batch1}"
@@ -6579,6 +6911,32 @@ def run_logs(engine: BluePillEngine, lines: int, as_json: bool) -> int:
     return 0
 
 
+def run_preflight_cli(engine: BluePillEngine, fix: bool, as_json: bool) -> int:
+    pf = engine.run_preflight(fix=fix)
+    if as_json:
+        print(json.dumps(pf, indent=2))
+        return 0
+    mods = pf.get("modules") or {}
+    notes_m = mods.get("notes") or {}
+    cal_m = mods.get("calendar") or {}
+    photos_m = mods.get("photos") or {}
+    print(f"BluePill iCloud Hub Preflight (v{VERSION} on {pf.get('platform')})")
+    print(
+        f"  [{'✓' if notes_m.get('enabled') else '-'}] iCloud Notes:    enabled={notes_m.get('enabled')} readable={notes_m.get('dbReadable')} synced={notes_m.get('syncedCount')}"
+    )
+    print(
+        f"  [{'✓' if cal_m.get('enabled') else '-'}] iCloud Calendar: enabled={cal_m.get('enabled')} readable={cal_m.get('dbReadable')} events={cal_m.get('syncedEventsCount')}"
+    )
+    print(
+        f"  [{'✓' if photos_m.get('enabled') else '-'}] iCloud Photos:   enabled={photos_m.get('enabled')} readable={photos_m.get('dbReadable')} assets={photos_m.get('assetCount')} derivatives={photos_m.get('localDerivativesCount')} daemons={photos_m.get('daemons')}"
+    )
+    for act in pf.get("actionsTaken") or []:
+        print(f"  [+] Action: {act}")
+    for warn in pf.get("warnings") or []:
+        print(f"  [!] Warning: {warn}")
+    return 0
+
+
 def run_status_or_doctor(engine: BluePillEngine, mode: str, as_json: bool) -> int:
     info = engine.get_server_info()
     db_exists = os.path.exists(engine.db_path)
@@ -6593,6 +6951,7 @@ def run_status_or_doctor(engine: BluePillEngine, mode: str, as_json: bool) -> in
             db_readable = False
     contacts = engine.query_contacts()
     pins = engine.query_pinned_chats()
+    preflight = engine.run_preflight(fix=(mode == "doctor" and sys.platform == "darwin"))
     report = {
         "status": "ok" if (db_readable or sys.platform != "darwin") else "degraded",
         "mode": mode,
@@ -6605,16 +6964,21 @@ def run_status_or_doctor(engine: BluePillEngine, mode: str, as_json: bool) -> in
         "contacts_resolved": len(contacts),
         "pinned_chats_resolved": len(pins),
         "private_api_helper": info["private_api"],
+        "icloud_preflight": preflight,
         "log_file": engine.log_file_path,
     }
     if as_json or mode == "status":
         print(json.dumps(report))
     else:
+        mods = preflight.get("modules") or {}
         print(f"BluePill Server Doctor (v{VERSION} on {info['os_version']})")
         print(f"  [✓] chat.db readable:      {db_readable} ({engine.db_path}, {chat_count} sampled chats)")
         print(f"  [✓] Contacts resolved:     {len(contacts)}")
         print(f"  [✓] Pinned chats resolved: {len(pins)}")
         print(f"  [✓] Private API helper:    {info['private_api']}")
+        print(f"  [✓] iCloud Notes module:   enabled={mods.get('notes', {}).get('enabled')} (synced={mods.get('notes', {}).get('syncedCount')})")
+        print(f"  [✓] iCloud Calendar mod:   enabled={mods.get('calendar', {}).get('enabled')} (events={mods.get('calendar', {}).get('syncedEventsCount')})")
+        print(f"  [✓] iCloud Photos module:  enabled={mods.get('photos', {}).get('enabled')} (assets={mods.get('photos', {}).get('assetCount')}, derivatives={mods.get('photos', {}).get('localDerivativesCount')})")
         print(f"  [✓] Server log file:       {engine.log_file_path}")
     return 0
 
@@ -6628,7 +6992,7 @@ def main() -> int:
         "command",
         nargs="?",
         default="serve",
-        help="serve | status | doctor | logs | stdio | selftest | sync-icloud-photos (standalone CLI sync uses brctl fallback)",
+        help="serve | status | doctor | preflight | logs | stdio | selftest | sync-icloud-photos",
     )
     parser.add_argument("--host", default=os.environ.get("BLUEPILL_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("BLUEPILL_PORT", "1234")))
@@ -6643,8 +7007,16 @@ def main() -> int:
         action="store_true",
         help="Download purged iCloud camera photos (uses brctl fallback in standalone CLI mode) and cache as JPEGs",
     )
+    parser.add_argument("--preflight", action="store_true", help="Run iCloud Hub & macOS preflight check and exit")
+    parser.add_argument("--no-fix", action="store_true", help="Do not auto-enable macOS iCloud daemons during preflight")
+    parser.add_argument("--enable-notes", action="store_true", help="Enable iCloud Notes hub module")
+    parser.add_argument("--disable-notes", action="store_true", help="Disable iCloud Notes hub module")
+    parser.add_argument("--enable-calendar", action="store_true", help="Enable iCloud Calendar hub module")
+    parser.add_argument("--disable-calendar", action="store_true", help="Disable iCloud Calendar hub module")
+    parser.add_argument("--enable-photos", action="store_true", help="Enable iCloud Photos hub module")
+    parser.add_argument("--disable-photos", action="store_true", help="Disable iCloud Photos hub module")
     parser.add_argument("--selftest", action="store_true", help="Run built-in self-test suite and exit")
-    parser.add_argument("--json", action="store_true", help="Format status/doctor/logs output as JSON")
+    parser.add_argument("--json", action="store_true", help="Format status/doctor/preflight/logs output as JSON")
     parser.add_argument("--version", action="store_true", help="Print version and exit")
     args = parser.parse_args()
 
@@ -6655,14 +7027,31 @@ def main() -> int:
     is_serve = not (
         args.selftest
         or args.stdio
+        or args.preflight
         or args.sync_icloud_photos
-        or args.command in ("selftest", "status", "doctor", "logs", "stdio", "sync-icloud-photos")
+        or args.command in ("selftest", "status", "doctor", "preflight", "logs", "stdio", "sync-icloud-photos")
     )
     engine = BluePillEngine(
         db_path=args.db_path or None,
         password=args.password,
         enable_background_daemons=is_serve,
     )
+    if any(
+        (
+            args.enable_notes,
+            args.disable_notes,
+            args.enable_calendar,
+            args.disable_calendar,
+            args.enable_photos,
+            args.disable_photos,
+        )
+    ):
+        engine.set_module_config(
+            notes=True if args.enable_notes else (False if args.disable_notes else None),
+            calendar=True if args.enable_calendar else (False if args.disable_calendar else None),
+            photos=True if args.enable_photos else (False if args.disable_photos else None),
+            persist=True,
+        )
 
     if args.sync_icloud_photos or args.command == "sync-icloud-photos":
         offset = 0
@@ -6703,6 +7092,9 @@ def main() -> int:
 
     if args.command == "logs":
         return run_logs(engine, args.lines, args.json)
+
+    if args.preflight or args.command == "preflight":
+        return run_preflight_cli(engine, fix=not args.no_fix, as_json=args.json)
 
     if args.command in ("status", "doctor"):
         return run_status_or_doctor(engine, args.command, args.json)

@@ -1330,6 +1330,7 @@ ApplicationWindow {
                     Rectangle {
                         id: icloudHubBar
                         objectName: "icloudHubBar"
+                        visible: backend.icloudNotesEnabled || backend.icloudCalendarEnabled || backend.icloudPhotosEnabled
                         Layout.fillWidth: true
                         Layout.preferredHeight: 32
                         Layout.leftMargin: 12
@@ -1344,7 +1345,7 @@ ApplicationWindow {
                             Shortcut {
                                 sequence: "Ctrl+Shift+N"
                                 onActivated: {
-                                    if (icloudHubBar.visible) {
+                                    if (icloudHubBar.visible && backend.icloudNotesEnabled) {
                                         backend.fetchIcloudNotes()
                                         icloudNotesPopup.open()
                                     }
@@ -1353,7 +1354,7 @@ ApplicationWindow {
                             Shortcut {
                                 sequence: "Ctrl+Shift+E"
                                 onActivated: {
-                                    if (icloudHubBar.visible) {
+                                    if (icloudHubBar.visible && backend.icloudCalendarEnabled) {
                                         backend.fetchIcloudEvents()
                                         icloudCalendarPopup.open()
                                     }
@@ -1362,7 +1363,7 @@ ApplicationWindow {
                             Shortcut {
                                 sequence: "Ctrl+Shift+P"
                                 onActivated: {
-                                    if (icloudHubBar.visible) {
+                                    if (icloudHubBar.visible && backend.icloudPhotosEnabled) {
                                         backend.fetchIcloudPhotos()
                                         icloudPhotosPopup.open()
                                     }
@@ -1371,6 +1372,8 @@ ApplicationWindow {
 
                             Rectangle {
                                 id: notesHubTile
+                                objectName: "notesHubTile"
+                                visible: backend.icloudNotesEnabled
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 radius: 6
@@ -1423,6 +1426,8 @@ ApplicationWindow {
 
                             Rectangle {
                                 id: calHubTile
+                                objectName: "calHubTile"
+                                visible: backend.icloudCalendarEnabled
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 radius: 6
@@ -1475,6 +1480,8 @@ ApplicationWindow {
 
                             Rectangle {
                                 id: photosHubTile
+                                objectName: "photosHubTile"
+                                visible: backend.icloudPhotosEnabled
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 radius: 6
@@ -5247,10 +5254,10 @@ ApplicationWindow {
         id: noteDetailWindow
         objectName: "noteDetailWindow"
         title: (noteDetailTitleInput.text.trim().length > 0 ? noteDetailTitleInput.text.trim() : i18n.tr("Note Viewer")) + " - BluePill Notes"
-        width: 680
-        height: 560
-        minimumWidth: 480
-        minimumHeight: 380
+        width: Math.min(Math.max(Math.round(root.width * 0.85), 860), 1160)
+        height: Math.min(Math.max(Math.round(root.height * 0.85), 680), 900)
+        minimumWidth: 640
+        minimumHeight: 500
         color: theme.darkBackground
 
         property string noteId: ""
@@ -5371,20 +5378,47 @@ ApplicationWindow {
             anchors.margins: 16
             spacing: 12
 
-            Text {
-                id: noteDetailHeadlineText
-                objectName: "noteDetailHeadlineText"
+            RowLayout {
                 Layout.fillWidth: true
-                visible: noteDetailTitleInput.text.trim().length > 0
-                text: noteDetailTitleInput.text.trim()
-                font.bold: true
-                font.pixelSize: theme.fontSize + 6
-                color: theme.brightForeground
-                elide: Text.ElideRight
+                spacing: 12
+
+                Text {
+                    id: noteDetailHeadlineText
+                    objectName: "noteDetailHeadlineText"
+                    Layout.fillWidth: true
+                    visible: noteDetailTitleInput.text.trim().length > 0
+                    text: noteDetailTitleInput.text.trim()
+                    font.bold: true
+                    font.pixelSize: theme.fontSize + 8
+                    color: theme.brightForeground
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                }
+
+                Rectangle {
+                    height: 28
+                    width: syncBadgeText.implicitWidth + 16
+                    radius: 14
+                    color: noteDetailWindow.noteSyncSource === "apple_notes_ro"
+                           ? Qt.rgba(theme.green.r, theme.green.g, theme.green.b, 0.18)
+                           : Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
+                    border.color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
+                    border.width: 1
+                    Text {
+                        id: syncBadgeText
+                        anchors.centerIn: parent
+                        text: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "🍏 Apple Notes (iCloud)" : "📝 Local Hub Note"
+                        font.pixelSize: 11
+                        font.bold: true
+                        color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
+                    }
+                }
             }
 
             RowLayout {
                 Layout.fillWidth: true
+                visible: noteDetailWindow.noteSyncSource !== "apple_notes_ro"
                 spacing: 10
 
                 TextField {
@@ -5392,7 +5426,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     placeholderText: i18n.tr("Note Title...")
                     font.bold: true
-                    font.pixelSize: theme.fontSize + 4
+                    font.pixelSize: theme.fontSize + 3
                     color: theme.brightForeground
                     background: Rectangle {
                         color: theme.background
@@ -5406,32 +5440,13 @@ ApplicationWindow {
                     id: noteDetailFolderInput
                     Layout.preferredWidth: 140
                     placeholderText: i18n.tr("Folder")
-                    font.pixelSize: theme.fontSize - 1
+                    font.pixelSize: theme.fontSize
                     color: theme.foreground
                     background: Rectangle {
                         color: theme.background
                         radius: 6
                         border.color: noteDetailFolderInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
                         border.width: 1
-                    }
-                }
-
-                Rectangle {
-                    height: 26
-                    width: syncBadgeText.implicitWidth + 12
-                    radius: 13
-                    color: noteDetailWindow.noteSyncSource === "apple_notes_ro"
-                           ? Qt.rgba(theme.green.r, theme.green.g, theme.green.b, 0.18)
-                           : Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
-                    border.color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
-                    border.width: 1
-                    Text {
-                        id: syncBadgeText
-                        anchors.centerIn: parent
-                        text: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "🍏 Apple Notes (iCloud)" : "📝 Local Hub Note"
-                        font.pixelSize: 10
-                        font.bold: true
-                        color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
                     }
                 }
             }
@@ -5445,7 +5460,11 @@ ApplicationWindow {
                     id: noteDetailBodyInput
                     placeholderText: i18n.tr("Note content...")
                     wrapMode: TextArea.Wrap
-                    font.pixelSize: theme.fontSize + 1
+                    font.pixelSize: theme.fontSize + 3
+                    leftPadding: 16
+                    rightPadding: 16
+                    topPadding: 14
+                    bottomPadding: 14
                     color: theme.brightForeground
                     selectByMouse: true
                     background: Rectangle {
@@ -5794,8 +5813,9 @@ ApplicationWindow {
         modal: true
         focus: true
         anchors.centerIn: parent
-        width: Math.min(900, root.width - 40)
-        height: Math.min(640, root.height - 40)
+        width: Math.max(460, root.width - 24)
+        height: Math.max(420, root.height - 24)
+        readonly property bool compactNotesLayout: width < 780
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         background: Rectangle {
             color: theme.darkBackground
@@ -5867,14 +5887,16 @@ ApplicationWindow {
                 spacing: 14
 
                 ColumnLayout {
-                    Layout.preferredWidth: 280
+                    Layout.preferredWidth: icloudNotesPopup.compactNotesLayout ? Math.floor(icloudNotesPopup.width * 0.42) : Math.max(300, Math.floor(icloudNotesPopup.width * 0.38))
+                    Layout.minimumWidth: 240
                     Layout.fillHeight: true
-                    spacing: 8
+                    spacing: 10
 
                     TextField {
                         id: noteSearchInput
                         Layout.fillWidth: true
                         placeholderText: i18n.tr("Search notes...")
+                        font.pixelSize: theme.fontSize
                         color: theme.foreground
                     }
 
@@ -5893,36 +5915,39 @@ ApplicationWindow {
                                 return t.indexOf(q) !== -1 || b.indexOf(q) !== -1
                             })
                         }
-                        spacing: 4
+                        spacing: 8
 
                         delegate: Rectangle {
                             width: notesListView.width
-                            height: 60
-                            radius: 6
+                            height: Math.max(78, noteCardCol.implicitHeight + 20)
+                            radius: 8
                             color: icloudNotesPopup.selectedNoteId === (modelData.id || "")
                                    ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.25)
                                    : (itemMouse.containsMouse ? theme.lighterBackground : theme.background)
-                            border.color: icloudNotesPopup.selectedNoteId === (modelData.id || "") ? theme.accent : "transparent"
+                            border.color: icloudNotesPopup.selectedNoteId === (modelData.id || "") ? theme.accent : Qt.rgba(1, 1, 1, 0.08)
                             border.width: 1
 
                             ColumnLayout {
+                                id: noteCardCol
                                 anchors.fill: parent
-                                anchors.margins: 8
-                                spacing: 2
+                                anchors.margins: 10
+                                spacing: 4
 
                                 Text {
                                     Layout.fillWidth: true
                                     text: modelData.title || i18n.tr("Untitled Note")
                                     font.bold: true
-                                    font.pixelSize: theme.fontSize + 1
+                                    font.pixelSize: theme.fontSize + 2
                                     color: theme.brightForeground
                                     elide: Text.ElideRight
                                 }
                                 Text {
                                     Layout.fillWidth: true
                                     text: root.cleanNoteDisplayBody(modelData.title, modelData.body || modelData.snippet || "").replace(/\r?\n+/g, " · ")
-                                    font.pixelSize: theme.fontSize - 2
+                                    font.pixelSize: theme.fontSize
                                     color: theme.darkForeground
+                                    wrapMode: Text.WordWrap
+                                    maximumLineCount: 2
                                     elide: Text.ElideRight
                                 }
                             }
@@ -6010,8 +6035,8 @@ ApplicationWindow {
 
                     ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins: 12
-                        spacing: 8
+                        anchors.margins: 14
+                        spacing: 10
 
                         Text {
                             id: notePopupHeadlineText
@@ -6020,20 +6045,23 @@ ApplicationWindow {
                             visible: noteTitleInput.text.trim().length > 0
                             text: noteTitleInput.text.trim()
                             font.bold: true
-                            font.pixelSize: theme.fontSize + 5
+                            font.pixelSize: theme.fontSize + 6
                             color: theme.brightForeground
+                            wrapMode: Text.WordWrap
+                            maximumLineCount: 2
                             elide: Text.ElideRight
                         }
 
                         RowLayout {
                             Layout.fillWidth: true
+                            visible: icloudNotesPopup.selectedNoteSyncSource !== "apple_notes_ro"
                             spacing: 8
                             TextField {
                                 id: noteTitleInput
                                 Layout.fillWidth: true
                                 placeholderText: i18n.tr("Note Title")
                                 font.bold: true
-                                font.pixelSize: theme.fontSize + 1
+                                font.pixelSize: theme.fontSize + 2
                                 color: theme.brightForeground
                             }
                             TextField {
@@ -6041,6 +6069,7 @@ ApplicationWindow {
                                 Layout.preferredWidth: 120
                                 placeholderText: i18n.tr("Folder")
                                 text: "Notes"
+                                font.pixelSize: theme.fontSize
                                 color: theme.foreground
                             }
                         }
@@ -6048,12 +6077,18 @@ ApplicationWindow {
                         ScrollView {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
+                            clip: true
                             TextArea {
                                 id: noteBodyInput
                                 placeholderText: i18n.tr("Write note content here...")
-                                color: theme.foreground
+                                color: theme.brightForeground
                                 wrapMode: TextArea.Wrap
-                                font.pixelSize: theme.fontSize
+                                selectByMouse: true
+                                font.pixelSize: theme.fontSize + 2
+                                leftPadding: 14
+                                rightPadding: 14
+                                topPadding: 12
+                                bottomPadding: 12
                             }
                         }
 
@@ -7479,6 +7514,95 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: root.showServerPassword = !root.showServerPassword
+                            }
+                        }
+                    }
+                }
+
+                // Optional iCloud Hub Feature Modules
+                ColumnLayout {
+                    id: icloudModulesSettingsCol
+                    objectName: "icloudModulesSettingsCol"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Text {
+                        Layout.fillWidth: true
+                        text: i18n.tr("iCloud Hub Modules (Optional)")
+                        font.pixelSize: theme.fontSize - 2
+                        font.bold: true
+                        color: theme.foreground
+                        elide: Text.ElideRight
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Rectangle {
+                            id: toggleNotesModuleBtn
+                            objectName: "toggleNotesModuleBtn"
+                            Layout.fillWidth: true
+                            height: 34
+                            radius: 6
+                            color: backend.icloudNotesEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.icloudNotesEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.icloudNotesEnabled ? "✓ " : "○ ") + "📝 " + i18n.tr("Notes")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.icloudNotesEnabled
+                                color: backend.icloudNotesEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.icloudNotesEnabled = !backend.icloudNotesEnabled
+                            }
+                        }
+
+                        Rectangle {
+                            id: toggleCalendarModuleBtn
+                            objectName: "toggleCalendarModuleBtn"
+                            Layout.fillWidth: true
+                            height: 34
+                            radius: 6
+                            color: backend.icloudCalendarEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.icloudCalendarEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.icloudCalendarEnabled ? "✓ " : "○ ") + "📅 " + i18n.tr("Calendar")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.icloudCalendarEnabled
+                                color: backend.icloudCalendarEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.icloudCalendarEnabled = !backend.icloudCalendarEnabled
+                            }
+                        }
+
+                        Rectangle {
+                            id: togglePhotosModuleBtn
+                            objectName: "togglePhotosModuleBtn"
+                            Layout.fillWidth: true
+                            height: 34
+                            radius: 6
+                            color: backend.icloudPhotosEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.icloudPhotosEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.icloudPhotosEnabled ? "✓ " : "○ ") + "☁️ " + i18n.tr("Photos")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.icloudPhotosEnabled
+                                color: backend.icloudPhotosEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.icloudPhotosEnabled = !backend.icloudPhotosEnabled
                             }
                         }
                     }

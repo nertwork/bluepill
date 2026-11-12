@@ -4044,6 +4044,31 @@ private slots:
         backend.downloadCloudAttachment(QStringLiteral("att_cloud_123"));
         backend.syncIcloudPhotos();
         // Method should execute without crash even if offline
+
+        // Verify optional iCloud Hub module toggles default to true and persist across state reload
+        QVERIFY(backend.icloudNotesEnabled());
+        QVERIFY(backend.icloudCalendarEnabled());
+        QVERIFY(backend.icloudPhotosEnabled());
+
+        backend.setIcloudNotesEnabled(false);
+        backend.setIcloudCalendarEnabled(false);
+        backend.setIcloudPhotosEnabled(false);
+        QVERIFY(!backend.icloudNotesEnabled());
+        QVERIFY(!backend.icloudCalendarEnabled());
+        QVERIFY(!backend.icloudPhotosEnabled());
+
+        Backend reloadedBackend(false);
+        reloadedBackend.setStateFilePath(tempDir.filePath(QStringLiteral("state_photos.json")));
+        QVERIFY(!reloadedBackend.icloudNotesEnabled());
+        QVERIFY(!reloadedBackend.icloudCalendarEnabled());
+        QVERIFY(!reloadedBackend.icloudPhotosEnabled());
+
+        reloadedBackend.setIcloudNotesEnabled(true);
+        reloadedBackend.setIcloudCalendarEnabled(true);
+        reloadedBackend.setIcloudPhotosEnabled(true);
+        QVERIFY(reloadedBackend.icloudNotesEnabled());
+        QVERIFY(reloadedBackend.icloudCalendarEnabled());
+        QVERIFY(reloadedBackend.icloudPhotosEnabled());
     }
 
 };

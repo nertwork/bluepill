@@ -244,7 +244,10 @@ WEB_OK=$(timeout 5s curl -s -o /dev/null -w "%{http_code}" "${RELAY_ADDR}/web" <
 # 3. Chat Query
 CHAT_OK=$(timeout 5s curl -s -f -X POST "${RELAY_ADDR}/api/v1/chat/query?password=${RELAY_PWD}" -H "Content-Type: application/json" -d '{"limit":1}' </dev/null | grep -q "\"status\":200" && echo true || echo false)
 
-echo "VERIFICATION_SUMMARY: PING=${PING_OK} WEB_UI=${WEB_OK} CHAT_QUERY=${CHAT_OK}"
+# 4. iCloud Hub Preflight
+PREFLIGHT_OK=$(timeout 5s curl -s -f "${RELAY_ADDR}/api/v1/icloud/preflight?password=${RELAY_PWD}" </dev/null | grep -q "\"modules\"" && echo true || echo false)
+
+echo "VERIFICATION_SUMMARY: PING=${PING_OK} WEB_UI=${WEB_OK} CHAT_QUERY=${CHAT_OK} PREFLIGHT=${PREFLIGHT_OK}"
 ```
 
 ---

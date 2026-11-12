@@ -17,6 +17,25 @@ class Bluepill < Formula
     bin.install_symlink "bluepill-server" => "imsgd"
   end
 
+  def post_install
+    system bin/"bluepill-server", "preflight"
+  rescue StandardError
+    nil
+  end
+
+  def caveats
+    <<~EOS
+      Run the iCloud Hub & macOS preflight check (verifies Full Disk Access for Messages,
+      Apple Notes, Calendar, and Photos, and auto-enables photolibraryd & cloudphotod):
+        bluepill-server preflight
+
+      All three iCloud Hub modules (Notes, Calendar, Photos) are enabled by default.
+      You can optionally enable or disable individual modules via CLI or in the BluePill UI:
+        bluepill-server --enable-notes --enable-calendar --enable-photos
+        bluepill-server --disable-photos
+    EOS
+  end
+
   service do
     run [opt_bin/"bluepill-server", "--port", "1235"]
     keep_alive true
@@ -27,5 +46,6 @@ class Bluepill < Formula
 
   test do
     assert_match "bluepill-server 1.1.0", shell_output("#{bin}/bluepill-server --version")
+    assert_match '"modules"', shell_output("#{bin}/bluepill-server preflight --no-fix --json")
   end
 end

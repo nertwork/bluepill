@@ -728,3 +728,19 @@ Major macOS updates (e.g. updating from Sonoma to Sequoia) frequently reset TCC 
 1. Re-open **System Settings -> Privacy & Security -> Full Disk Access**.
 2. Toggle your terminal / Python / sshd-keygen-wrapper entry off and back on.
 3. Test using: `sqlite3 ~/Library/Messages/chat.db "SELECT count(*) FROM message;" </dev/null`.
+
+
+### Runbook 5: iCloud Hub Preflight & Optional Module Toggles (Notes, Calendar, Photos)
+`bluepill-server` includes a built-in preflight engine that checks database readability (`NoteStore.sqlite`, `Calendar.sqlitedb`, `Photos.sqlite`) and automatically enables/kickstarts `com.apple.photolibraryd` and `com.apple.cloudphotod` on macOS when iCloud Photos is enabled:
+```bash
+# Run interactive preflight check (auto-enables photolibraryd & cloudphotod on macOS)
+bluepill-server preflight
+
+# Inspect preflight status as JSON without modifying launchd daemons
+bluepill-server preflight --no-fix --json
+
+# Optionally enable or disable individual iCloud Hub modules on the relay
+bluepill-server --enable-notes --enable-calendar --enable-photos
+bluepill-server --disable-photos
+```
+On the Linux desktop client (`bluepill`), all three modules are enabled by default and can be toggled interactively in **⚙ Server Configuration -> iCloud Hub Modules (Optional)** or via environment variables (`BLUEPILL_ENABLE_NOTES=0/1`, `BLUEPILL_ENABLE_CALENDAR=0/1`, `BLUEPILL_ENABLE_PHOTOS=0/1`).

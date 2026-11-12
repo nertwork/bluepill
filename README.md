@@ -79,11 +79,16 @@ bluepill --webui
   - **BluePill Native macOS Relay (`https://...` or `http://...:1235`)** — `<18 MB` headless daemon + built-in Web UI.
   - **Legacy BlueBubbles Server (`https://...`)** — 100% backward-compatible with `BlueBubbles.app` + `BlueBubblesHelper.dylib`.
   - **Direct SSH Mode (`ssh://user@mac-host`)** — Key-based SSH transport with zero password required.
-- **Full Headless JSON CLI (`bluepill` & `imsg`):**
+- **Optional iCloud Hub Modules (Notes, Calendar & Photos.app Gallery) + Homebrew Preflight CLI:**
+  - All three iCloud Hub modules (`📝 Notes`, `📅 Calendar`, `☁️ Photos`) are enabled by default for full testing and can be individually enabled or disabled at any time in **⚙ Server Configuration -> iCloud Hub Modules (Optional)**, via environment variables (`BLUEPILL_ENABLE_NOTES=0/1`, `BLUEPILL_ENABLE_CALENDAR=0/1`, `BLUEPILL_ENABLE_PHOTOS=0/1`), or via `bluepill-server` CLI flags (`--enable-notes` / `--disable-notes`, `--enable-calendar` / `--disable-calendar`, `--enable-photos` / `--disable-photos`).
+  - `bluepill-server preflight` verifies macOS Full Disk Access for `NoteStore.sqlite`, `Calendar.sqlitedb`, and `Photos.sqlite`, and automatically enables/kickstarts `com.apple.photolibraryd` and `com.apple.cloudphotod` on macOS so iCloud `Photos.app` library assets and derivatives stay synced.
+- **Full Headless JSON CLI (`bluepill`, `imsg` & `bluepill-server`):**
   ```bash
   bluepill status --json
   bluepill recent --limit 10 --json
   bluepill send "+14155550142" "Hello from BluePill CLI" --json
+  bluepill-server preflight --json
+  bluepill-server doctor
   bluepill --webui
   ```
 

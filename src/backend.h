@@ -109,6 +109,9 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList icloudCalendars READ icloudCalendars NOTIFY icloudEventsChanged)
     Q_PROPERTY(QVariantList icloudPhotos READ icloudPhotos NOTIFY icloudPhotosChanged)
     Q_PROPERTY(bool icloudPhotosSyncing READ icloudPhotosSyncing NOTIFY icloudPhotosSyncingChanged)
+    Q_PROPERTY(bool icloudNotesEnabled READ icloudNotesEnabled WRITE setIcloudNotesEnabled NOTIFY icloudHubModulesChanged)
+    Q_PROPERTY(bool icloudCalendarEnabled READ icloudCalendarEnabled WRITE setIcloudCalendarEnabled NOTIFY icloudHubModulesChanged)
+    Q_PROPERTY(bool icloudPhotosEnabled READ icloudPhotosEnabled WRITE setIcloudPhotosEnabled NOTIFY icloudHubModulesChanged)
     Q_PROPERTY(bool sendingMessage READ sendingMessage NOTIFY sendingMessageChanged)
 
 
@@ -165,6 +168,12 @@ public:
     QVariantList icloudCalendars() const { return m_icloudCalendars; }
     QVariantList icloudPhotos() const { return m_icloudPhotos; }
     bool icloudPhotosSyncing() const { return m_icloudPhotosSyncInFlight; }
+    bool icloudNotesEnabled() const { return m_icloudNotesEnabled; }
+    bool icloudCalendarEnabled() const { return m_icloudCalendarEnabled; }
+    bool icloudPhotosEnabled() const { return m_icloudPhotosEnabled; }
+    void setIcloudNotesEnabled(bool enabled);
+    void setIcloudCalendarEnabled(bool enabled);
+    void setIcloudPhotosEnabled(bool enabled);
     bool sendingMessage() const { return m_activeSendCount > 0; }
     void setIcloudPhotosForTest(const QVariantList &list) { m_icloudPhotos = list; emit icloudPhotosChanged(); }
 
@@ -346,6 +355,7 @@ signals:
     void icloudEventsChanged();
     void icloudPhotosChanged();
     void icloudPhotosSyncingChanged();
+    void icloudHubModulesChanged();
     void sendingMessageChanged();
     void statusChanged();
     void configChanged();
@@ -539,5 +549,8 @@ private:
     qint64 m_icloudMutationRetryArmedDeadlineMs = 0;
     bool m_icloudMutationRetryScheduled = false;
     bool m_icloudPhotosSyncInFlight = false;
+    bool m_icloudNotesEnabled = true;
+    bool m_icloudCalendarEnabled = true;
+    bool m_icloudPhotosEnabled = true;
     int m_activeSendCount = 0;
 };

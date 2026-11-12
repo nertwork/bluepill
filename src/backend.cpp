@@ -145,6 +145,18 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
         loadAppState();
         loadDeletedMessagesFile();
     }
+    auto applyEnvBool = [](const char *envName, bool &target) {
+        if (!qEnvironmentVariableIsSet(envName)) return;
+        const QString v = qEnvironmentVariable(envName).trimmed().toLower();
+        if (v == QStringLiteral("0") || v == QStringLiteral("false") || v == QStringLiteral("no") || v == QStringLiteral("off")) {
+            target = false;
+        } else if (v == QStringLiteral("1") || v == QStringLiteral("true") || v == QStringLiteral("yes") || v == QStringLiteral("on")) {
+            target = true;
+        }
+    };
+    applyEnvBool("BLUEPILL_ENABLE_NOTES", m_icloudNotesEnabled);
+    applyEnvBool("BLUEPILL_ENABLE_CALENDAR", m_icloudCalendarEnabled);
+    applyEnvBool("BLUEPILL_ENABLE_PHOTOS", m_icloudPhotosEnabled);
     loadCredentials();
     loadContactsFromFile(QDir::homePath() + QStringLiteral("/.config/imsg/contacts.json"));
     loadContactsFromFile(QDir::homePath() + QStringLiteral("/.cache/bluebubbles/contacts.json"));
@@ -278,6 +290,9 @@ void Backend::setStateFilePath(const QString &path) {
     if (path.trimmed().isEmpty()) return;
     m_stateFilePath = path.trimmed();
     m_notificationsEnabled = true;
+    m_icloudNotesEnabled = true;
+    m_icloudCalendarEnabled = true;
+    m_icloudPhotosEnabled = true;
     m_historySyncDays = 60;
     m_stayOnHomePage = false;
     m_mutedChats.clear();
@@ -304,6 +319,15 @@ void Backend::loadAppState() {
     const QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
     if (obj.contains(QStringLiteral("notificationsEnabled"))) {
         m_notificationsEnabled = obj.value(QStringLiteral("notificationsEnabled")).toBool(true);
+    }
+    if (obj.contains(QStringLiteral("icloudNotesEnabled"))) {
+        m_icloudNotesEnabled = obj.value(QStringLiteral("icloudNotesEnabled")).toBool(true);
+    }
+    if (obj.contains(QStringLiteral("icloudCalendarEnabled"))) {
+        m_icloudCalendarEnabled = obj.value(QStringLiteral("icloudCalendarEnabled")).toBool(true);
+    }
+    if (obj.contains(QStringLiteral("icloudPhotosEnabled"))) {
+        m_icloudPhotosEnabled = obj.value(QStringLiteral("icloudPhotosEnabled")).toBool(true);
     }
     if (obj.contains(QStringLiteral("historySyncDays"))) {
         m_historySyncDays = qBound(1, obj.value(QStringLiteral("historySyncDays")).toInt(60), 3650);
@@ -517,6 +541,9 @@ bool Backend::saveAppState() const {
 
     QJsonObject root;
     root.insert(QStringLiteral("notificationsEnabled"), m_notificationsEnabled);
+    root.insert(QStringLiteral("icloudNotesEnabled"), m_icloudNotesEnabled);
+    root.insert(QStringLiteral("icloudCalendarEnabled"), m_icloudCalendarEnabled);
+    root.insert(QStringLiteral("icloudPhotosEnabled"), m_icloudPhotosEnabled);
     root.insert(QStringLiteral("historySyncDays"), m_historySyncDays);
     root.insert(QStringLiteral("lastKnownServerStatus"), m_lastKnownServerStatus);
     QJsonArray pinnedArr;
@@ -8672,7 +8699,38 @@ void Backend::replayPendingIcloudMutations() {
     }
 }
 
+void Backend::setIcloudNotesEnabled(bool enabled) {
+    if (m_icloudNotesEnabled == enabled) return;
+    m_icloudNotesEnabled = enabled;
+    emit icloudHubModulesChanged();
+    saveAppState();
+    if (m_icloudNotesEnabled && !m_serverUrl.isEmpty()) {
+        fetchIcloudNotes();
+    }
+}
+
+void Backend::setIcloudCalendarEnabled(bool enabled) {
+    if (m_icloudCalendarEnabled == enabled) return;
+    m_icloudCalendarEnabled = enabled;
+    emit icloudHubModulesChanged();
+    saveAppState();
+    if (m_icloudCalendarEnabled && !m_serverUrl.isEmpty()) {
+        fetchIcloudEvents();
+    }
+}
+
+void Backend::setIcloudPhotosEnabled(bool enabled) {
+    if (m_icloudPhotosEnabled == enabled) return;
+    m_icloudPhotosEnabled = enabled;
+    emit icloudHubModulesChanged();
+    saveAppState();
+    if (m_icloudPhotosEnabled && !m_serverUrl.isEmpty()) {
+        fetchIcloudPhotos();
+    }
+}
+
 void Backend::fetchIcloudNotes() {
+    if (!m_icloudNotesEnabled) return;
     if (!isSecureOrLocalIcloudEndpoint()) return;
     const quint64 gen = m_icloudNotesGeneration;
     const quint64 snapEpoch = m_icloudNotesSnapshotEpoch;
@@ -9185,6 +9243,7 @@ void Backend::deleteIcloudNote(const QString &id) {
 }
 
 void Backend::fetchIcloudEvents() {
+    if (!m_icloudCalendarEnabled) return;
     if (!isSecureOrLocalIcloudEndpoint()) return;
     const quint64 gen = m_icloudEventsGeneration;
     const quint64 snapEpoch = m_icloudEventsSnapshotEpoch;
@@ -9509,8 +9568,9 @@ void Backend::deleteIcloudEvent(const QString &id) {
 }
 
 void Backend::fetchIcloudPhotos() {
+    if (!m_icloudPhotosEnabled) return;
     if (!isSecureOrLocalIcloudEndpoint()) return;
-    QNetworkReply *reply = m_nam.get(makeRequest(QStringLiteral("/api/v1/icloud/photos")));
+    QNetworkReply *reply = m_nam.get(makeRequest(QStringLiteral("/api/v1/icloud/photos?source=photos_library")));
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         if (reply->error() == QNetworkReply::NoError) {
@@ -9519,10 +9579,15 @@ void Backend::fetchIcloudPhotos() {
             if (doc.value(QStringLiteral("status")).toInt() == 200 && dataVal.isArray()) {
                 const QJsonArray data = dataVal.toArray();
                 m_icloudPhotos.clear();
+                QSet<QString> seenGuids;
                 for (const QJsonValue &v : data) {
                     if (v.isObject()) {
                         QVariantMap m = v.toObject().toVariantMap();
-                        const QString guid = m.value(QStringLiteral("guid")).toString();
+                        const QString guid = m.value(QStringLiteral("guid")).toString().trimmed();
+                        if (!guid.isEmpty()) {
+                            if (seenGuids.contains(guid)) continue;
+                            seenGuids.insert(guid);
+                        }
                         const QString name = m.value(QStringLiteral("name")).toString();
                         const bool isEvicted = m.value(QStringLiteral("isCloudEvicted")).toBool();
                         if (!guid.isEmpty()) {
