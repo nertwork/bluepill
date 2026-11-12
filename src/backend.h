@@ -108,6 +108,8 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList icloudEvents READ icloudEvents NOTIFY icloudEventsChanged)
     Q_PROPERTY(QVariantList icloudCalendars READ icloudCalendars NOTIFY icloudEventsChanged)
     Q_PROPERTY(QVariantList icloudPhotos READ icloudPhotos NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(bool icloudPhotosSyncing READ icloudPhotosSyncing NOTIFY icloudPhotosSyncingChanged)
+    Q_PROPERTY(bool sendingMessage READ sendingMessage NOTIFY sendingMessageChanged)
 
 
 public:
@@ -162,6 +164,8 @@ public:
     QVariantList icloudEvents() const { return m_icloudEvents; }
     QVariantList icloudCalendars() const { return m_icloudCalendars; }
     QVariantList icloudPhotos() const { return m_icloudPhotos; }
+    bool icloudPhotosSyncing() const { return m_icloudPhotosSyncInFlight; }
+    bool sendingMessage() const { return m_activeSendCount > 0; }
     void setIcloudPhotosForTest(const QVariantList &list) { m_icloudPhotos = list; emit icloudPhotosChanged(); }
 
 
@@ -334,6 +338,8 @@ signals:
     void icloudNotesChanged();
     void icloudEventsChanged();
     void icloudPhotosChanged();
+    void icloudPhotosSyncingChanged();
+    void sendingMessageChanged();
     void statusChanged();
     void configChanged();
     void loadingChanged();
@@ -403,6 +409,7 @@ private:
     void scheduleIcloudMutationRetry(bool immediate);
     void recordIcloudMutationFailure(const QString &mutationKey);
     void clearIcloudMutationRetryState(const QString &mutationKey);
+    void syncIcloudPhotosPage(int offset, int accumulatedSynced, const QString &jobId = QString());
 
     QNetworkAccessManager m_nam;
     QNetworkAccessManager m_sendNam;
@@ -524,4 +531,6 @@ private:
     QTimer m_icloudMutationRetryTimer;
     qint64 m_icloudMutationRetryArmedDeadlineMs = 0;
     bool m_icloudMutationRetryScheduled = false;
+    bool m_icloudPhotosSyncInFlight = false;
+    int m_activeSendCount = 0;
 };

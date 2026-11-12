@@ -5175,6 +5175,33 @@ ApplicationWindow {
 
         property string noteId: ""
         property string noteSyncSource: "local_hub"
+        property bool noteSendInFlight: false
+
+        Shortcut {
+            sequence: "Escape"
+            context: Qt.WindowShortcut
+            onActivated: noteDetailWindow.close()
+        }
+
+        Connections {
+            target: backend
+            function onSendingMessageChanged() {
+                if (!backend.sendingMessage) {
+                    noteDetailWindow.noteSendInFlight = false
+                }
+            }
+            function onMessagesChanged() {
+                if (!backend.sendingMessage) {
+                    noteDetailWindow.noteSendInFlight = false
+                }
+            }
+        }
+
+        onVisibleChanged: {
+            if (!visible) {
+                noteDetailWindow.noteSendInFlight = false
+            }
+        }
 
         ColumnLayout {
             anchors.fill: parent
@@ -5218,8 +5245,10 @@ ApplicationWindow {
                     height: 26
                     width: syncBadgeText.implicitWidth + 12
                     radius: 13
-                    color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "#1f3322" : "#1c283d"
-                    border.color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "#3fb950" : "#58a6ff"
+                    color: noteDetailWindow.noteSyncSource === "apple_notes_ro"
+                           ? Qt.rgba(theme.green.r, theme.green.g, theme.green.b, 0.18)
+                           : Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
+                    border.color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
                     border.width: 1
                     Text {
                         id: syncBadgeText
@@ -5227,7 +5256,7 @@ ApplicationWindow {
                         text: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "🍏 Apple Notes (iCloud)" : "📝 Local Hub Note"
                         font.pixelSize: 10
                         font.bold: true
-                        color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "#3fb950" : "#58a6ff"
+                        color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
                     }
                 }
             }
@@ -5275,15 +5304,18 @@ ApplicationWindow {
 
                 Button {
                     text: "📤 " + i18n.tr("Send to Chat")
-                    enabled: backend.selectedChatGuid !== "" && (noteDetailTitleInput.text.trim().length > 0 || noteDetailBodyInput.text.trim().length > 0)
+                    enabled: !noteDetailWindow.noteSendInFlight && !backend.sendingMessage && backend.selectedChatGuid !== "" && (noteDetailTitleInput.text.trim().length > 0 || noteDetailBodyInput.text.trim().length > 0)
                     onClicked: {
+                        if (noteDetailWindow.noteSendInFlight || backend.sendingMessage) return
                         var textToSend = noteDetailTitleInput.text.trim()
                         if (noteDetailBodyInput.text.trim().length > 0) {
-                            textToSend = (textToSend.length > 0 ? ("* " + textToSend + " *
-
-") : "") + noteDetailBodyInput.text.trim()
+                            textToSend = (textToSend.length > 0 ? ("* " + textToSend + " *\n\n") : "") + noteDetailBodyInput.text.trim()
                         }
+                        noteDetailWindow.noteSendInFlight = true
                         backend.sendMessage(backend.selectedChatGuid, textToSend, "")
+                        if (!backend.sendingMessage) {
+                            noteDetailWindow.noteSendInFlight = false
+                        }
                     }
                 }
 
@@ -5292,9 +5324,7 @@ ApplicationWindow {
                     onClicked: {
                         var textToCopy = noteDetailTitleInput.text.trim()
                         if (noteDetailBodyInput.text.trim().length > 0) {
-                            textToCopy = (textToCopy.length > 0 ? (textToCopy + "
-
-") : "") + noteDetailBodyInput.text.trim()
+                            textToCopy = (textToCopy.length > 0 ? (textToCopy + "\n\n") : "") + noteDetailBodyInput.text.trim()
                         }
                         backend.copyToClipboard(textToCopy)
                     }
@@ -5759,8 +5789,14 @@ ApplicationWindow {
                 }
                 Item { Layout.fillWidth: true }
                 Button {
-                    text: "⬇ " + i18n.tr("Sync All Photos")
-                    onClicked: backend.syncIcloudPhotos()
+                    text: backend.icloudPhotosSyncing
+                          ? ("⏳ " + i18n.tr("Syncing Photos..."))
+                          : ("⬇ " + i18n.tr("Sync All Photos"))
+                    enabled: !backend.icloudPhotosSyncing
+                    onClicked: {
+                        if (backend.icloudPhotosSyncing) return
+                        backend.syncIcloudPhotos()
+                    }
                 }
                 Button {
                     text: "🔄 " + i18n.tr("Refresh")
@@ -5798,7 +5834,7 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.preferredHeight: modelData.isPortrait ? 170 : 130
                             radius: 6
-                            color: "#151b23"
+                            color: theme.darkBackground
                             clip: true
 
                             Image {
@@ -5829,15 +5865,15 @@ ApplicationWindow {
                                     height: 18
                                     width: orientText.implicitWidth + 8
                                     radius: 4
-                                    color: "#cc161b22"
-                                    border.color: "#44ffffff"
+                                    color: Qt.rgba(theme.background.r, theme.background.g, theme.background.b, 0.85)
+                                    border.color: Qt.rgba(theme.foreground.r, theme.foreground.g, theme.foreground.b, 0.25)
                                     border.width: 1
                                     Text {
                                         id: orientText
                                         anchors.centerIn: parent
                                         text: modelData.isPortrait ? "▯ Portrait" : "▭ Landscape"
                                         font.pixelSize: 9
-                                        color: "#e6edf3"
+                                        color: theme.foreground
                                     }
                                 }
 
@@ -5845,12 +5881,12 @@ ApplicationWindow {
                                     width: 18
                                     height: 18
                                     radius: 9
-                                    color: modelData.isCloudEvicted ? "#FF9500" : "#30D158"
+                                    color: modelData.isCloudEvicted ? theme.accent : theme.green
                                     Text {
                                         anchors.centerIn: parent
                                         text: modelData.isCloudEvicted ? "☁" : "✓"
                                         font.pixelSize: 10
-                                        color: "#ffffff"
+                                        color: theme.brightForeground
                                     }
                                 }
                             }

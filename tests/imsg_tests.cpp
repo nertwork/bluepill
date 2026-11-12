@@ -3337,6 +3337,11 @@ private slots:
     }
 
     void testIcloudNotesLifecycle() {
+        const QByteArray prevUrl = qgetenv("BLUEBUBBLES_URL");
+        const QByteArray prevPass = qgetenv("BLUEBUBBLES_PASSWORD");
+        qunsetenv("BLUEBUBBLES_URL");
+        qunsetenv("BLUEBUBBLES_PASSWORD");
+
         Backend backend(false);
         QTemporaryDir tempDir;
         const QString statePath = tempDir.filePath(QStringLiteral("state_notes.json"));
@@ -3457,8 +3462,6 @@ private slots:
             }
         });
 
-        const QByteArray prevUrl = qgetenv("BLUEBUBBLES_URL");
-        const QByteArray prevPass = qgetenv("BLUEBUBBLES_PASSWORD");
         qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(mockPort).toUtf8());
         qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
 
