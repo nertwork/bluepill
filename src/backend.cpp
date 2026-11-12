@@ -1528,10 +1528,28 @@ QString Backend::formatExpressiveEffectLabel(const QString &styleId) {
     return QString();
 }
 
+static const QRegularExpression &sharedMessageUrlRegex() {
+    static const QRegularExpression regex(
+        QStringLiteral(R"((?:https?://[^\s<>"']+)|(?<![/@a-zA-Z0-9._-])(?:www\.(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,24}(?:/[^\s<>"']*)?)|(?<![/@a-zA-Z0-9._-])(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,24}/[^\s<>"']+))"),
+        QRegularExpression::CaseInsensitiveOption);
+    return regex;
+}
+
+static QString normalizeExtractedHrefUrl(const QString &rawUrl) {
+    const QString trimmed = rawUrl.trimmed();
+    if (trimmed.isEmpty()) return QString();
+    if (trimmed.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive) ||
+        trimmed.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive) ||
+        trimmed.startsWith(QStringLiteral("mailto:"), Qt::CaseInsensitive) ||
+        trimmed.startsWith(QStringLiteral("file://"), Qt::CaseInsensitive)) {
+        return trimmed;
+    }
+    return QStringLiteral("https://") + trimmed;
+}
+
 QString Backend::extractFirstUrl(const QString &text) {
     if (text.isEmpty()) return QString();
-    static const QRegularExpression urlRegex(QStringLiteral(R"(https?://[^\s<>"']+)"), QRegularExpression::CaseInsensitiveOption);
-    const QRegularExpressionMatch match = urlRegex.match(text);
+    const QRegularExpressionMatch match = sharedMessageUrlRegex().match(text);
     if (!match.hasMatch()) return QString();
 
     QString url = match.captured(0);
@@ -1546,12 +1564,12 @@ QString Backend::extractFirstUrl(const QString &text) {
             break;
         }
     }
-    return url;
+    return normalizeExtractedHrefUrl(url);
 }
 
 bool Backend::isYouTubeUrl(const QString &url) {
     if (url.isEmpty()) return false;
-    const QUrl u(url);
+    const QUrl u(normalizeExtractedHrefUrl(url));
     const QString host = u.host().toLower();
     return host == QStringLiteral("youtube.com") || host == QStringLiteral("www.youtube.com") ||
            host == QStringLiteral("m.youtube.com") || host == QStringLiteral("youtu.be");
@@ -1559,18 +1577,23 @@ bool Backend::isYouTubeUrl(const QString &url) {
 
 QString Backend::formatMessageTextWithLinks(const QString &raw) {
     if (raw.isEmpty()) return QString();
-    static const QRegularExpression urlRegex(QStringLiteral(R"(https?://[^\s<>"']+)"), QRegularExpression::CaseInsensitiveOption);
+    auto escapeWithLineBreaks = [](const QString &segment) -> QString {
+        QString escaped = segment.toHtmlEscaped();
+        escaped.replace(QStringLiteral("\r\n"), QStringLiteral("<br/>"));
+        escaped.replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
+        return escaped;
+    };
 
     QString result;
     int lastPos = 0;
-    auto it = urlRegex.globalMatch(raw);
+    auto it = sharedMessageUrlRegex().globalMatch(raw);
     while (it.hasNext()) {
         auto m = it.next();
         const int matchStart = m.capturedStart();
         const int matchLength = m.capturedLength();
 
         const QString leading = raw.mid(lastPos, matchStart - lastPos);
-        result.append(leading.toHtmlEscaped());
+        result.append(escapeWithLineBreaks(leading));
 
         QString url = m.captured(0);
         QString trailingPunct;
@@ -1587,13 +1610,14 @@ QString Backend::formatMessageTextWithLinks(const QString &raw) {
             }
         }
 
+        const QString hrefUrl = normalizeExtractedHrefUrl(url);
         result.append(QStringLiteral("<a href=\"%1\" style=\"color: #64B5F6; text-decoration: underline;\">%2</a>")
-                          .arg(url.toHtmlEscaped(), url.toHtmlEscaped()));
-        result.append(trailingPunct.toHtmlEscaped());
+                          .arg(hrefUrl.toHtmlEscaped(), url.toHtmlEscaped()));
+        result.append(escapeWithLineBreaks(trailingPunct));
         lastPos = matchStart + matchLength;
     }
     if (lastPos < raw.length()) {
-        result.append(raw.mid(lastPos).toHtmlEscaped());
+        result.append(escapeWithLineBreaks(raw.mid(lastPos)));
     }
     return result;
 }
@@ -5035,6 +5059,10 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
             emit icloudPhotosChanged();
         }
         emit attachmentReady(attGuid, localUrl);
+        if (!m_pendingClipboardCopyGuid.isEmpty() && attachmentGuidsMatch(attGuid, m_pendingClipboardCopyGuid)) {
+            m_pendingClipboardCopyGuid.clear();
+            copyImageToClipboard(effectivePath, attGuid);
+        }
     };
 
     auto resolveOrConvertAsync = [this, notifyAttachmentResolved](const QString &attGuid, const QString &srcPath) {
@@ -6189,6 +6217,29 @@ QString Backend::extractVerificationCode(const QString &text) {
 void Backend::copyToClipboard(const QString &text, const QString &label) {
     if (text.isEmpty()) return;
 
+    const QString trimmed = text.trimmed();
+    if (trimmed == QStringLiteral("📷 Photo") ||
+        QRegularExpression(QStringLiteral(R"(^📷\s+\d+\s+Photos$)")).match(trimmed).hasMatch()) {
+        if (!m_lastCopiedImagePath.isEmpty() && QFileInfo::exists(m_lastCopiedImagePath)) {
+            copyImageToClipboard(m_lastCopiedImagePath);
+            return;
+        }
+        for (int i = m_messages.size() - 1; i >= 0; --i) {
+            const QVariantMap map = m_messages.at(i).toMap();
+            if (map.value(QStringLiteral("hasImageAttachment")).toBool()) {
+                const QString attGuid = map.value(QStringLiteral("attachmentGuid")).toString();
+                const QString attUrl = map.value(QStringLiteral("attachmentLocalUrl")).toString();
+                if (!attUrl.isEmpty() || !attGuid.isEmpty()) {
+                    copyImageToClipboard(attUrl, attGuid);
+                    return;
+                }
+            }
+        }
+    }
+
+    m_lastCopiedImagePath.clear();
+    m_lastCopiedImageTimeMs = 0;
+
     if (QClipboard *cb = QGuiApplication::clipboard()) {
         cb->setText(text, QClipboard::Clipboard);
         if (cb->supportsSelection()) {
@@ -6214,12 +6265,124 @@ void Backend::copyToClipboard(const QString &text, const QString &label) {
     }
 }
 
+bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString &attachmentGuid) {
+    QString localPath;
+    const QString raw = localUrlOrPath.trimmed();
+    if (raw.startsWith(QStringLiteral("file://"))) {
+        localPath = QUrl(raw).toLocalFile();
+    } else if (!raw.isEmpty() && !raw.startsWith(QStringLiteral("http://")) && !raw.startsWith(QStringLiteral("https://"))) {
+        localPath = raw;
+    }
+
+    if ((localPath.isEmpty() || !QFileInfo::exists(localPath)) && !attachmentGuid.isEmpty()) {
+        const QString cached = lookupCachedAttachmentPath(m_attachmentPaths, attachmentGuid);
+        if (!cached.isEmpty() && QFileInfo::exists(cached)) {
+            localPath = cached;
+        }
+    }
+
+    if ((localPath.isEmpty() || !QFileInfo::exists(localPath)) && !attachmentGuid.isEmpty()) {
+        for (const QVariant &v : m_messages) {
+            const QVariantMap map = v.toMap();
+            if (attachmentGuidsMatch(map.value(QStringLiteral("attachmentGuid")).toString(), attachmentGuid)) {
+                const QString u = map.value(QStringLiteral("attachmentLocalUrl")).toString();
+                const QString p = u.startsWith(QStringLiteral("file://")) ? QUrl(u).toLocalFile() : u;
+                if (!p.isEmpty() && QFileInfo::exists(p)) {
+                    localPath = p;
+                    break;
+                }
+            }
+            const QVariantList imgList = map.value(QStringLiteral("imageAttachments")).toList();
+            for (const QVariant &iv : imgList) {
+                const QVariantMap imap = iv.toMap();
+                if (attachmentGuidsMatch(imap.value(QStringLiteral("guid")).toString(), attachmentGuid)) {
+                    const QString u = imap.value(QStringLiteral("localUrl")).toString();
+                    const QString p = u.startsWith(QStringLiteral("file://")) ? QUrl(u).toLocalFile() : u;
+                    if (!p.isEmpty() && QFileInfo::exists(p)) {
+                        localPath = p;
+                        break;
+                    }
+                }
+            }
+            if (!localPath.isEmpty()) break;
+        }
+    }
+
+    if (localPath.isEmpty() || !QFileInfo::exists(localPath)) {
+        if (!attachmentGuid.isEmpty()) {
+            m_pendingClipboardCopyGuid = attachmentGuid;
+            downloadAttachment(attachmentGuid, QStringLiteral("copied-image.jpg"), true);
+            emit toastMessage(QStringLiteral("⬇ Downloading image to copy..."));
+        } else {
+            emit toastMessage(QStringLiteral("⚠ Image not downloaded yet"));
+        }
+        return false;
+    }
+
+    QImageReader reader(localPath);
+    reader.setAutoTransform(true);
+    QImage img = reader.read();
+    if (img.isNull()) {
+        for (const QByteArray &fmt : {QByteArrayLiteral("JPEG"), QByteArrayLiteral("PNG"), QByteArrayLiteral("WEBP"), QByteArrayLiteral("GIF"), QByteArrayLiteral("HEIC"), QByteArrayLiteral("HEIF")}) {
+            QImageReader fallbackReader(localPath, fmt);
+            fallbackReader.setAutoTransform(true);
+            img = fallbackReader.read();
+            if (!img.isNull()) break;
+        }
+    }
+
+    if (img.isNull()) {
+        emit toastMessage(QStringLiteral("⚠ Could not decode image for clipboard"));
+        return false;
+    }
+
+    const QString clipPngPath = QDir::tempPath() + QStringLiteral("/bluepill-clipboard-image.png");
+    if (!img.save(clipPngPath, "PNG")) {
+        emit toastMessage(QStringLiteral("⚠ Failed to stage image for clipboard"));
+        return false;
+    }
+
+    m_lastCopiedImagePath = clipPngPath;
+    m_lastCopiedImageTimeMs = QDateTime::currentMSecsSinceEpoch();
+
+    if (QClipboard *cb = QGuiApplication::clipboard()) {
+        auto *mime = new QMimeData();
+        mime->setImageData(img);
+        mime->setUrls({QUrl::fromLocalFile(clipPngPath)});
+        cb->setMimeData(mime, QClipboard::Clipboard);
+        if (cb->supportsSelection()) {
+            auto *selMime = new QMimeData();
+            selMime->setImageData(img);
+            selMime->setUrls({QUrl::fromLocalFile(clipPngPath)});
+            cb->setMimeData(selMime, QClipboard::Selection);
+        }
+    }
+
+    if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
+        QFileInfo::exists(QStringLiteral("/usr/bin/wl-copy"))) {
+        QFile pngFile(clipPngPath);
+        if (pngFile.open(QIODevice::ReadOnly)) {
+            const QByteArray pngBytes = pngFile.readAll();
+            pngFile.close();
+            if (!pngBytes.isEmpty()) {
+                QProcess *proc = new QProcess(this);
+                connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                        proc, &QObject::deleteLater);
+                proc->start(QStringLiteral("/usr/bin/wl-copy"), QStringList{QStringLiteral("--type"), QStringLiteral("image/png")});
+                proc->write(pngBytes);
+                proc->closeWriteChannel();
+            }
+        }
+    }
+
+    emit toastMessage(QStringLiteral("✓ Copied image to clipboard"));
+    return true;
+}
+
 QString Backend::pasteClipboardImageToTempFile() {
     QClipboard *cb = QGuiApplication::clipboard();
-    if (!cb) return QString();
-    const QMimeData *mime = cb->mimeData();
-    if (!mime) return QString();
-    if (mime->hasImage()) {
+    const QMimeData *mime = cb ? cb->mimeData() : nullptr;
+    if (mime && mime->hasImage()) {
         const QImage img = cb->image();
         if (!img.isNull()) {
             const QString outPath = QDir::tempPath() + QStringLiteral("/bluepill-paste-%1.png").arg(QDateTime::currentMSecsSinceEpoch());
@@ -6228,12 +6391,63 @@ QString Backend::pasteClipboardImageToTempFile() {
             }
         }
     }
-    if (mime->hasUrls()) {
+    if (mime && mime->hasUrls()) {
         for (const QUrl &u : mime->urls()) {
             if (u.isLocalFile()) {
                 const QString localPath = u.toLocalFile();
                 if (isImageMimeOrExt(QString(), localPath) && QFileInfo::exists(localPath)) {
                     return localPath;
+                }
+            }
+        }
+    }
+    if (mime && mime->hasText()) {
+        const QString txt = mime->text().trimmed();
+        if (txt.startsWith(QStringLiteral("file://")) || txt.startsWith(QStringLiteral("/"))) {
+            const QString candidate = txt.startsWith(QStringLiteral("file://")) ? QUrl(txt).toLocalFile() : txt;
+            if (isImageMimeOrExt(QString(), candidate) && QFileInfo::exists(candidate)) {
+                return candidate;
+            }
+        }
+    }
+    if (!m_lastCopiedImagePath.isEmpty() && QFileInfo::exists(m_lastCopiedImagePath)) {
+        const QString clipText = (mime && mime->hasText()) ? mime->text().trimmed() : QString();
+        if (clipText.isEmpty() ||
+            clipText == QStringLiteral("📷 Photo") ||
+            clipText.startsWith(QStringLiteral("📷 ")) ||
+            clipText.startsWith(QStringLiteral("file://"))) {
+            const QString outPath = QDir::tempPath() + QStringLiteral("/bluepill-paste-%1.png").arg(QDateTime::currentMSecsSinceEpoch());
+            if (QFile::copy(m_lastCopiedImagePath, outPath)) {
+                return outPath;
+            }
+            return m_lastCopiedImagePath;
+        }
+    }
+    if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
+        QFileInfo::exists(QStringLiteral("/usr/bin/wl-paste"))) {
+        const QString clipText = (mime && mime->hasText()) ? mime->text().trimmed() : QString();
+        if (clipText.isEmpty() || clipText == QStringLiteral("📷 Photo") || clipText.startsWith(QStringLiteral("📷 "))) {
+            QProcess listProc;
+            listProc.start(QStringLiteral("/usr/bin/wl-paste"), QStringList{QStringLiteral("--list-types")});
+            if (listProc.waitForFinished(800)) {
+                const QString typesOut = QString::fromUtf8(listProc.readAllStandardOutput());
+                QString targetMime;
+                if (typesOut.contains(QStringLiteral("image/png"))) targetMime = QStringLiteral("image/png");
+                else if (typesOut.contains(QStringLiteral("image/jpeg"))) targetMime = QStringLiteral("image/jpeg");
+                else if (typesOut.contains(QStringLiteral("image/webp"))) targetMime = QStringLiteral("image/webp");
+                if (!targetMime.isEmpty()) {
+                    QProcess pasteProc;
+                    pasteProc.start(QStringLiteral("/usr/bin/wl-paste"), QStringList{QStringLiteral("--type"), targetMime});
+                    if (pasteProc.waitForFinished(1500)) {
+                        const QByteArray rawBytes = pasteProc.readAllStandardOutput();
+                        QImage wlImg;
+                        if (wlImg.loadFromData(rawBytes)) {
+                            const QString outPath = QDir::tempPath() + QStringLiteral("/bluepill-paste-%1.png").arg(QDateTime::currentMSecsSinceEpoch());
+                            if (wlImg.save(outPath, "PNG")) {
+                                return outPath;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -6776,6 +6990,25 @@ bool Backend::eventFilter(QObject *watched, QEvent *event) {
         }
     }
     return QObject::eventFilter(watched, event);
+}
+
+void Backend::openUrl(const QString &url) {
+    const QString normalized = normalizeExtractedHrefUrl(url);
+    if (normalized.isEmpty()) return;
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (normalized == m_lastOpenedUrl && (nowMs - m_lastOpenedUrlTimeMs) < 500) {
+        return;
+    }
+    m_lastOpenedUrl = normalized;
+    m_lastOpenedUrlTimeMs = nowMs;
+
+    const bool opened = QDesktopServices::openUrl(QUrl(normalized));
+    if (!opened &&
+        QGuiApplication::platformName() != QStringLiteral("offscreen") &&
+        QFileInfo::exists(QStringLiteral("/usr/bin/xdg-open"))) {
+        QProcess::startDetached(QStringLiteral("/usr/bin/xdg-open"), QStringList{normalized});
+    }
 }
 
 void Backend::openAttachment(const QString &guid, const QString &transferName) {

@@ -477,6 +477,19 @@ private slots:
         const QString formatted = Backend::formatMessageTextWithLinks(input);
         QVERIFY(formatted.contains(QStringLiteral("<a href=\"https://example.com/test\"")));
         QVERIFY(formatted.contains(QStringLiteral("&amp; enjoy &lt;cool&gt;!")));
+
+        const QString youngLaSms = QStringLiteral(
+            "YoungLA: YOUR BLACK FRIDAY FIRST LOOK IS HERE!!!\n\n"
+            "Get an exclusive sneak peek at our new One Piece, Gold's and Batman 2.0 Compression Collections! youngla.attn.tv/a1mj-cMJ6fZX \n\n"
+            "30% OFF SITEWIDE starts 11/24, plus your chance to WIN $1,000,000 CASH!\n\n"
+            "No purchase necessary. Exclusions apply. Terms: youngla.attn.tv/a7qcUWK503Mo");
+        QCOMPARE(Backend::extractFirstUrl(youngLaSms), QStringLiteral("https://youngla.attn.tv/a1mj-cMJ6fZX"));
+        const QString formattedSms = Backend::formatMessageTextWithLinks(youngLaSms);
+        QVERIFY(formattedSms.contains(QStringLiteral("<a href=\"https://youngla.attn.tv/a1mj-cMJ6fZX\" style=\"color: #64B5F6; text-decoration: underline;\">youngla.attn.tv/a1mj-cMJ6fZX</a>")));
+        QVERIFY(formattedSms.contains(QStringLiteral("<a href=\"https://youngla.attn.tv/a7qcUWK503Mo\" style=\"color: #64B5F6; text-decoration: underline;\">youngla.attn.tv/a7qcUWK503Mo</a>")));
+        QVERIFY(!formattedSms.contains(QStringLiteral("href=\"https://2.0")));
+        QVERIFY(!formattedSms.contains(QStringLiteral("href=\"https://11/24")));
+        QVERIFY(formattedSms.contains(QStringLiteral("<br/><br/>")));
     }
 
     void testImageMimeAndExtensionDetection() {
@@ -4091,6 +4104,39 @@ private slots:
         QVERIFY(reloadedBackend.icloudNotesEnabled());
         QVERIFY(reloadedBackend.icloudCalendarEnabled());
         QVERIFY(reloadedBackend.icloudPhotosEnabled());
+    }
+
+    void copyImageToClipboardAndPasteRoundtrip() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend backend(false);
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_clip.json")));
+
+        QImage srcImg(64, 48, QImage::Format_RGBA8888);
+        srcImg.fill(QColor(30, 144, 255));
+        const QString imgPath = tempDir.filePath(QStringLiteral("sample_photo.png"));
+        QVERIFY(srcImg.save(imgPath, "PNG"));
+
+        const QString fileUrl = QUrl::fromLocalFile(imgPath).toString();
+        QVERIFY(backend.copyImageToClipboard(fileUrl, QStringLiteral("att-img-001")));
+
+        // Calling copyToClipboard with placeholder "📷 Photo" must NOT overwrite the copied image
+        backend.copyToClipboard(QStringLiteral("📷 Photo"), QStringLiteral("message"));
+
+        const QString pastedPath = backend.pasteClipboardImageToTempFile();
+        QVERIFY(!pastedPath.isEmpty());
+        QVERIFY(QFileInfo::exists(pastedPath));
+        QImage pastedImg(pastedPath);
+        QVERIFY(!pastedImg.isNull());
+        QCOMPARE(pastedImg.width(), 64);
+        QCOMPARE(pastedImg.height(), 48);
+
+        // Copying real text clears the staged image so normal text copy works as expected
+        backend.copyToClipboard(QStringLiteral("Hello world text"), QStringLiteral("message"));
+        if (QClipboard *cb = QGuiApplication::clipboard()) {
+            QCOMPARE(cb->text(), QStringLiteral("Hello world text"));
+        }
+        QCOMPARE(backend.pasteClipboardImageToTempFile(), QString());
     }
 
 };

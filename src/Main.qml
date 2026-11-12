@@ -360,6 +360,14 @@ ApplicationWindow {
             event.accepted = true
             return true
         }
+        if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_C) {
+            var cp = photoViewerModal.currentPhoto
+            if (cp) {
+                backend.copyImageToClipboard(cp.localUrl || "", cp.guid || "")
+            }
+            event.accepted = true
+            return true
+        }
         if (k === Qt.Key_Escape) {
             root.closePhotoViewer()
             event.accepted = true
@@ -716,15 +724,19 @@ ApplicationWindow {
 
     function linkifyText(text) {
         if (!text) return ""
-        var urlRegex = /(https?:\/\/[^\s<]+[^<.,:;"')\]\s])/g
+        var urlRegex = /((?:https?:\/\/[^\s<>"']+)|(?:www\.(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,24}(?:\/[^\s<>"']*)?)|(?:(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,24}\/[^\s<>"']+))/gi
         var parts = text.split(urlRegex)
         var res = ""
         for (var i = 0; i < parts.length; ++i) {
             var part = parts[i]
-            if (part && part.match(/^https?:\/\//i)) {
-                res += "<a href=\"" + part + "\" style=\"color: #64B5F6; text-decoration: underline;\">" + escapeHtml(part) + "</a>"
+            if (!part) continue
+            if (i % 2 === 1) {
+                var cleanUrl = part.replace(/[.,)\]?!;:"'>]+$/, "")
+                var trailing = part.substring(cleanUrl.length)
+                var href = /^https?:\/\//i.test(cleanUrl) ? cleanUrl : ("https://" + cleanUrl)
+                res += "<a href=\"" + escapeHtml(href) + "\" style=\"color: #64B5F6; text-decoration: underline;\">" + escapeHtml(cleanUrl) + "</a>" + escapeHtml(trailing).replace(/\r?\n/g, "<br/>")
             } else {
-                res += escapeHtml(part)
+                res += escapeHtml(part).replace(/\r?\n/g, "<br/>")
             }
         }
         return res
@@ -3396,6 +3408,15 @@ ApplicationWindow {
                             return ""
                         }
 
+                        function copyPrimaryImageAttachment() {
+                            var imgList = modelData.imageAttachments || []
+                            var firstImg = imgList.length > 0 ? imgList[0] : null
+                            var guid = (firstImg && firstImg.guid) ? firstImg.guid : (modelData.attachmentGuid || "")
+                            var rawUrl = (firstImg && firstImg.localUrl) ? firstImg.localUrl : (msgDelegate.liveAttachmentUrl || modelData.attachmentLocalUrl || "")
+                            var resolvedUrl = msgDelegate.resolveAttachmentUrl(guid, rawUrl)
+                            return backend.copyImageToClipboard(resolvedUrl, guid)
+                        }
+
                         Connections {
                             target: backend
                             function onAttachmentReady(guid, localUrl) {
@@ -3647,7 +3668,7 @@ ApplicationWindow {
                                         }
 
                                         Rectangle {
-                                            visible: (msgDelegate.modelData.text || "").length > 0
+                                            visible: (msgDelegate.modelData.text || "").length > 0 || Boolean(msgDelegate.modelData.hasImageAttachment)
                                             height: 30
                                             implicitWidth: copyBtnRow.implicitWidth + 14
                                             radius: 15
@@ -3665,7 +3686,9 @@ ApplicationWindow {
                                                     color: theme.accent
                                                 }
                                                 Text {
-                                                    text: i18n.tr("Copy")
+                                                    text: (msgDelegate.modelData.hasImageAttachment && !(msgText.selectedText && msgText.selectedText.length > 0))
+                                                          ? i18n.tr("Copy Image")
+                                                          : i18n.tr("Copy")
                                                     font.pixelSize: theme.fontSize - 3
                                                     font.bold: true
                                                     color: theme.brightForeground
@@ -3678,10 +3701,13 @@ ApplicationWindow {
                                                 hoverEnabled: true
                                                 cursorShape: Qt.PointingHandCursor
                                                 onClicked: {
-                                                    var toCopy = (msgText.selectedText && msgText.selectedText.length > 0)
-                                                                 ? msgText.selectedText
-                                                                 : (msgDelegate.modelData.text || "")
-                                                    backend.copyToClipboard(toCopy, (msgText.selectedText && msgText.selectedText.length > 0) ? "selection" : "message")
+                                                    if (msgText.selectedText && msgText.selectedText.length > 0) {
+                                                        backend.copyToClipboard(msgText.selectedText, "selection")
+                                                    } else if (msgDelegate.modelData.hasImageAttachment) {
+                                                        msgDelegate.copyPrimaryImageAttachment()
+                                                    } else {
+                                                        backend.copyToClipboard(msgDelegate.modelData.text || "", "message")
+                                                    }
                                                     root.clearActionMenu()
                                                 }
                                             }
@@ -3861,11 +3887,12 @@ ApplicationWindow {
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: (mouse) => {
                                             if (mouse.button === Qt.RightButton) {
-                                                var toCopy = (msgText.selectedText && msgText.selectedText.length > 0)
-                                                             ? msgText.selectedText
-                                                             : (modelData.text || "")
-                                                if (toCopy.length > 0) {
-                                                    backend.copyToClipboard(toCopy, (msgText.selectedText && msgText.selectedText.length > 0) ? "selection" : "message")
+                                                if (msgText.selectedText && msgText.selectedText.length > 0) {
+                                                    backend.copyToClipboard(msgText.selectedText, "selection")
+                                                } else if (modelData.hasImageAttachment) {
+                                                    msgDelegate.copyPrimaryImageAttachment()
+                                                } else if ((modelData.text || "").length > 0) {
+                                                    backend.copyToClipboard(modelData.text, "message")
                                                 }
                                                 return
                                             }
@@ -3956,8 +3983,13 @@ ApplicationWindow {
 
                                                 MouseArea {
                                                     anchors.fill: parent
+                                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
                                                     cursorShape: Qt.PointingHandCursor
-                                                    onClicked: {
+                                                    onClicked: (mouse) => {
+                                                        if (mouse.button === Qt.RightButton) {
+                                                            backend.copyImageToClipboard(parent.resolvedImgUrl, modelData.guid || "")
+                                                            return
+                                                        }
                                                         var rawList = imageAttachmentRepeater.model || []
                                                         var resolvedList = []
                                                         for (var k = 0; k < rawList.length; ++k) {
@@ -4235,7 +4267,7 @@ ApplicationWindow {
                                                 cursorShape: Qt.PointingHandCursor
                                                 onClicked: {
                                                     if (msgDelegate.liveLinkPreview && msgDelegate.liveLinkPreview.url) {
-                                                        Qt.openUrlExternally(msgDelegate.liveLinkPreview.url);
+                                                        backend.openUrl(msgDelegate.liveLinkPreview.url);
                                                     }
                                                 }
                                                 onDoubleClicked: {
@@ -4269,10 +4301,24 @@ ApplicationWindow {
                                                 font.pixelSize: theme.fontSize
                                                 color: modelData.isFromMe ? "#ffffff" : theme.brightForeground
                                                 wrapMode: TextEdit.Wrap
-                                                onLinkActivated: (link) => Qt.openUrlExternally(link)
+                                                onLinkActivated: (link) => backend.openUrl(link)
 
                                                 HoverHandler {
                                                     id: msgTextHover
+                                                    cursorShape: msgText.hoveredLink.length > 0 ? Qt.PointingHandCursor : Qt.IBeamCursor
+                                                }
+
+                                                TapHandler {
+                                                    acceptedButtons: Qt.LeftButton
+                                                    onTapped: (eventPoint) => {
+                                                        var lnk = msgText.linkAt(eventPoint.position.x, eventPoint.position.y)
+                                                        if (!lnk || lnk.length === 0) {
+                                                            lnk = msgText.hoveredLink
+                                                        }
+                                                        if (lnk && lnk.length > 0) {
+                                                            backend.openUrl(lnk)
+                                                        }
+                                                    }
                                                 }
 
                                                 Keys.onPressed: (event) => {
@@ -4940,7 +4986,20 @@ ApplicationWindow {
                                 background: Item {}
 
                                 readOnly: root.showPhotoViewer
-                                onTextChanged: root.updateEmojiAutocomplete()
+                                onTextChanged: {
+                                    if (composerInput.text.indexOf("📷 Photo") !== -1 || /^📷 \d+ Photos$/.test(composerInput.text.trim())) {
+                                        var cleaned = composerInput.text.replace(/📷 \d+ Photos/g, "").replace(/📷 Photo/g, "").trim()
+                                        var pastedImg = backend.pasteClipboardImageToTempFile()
+                                        if (pastedImg && pastedImg.length > 0 && backend.selectedChatGuid.length > 0) {
+                                            composerInput.text = ""
+                                            backend.sendAttachment(backend.selectedChatGuid, pastedImg, cleaned)
+                                            return
+                                        } else {
+                                            composerInput.text = cleaned
+                                        }
+                                    }
+                                    root.updateEmojiAutocomplete()
+                                }
                                 onCursorPositionChanged: root.updateEmojiAutocomplete()
 
                                 Keys.priority: Keys.BeforeItem
@@ -4948,7 +5007,8 @@ ApplicationWindow {
                                     if (root.showPhotoViewer && root.handlePhotoViewerKey(event)) {
                                         return
                                     }
-                                    if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) {
+                                    if (((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) ||
+                                        ((event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Insert)) {
                                         var pastedPath = backend.pasteClipboardImageToTempFile()
                                         if (pastedPath && pastedPath.length > 0 && backend.selectedChatGuid.length > 0) {
                                             backend.sendAttachment(backend.selectedChatGuid, pastedPath, composerInput.text.trim())
@@ -8267,6 +8327,36 @@ ApplicationWindow {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: root.zoomPhotoViewer(0.25)
+                    }
+                }
+
+                // Copy Image Button (Ctrl+C)
+                Rectangle {
+                    height: 32
+                    implicitWidth: copyViewerTxt.implicitWidth + 20
+                    radius: 7
+                    color: copyViewerMouse.containsMouse ? theme.selection : theme.lighterBackground
+                    border.width: 1
+                    border.color: copyViewerMouse.containsMouse ? theme.accent : theme.muted
+                    Text {
+                        id: copyViewerTxt
+                        anchors.centerIn: parent
+                        text: "󰆏  " + i18n.tr("Copy Image")
+                        font.pixelSize: theme.fontSize - 2
+                        font.bold: true
+                        color: copyViewerMouse.containsMouse ? theme.accent : theme.brightForeground
+                    }
+                    MouseArea {
+                        id: copyViewerMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            var cp = photoViewerModal.currentPhoto
+                            if (cp) {
+                                backend.copyImageToClipboard(cp.localUrl || "", cp.guid || "")
+                            }
+                        }
                     }
                 }
 

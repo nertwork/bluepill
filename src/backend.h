@@ -216,6 +216,7 @@ public:
     Q_INVOKABLE void deleteChat(const QString &chatGuid = QString());
     Q_INVOKABLE void startNewChat(const QString &address, const QString &text = QString());
     Q_INVOKABLE void openAttachment(const QString &guid, const QString &transferName);
+    Q_INVOKABLE void openUrl(const QString &url);
     Q_INVOKABLE void registerWindow(QObject *window);
     bool eventFilter(QObject *watched, QEvent *event) override;
     Q_INVOKABLE void loadDemoData();
@@ -233,6 +234,7 @@ public:
     // Clipboard & Verification/OTP code extraction
     Q_INVOKABLE void copyToClipboard(const QString &text, const QString &label = QString());
     Q_INVOKABLE void copyTextToClipboard(const QString &text) { copyToClipboard(text); }
+    Q_INVOKABLE bool copyImageToClipboard(const QString &localUrlOrPath, const QString &attachmentGuid = QString());
     Q_INVOKABLE static QString extractVerificationCode(const QString &text);
     Q_INVOKABLE static QString extractOtpCode(const QString &text) { return extractVerificationCode(text); }
     Q_INVOKABLE QString pasteClipboardImageToTempFile();
@@ -553,4 +555,9 @@ private:
     bool m_icloudCalendarEnabled = true;
     bool m_icloudPhotosEnabled = true;
     int m_activeSendCount = 0;
+    QString m_lastCopiedImagePath;
+    qint64 m_lastCopiedImageTimeMs = 0;
+    QString m_pendingClipboardCopyGuid;
+    QString m_lastOpenedUrl;
+    qint64 m_lastOpenedUrlTimeMs = 0;
 };
