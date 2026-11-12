@@ -20,6 +20,7 @@ import fcntl
 import glob
 import hashlib
 import io
+import ipaddress
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -5587,18 +5588,23 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             client_ip = client_ip[7:]
         if client_ip in ("127.0.0.1", "::1"):
             return True
-        trusted_env = os.environ.get("BLUEPILL_TRUSTED_PROXIES", "172.28.255.27,172.28.255.28,172.28.255.50,172.28.255.202")
+        trusted_env = os.environ.get("BLUEPILL_TRUSTED_PROXIES", "")
         trusted_ips = {ip.strip() for ip in trusted_env.split(",") if ip.strip()}
         if client_ip in trusted_ips:
             return True
         xfp = str(self.headers.get("X-Forwarded-Proto", "") or "").strip().lower()
-        if xfp == "https" and (
-            client_ip.startswith("172.28.")
-            or client_ip.startswith("10.")
-            or client_ip.startswith("192.168.")
-        ):
+        if xfp == "https" and self._is_private_ip(client_ip):
             return True
         return False
+
+    @staticmethod
+    def _is_private_ip(ip_str: str) -> bool:
+        if not ip_str:
+            return False
+        try:
+            return ipaddress.ip_address(ip_str).is_private
+        except ValueError:
+            return False
 
     def _check_icloud_auth_and_transport(self, parsed_url: urllib.parse.ParseResult) -> bool:
         if not self.engine.password or not self._check_auth(parsed_url):
