@@ -3544,10 +3544,14 @@ private slots:
         QCoreApplication::processEvents();
 
         // Verify mutation A was NOT retried early before its 1000ms backoff deadline when mutation B succeeded
-        if (noteACount == 1) {
+        const qint64 elapsedSinceFirstAttemptAMs = QDateTime::currentMSecsSinceEpoch() - firstAttemptAMs;
+        if (noteACount == 1 && elapsedSinceFirstAttemptAMs < 900) {
             QCOMPARE(liveBackend.icloudMutationRetryCountForTest(keyA), 1);
             QVERIFY(liveBackend.isIcloudMutationInBackoffForTest(keyA));
         } else {
+            if (noteACount == 1) {
+                QTRY_COMPARE_WITH_TIMEOUT(noteACount, 2, 1500);
+            }
             QVERIFY2(secondAttemptAMs - firstAttemptAMs >= 900,
                      qPrintable(QStringLiteral("Mutation A retried too early after %1 ms").arg(secondAttemptAMs - firstAttemptAMs)));
         }
@@ -3590,7 +3594,11 @@ private slots:
         QVERIFY(!evtId.isEmpty());
         QVERIFY(!evtId2.isEmpty());
         QVERIFY(evtId != evtId2);
+        QVERIFY(backend.hasPendingIcloudEventSaveForTest(evtId2));
         backend.deleteIcloudEvent(evtId2);
+        // Never-sent local create + delete cancels out cleanly without queueing a remote delete
+        QVERIFY(!backend.hasPendingIcloudEventSaveForTest(evtId2));
+        QVERIFY(!backend.hasPendingIcloudEventDeleteForTest(evtId2));
         QCOMPARE(backend.icloudEvents().size(), 1);
         QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("BluePill Architecture Review"));
         QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("calendarTitle")).toString(), QStringLiteral("Work"));
@@ -3655,13 +3663,29 @@ private slots:
         QVERIFY(!foundDeletedInWindow);
         QVERIFY(foundOutOfWindow);
 
-        // Verify dropped ACK followed by 409 replay for an event outside the 250-event window (with trailing whitespace in notes)
+        // Verify both 200 OK save and dropped-ACK -> 409 replay for far-future events outside the 250-event window
+        // preserve both the 250th near-window event (evt_near_249) and cached intermediate out-of-window events (evt_mid_cached)
         const QByteArray prevUrl = qgetenv("BLUEBUBBLES_URL");
         const QByteArray prevPass = qgetenv("BLUEBUBBLES_PASSWORD");
         QTcpServer evtServer;
         QVERIFY(evtServer.listen(QHostAddress::LocalHost, 0));
-        int evtReplayCount = 0;
+        int evtRequestCount = 0;
         QString capturedEvtId;
+        auto buildNear250 = []() {
+            QJsonArray snap250;
+            for (int i = 0; i < 250; ++i) {
+                QJsonObject e;
+                e.insert(QStringLiteral("id"), QStringLiteral("evt_near_%1").arg(i));
+                e.insert(QStringLiteral("title"), QStringLiteral("Near Event %1").arg(i));
+                e.insert(QStringLiteral("startMs"), 1700000000000LL + i * 3600000LL);
+                e.insert(QStringLiteral("endMs"), 1700003600000LL + i * 3600000LL);
+                e.insert(QStringLiteral("calendarTitle"), QStringLiteral("Work"));
+                e.insert(QStringLiteral("notes"), QStringLiteral(""));
+                e.insert(QStringLiteral("revision"), 1);
+                snap250.append(e);
+            }
+            return snap250;
+        };
         QObject::connect(&evtServer, &QTcpServer::newConnection, &evtServer, [&]() {
             while (QTcpSocket *sock = evtServer.nextPendingConnection()) {
                 auto buf = std::make_shared<QByteArray>();
@@ -3679,7 +3703,7 @@ private slots:
                     buf->clear();
                     const QJsonObject bodyObj = QJsonDocument::fromJson(rawBody).object();
                     capturedEvtId = bodyObj.value(QStringLiteral("id")).toString();
-                    evtReplayCount++;
+                    evtRequestCount++;
                     auto sendJson = [](QTcpSocket *s, int st, const QByteArray &stText, const QByteArray &jb) {
                         const QByteArray r = "HTTP/1.1 " + QByteArray::number(st) + " " + stText + "\r\n"
                                              "Content-Type: application/json\r\n"
@@ -3689,35 +3713,44 @@ private slots:
                         s->flush();
                         s->disconnectFromHost();
                     };
-                    if (evtReplayCount == 1) {
+                    if (evtRequestCount == 1) {
+                        // First request: 200 OK for far-future event save (returns full 250 near events + appended outsideWindow target)
+                        QJsonArray snap = buildNear250();
+                        QJsonObject okEvt;
+                        okEvt.insert(QStringLiteral("id"), capturedEvtId);
+                        okEvt.insert(QStringLiteral("title"), QStringLiteral("Far Future 200 OK Event"));
+                        okEvt.insert(QStringLiteral("startMs"), 1900000000000LL);
+                        okEvt.insert(QStringLiteral("endMs"), 1900003600000LL);
+                        okEvt.insert(QStringLiteral("calendarTitle"), QStringLiteral("Work"));
+                        okEvt.insert(QStringLiteral("notes"), QStringLiteral("Saved via 200 OK"));
+                        okEvt.insert(QStringLiteral("revision"), 1);
+                        okEvt.insert(QStringLiteral("outsideWindow"), true);
+                        snap.append(okEvt);
+                        QJsonObject respObj;
+                        respObj.insert(QStringLiteral("status"), 200);
+                        respObj.insert(QStringLiteral("data"), snap);
+                        sendJson(sock, 200, "OK", QJsonDocument(respObj).toJson(QJsonDocument::Compact));
+                        return;
+                    }
+                    if (evtRequestCount == 2) {
                         sendJson(sock, 503, "Service Unavailable", R"({"status":503,"message":"Dropped ACK"})");
                         return;
                     }
-                    // Build 250-event conflict snapshot that includes the affected out-of-window event at the end
-                    QJsonArray snap250;
-                    for (int i = 0; i < 249; ++i) {
-                        QJsonObject e;
-                        e.insert(QStringLiteral("id"), QStringLiteral("evt_ near_%1").arg(i));
-                        e.insert(QStringLiteral("title"), QStringLiteral("Near Event %1").arg(i));
-                        e.insert(QStringLiteral("startMs"), 1700000000000LL + i * 3600000LL);
-                        e.insert(QStringLiteral("endMs"), 1700003600000LL + i * 3600000LL);
-                        e.insert(QStringLiteral("calendarTitle"), QStringLiteral("Work"));
-                        e.insert(QStringLiteral("notes"), QStringLiteral(""));
-                        e.insert(QStringLiteral("revision"), 1);
-                        snap250.append(e);
-                    }
+                    // Third request: 409 Conflict snapshot with full 250 near events + appended outsideWindow target
+                    QJsonArray snap = buildNear250();
                     QJsonObject appliedEvt;
                     appliedEvt.insert(QStringLiteral("id"), capturedEvtId);
                     appliedEvt.insert(QStringLiteral("title"), QStringLiteral("Far Future Replay Event"));
-                    appliedEvt.insert(QStringLiteral("startMs"), 1900000000000LL);
-                    appliedEvt.insert(QStringLiteral("endMs"), 1900003600000LL);
+                    appliedEvt.insert(QStringLiteral("startMs"), 1950000000000LL);
+                    appliedEvt.insert(QStringLiteral("endMs"), 1950003600000LL);
                     appliedEvt.insert(QStringLiteral("calendarTitle"), QStringLiteral("Work"));
                     appliedEvt.insert(QStringLiteral("notes"), QStringLiteral("Trimmed event notes"));
                     appliedEvt.insert(QStringLiteral("revision"), 4);
-                    snap250.append(appliedEvt);
+                    appliedEvt.insert(QStringLiteral("outsideWindow"), true);
+                    snap.append(appliedEvt);
                     QJsonObject respObj;
                     respObj.insert(QStringLiteral("status"), 409);
-                    respObj.insert(QStringLiteral("data"), snap250);
+                    respObj.insert(QStringLiteral("data"), snap);
                     sendJson(sock, 409, "Conflict", QJsonDocument(respObj).toJson(QJsonDocument::Compact));
                 });
             }
@@ -3727,21 +3760,60 @@ private slots:
         Backend evtBackend(false);
         evtBackend.setStateFilePath(tempDir.filePath(QStringLiteral("state_events_replay.json")));
         evtBackend.loadCredentials();
-        const QString savedEvtId = evtBackend.saveIcloudEvent(
-            QStringLiteral("Far Future Replay Event "),
+
+        // Seed 250 near events + 1 cached intermediate out-of-window event at 1800000000000
+        QJsonArray initialSeed = buildNear250();
+        QJsonObject midCachedEvt;
+        midCachedEvt.insert(QStringLiteral("id"), QStringLiteral("evt_mid_cached"));
+        midCachedEvt.insert(QStringLiteral("title"), QStringLiteral("Intermediate Cached Out-of-Window Event"));
+        midCachedEvt.insert(QStringLiteral("startMs"), 1800000000000LL);
+        midCachedEvt.insert(QStringLiteral("endMs"), 1800003600000LL);
+        midCachedEvt.insert(QStringLiteral("calendarTitle"), QStringLiteral("Work"));
+        midCachedEvt.insert(QStringLiteral("revision"), 2);
+        initialSeed.append(midCachedEvt);
+        evtBackend.reconcileRemoteIcloudEventsForTest(initialSeed, QStringLiteral("evt_mid_cached"));
+        QCOMPARE(evtBackend.icloudEvents().size(), 251);
+
+        auto hasCachedEventId = [&](const QString &targetId) {
+            for (const QVariant &v : evtBackend.icloudEvents()) {
+                if (v.toMap().value(QStringLiteral("id")).toString() == targetId) return true;
+            }
+            return false;
+        };
+
+        // 1) 200 OK save of far-future event at 1900000000000 must preserve evt_near_249 and evt_mid_cached (1800000000000)
+        const QString okEvtId = evtBackend.saveIcloudEvent(
+            QStringLiteral("Far Future 200 OK Event"),
             1900000000000LL,
             1900003600000LL,
+            QStringLiteral("Work"),
+            QStringLiteral("Saved via 200 OK")
+        );
+        QTRY_COMPARE_WITH_TIMEOUT(evtRequestCount, 1, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(!evtBackend.hasPendingIcloudEventSaveForTest(okEvtId), 1500);
+        QVERIFY(hasCachedEventId(QStringLiteral("evt_near_249")));
+        QVERIFY(hasCachedEventId(QStringLiteral("evt_mid_cached")));
+        QVERIFY(hasCachedEventId(okEvtId));
+
+        // 2) Dropped ACK followed by 409 Conflict replay of far-future event at 1950000000000 must also preserve evt_near_249 and evt_mid_cached
+        const QString savedEvtId = evtBackend.saveIcloudEvent(
+            QStringLiteral("Far Future Replay Event "),
+            1950000000000LL,
+            1950003600000LL,
             QStringLiteral("Work"),
             QStringLiteral("Trimmed event notes\n  ")
         );
         const QString evtMutKey = QStringLiteral("evt_save:") + savedEvtId;
-        QTRY_COMPARE_WITH_TIMEOUT(evtReplayCount, 1, 1500);
+        QTRY_COMPARE_WITH_TIMEOUT(evtRequestCount, 2, 1500);
         QTRY_VERIFY_WITH_TIMEOUT(evtBackend.isIcloudMutationInBackoffForTest(evtMutKey), 1500);
         evtBackend.clearIcloudMutationRetryStateForTest(evtMutKey);
         evtBackend.replayPendingIcloudMutations();
-        QTRY_COMPARE_WITH_TIMEOUT(evtReplayCount, 2, 1500);
+        QTRY_COMPARE_WITH_TIMEOUT(evtRequestCount, 3, 1500);
         QTRY_VERIFY_WITH_TIMEOUT(!evtBackend.hasPendingIcloudEventSaveForTest(savedEvtId), 1500);
         QVERIFY(!evtBackend.isIcloudMutationPausedForTest(evtMutKey));
+        QVERIFY(hasCachedEventId(QStringLiteral("evt_near_249")));
+        QVERIFY(hasCachedEventId(QStringLiteral("evt_mid_cached")));
+        QVERIFY(hasCachedEventId(savedEvtId));
         if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
         if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);
     }

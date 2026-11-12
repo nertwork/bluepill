@@ -5175,6 +5175,11 @@ ApplicationWindow {
 
         property string noteId: ""
         property string noteSyncSource: "local_hub"
+        property int noteRevision: 0
+        property int noteMutationSeq: 0
+        property string loadedTitle: ""
+        property string loadedFolder: "Notes"
+        property string loadedBody: ""
         property bool noteSendInFlight: false
         property string targetChatGuid: ""
         property string targetChatTitle: ""
@@ -5198,9 +5203,41 @@ ApplicationWindow {
                 }
             }
             function onSelectedChatChanged() {
-                if (noteDetailWindow.targetChatGuid === "" && backend.selectedChatGuid !== "") {
+                if (noteDetailWindow.visible && noteDetailWindow.targetChatGuid === "" && backend.selectedChatGuid !== "") {
                     noteDetailWindow.targetChatGuid = backend.selectedChatGuid
                     noteDetailWindow.targetChatTitle = backend.selectedChatTitle
+                }
+            }
+            function onIcloudNotesChanged() {
+                var all = backend.icloudNotes
+                for (var i = 0; i < all.length; ++i) {
+                    var n = all[i]
+                    if (!n || !n.id) continue
+                    var nRev = Number(n.revision || n.baseRevision || 0)
+                    var nSeq = Number(n.clientMutationSeq || 0)
+                    if (n.id === icloudNotesPopup.selectedNoteId) {
+                        if (nSeq > 0 && nSeq === icloudNotesPopup.selectedNoteMutationSeq && nRev > icloudNotesPopup.selectedNoteRevision) {
+                            icloudNotesPopup.selectedNoteRevision = nRev
+                        }
+                    }
+                    if (n.id === noteDetailWindow.noteId) {
+                        if (nSeq > 0 && nSeq === noteDetailWindow.noteMutationSeq && nRev > noteDetailWindow.noteRevision) {
+                            noteDetailWindow.noteRevision = nRev
+                        }
+                        var detailClean = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
+                                           noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
+                                           noteDetailFolderInput.text === noteDetailWindow.loadedFolder)
+                        if (detailClean && (nSeq > noteDetailWindow.noteMutationSeq || nRev > noteDetailWindow.noteRevision)) {
+                            noteDetailTitleInput.text = n.title || ""
+                            noteDetailFolderInput.text = n.folder || "Notes"
+                            noteDetailBodyInput.text = n.body || n.snippet || ""
+                            noteDetailWindow.loadedTitle = noteDetailTitleInput.text
+                            noteDetailWindow.loadedFolder = noteDetailFolderInput.text
+                            noteDetailWindow.loadedBody = noteDetailBodyInput.text
+                            noteDetailWindow.noteRevision = nRev
+                            noteDetailWindow.noteMutationSeq = nSeq
+                        }
+                    }
                 }
             }
         }
@@ -5304,14 +5341,51 @@ ApplicationWindow {
                           ? ("📋 " + i18n.tr("Copy to Local Hub"))
                           : ("💾 " + i18n.tr("Save Note"))
                     onClicked: {
-                        var targetId = noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "" : noteDetailWindow.noteId
-                        noteDetailWindow.noteId = backend.saveIcloudNote(targetId, noteDetailTitleInput.text, noteDetailBodyInput.text, noteDetailFolderInput.text)
+                        var isCopy = noteDetailWindow.noteSyncSource === "apple_notes_ro"
+                        var targetId = isCopy ? "" : noteDetailWindow.noteId
+                        if (targetId !== "") {
+                            var existingList = backend.icloudNotes
+                            for (var i = 0; i < existingList.length; ++i) {
+                                var cur = existingList[i]
+                                if (cur && cur.id === targetId) {
+                                    var curSeq = Number(cur.clientMutationSeq || 0)
+                                    if (curSeq > noteDetailWindow.noteMutationSeq) {
+                                        noteDetailTitleInput.text = cur.title || ""
+                                        noteDetailFolderInput.text = cur.folder || "Notes"
+                                        noteDetailBodyInput.text = cur.body || cur.snippet || ""
+                                        noteDetailWindow.loadedTitle = noteDetailTitleInput.text
+                                        noteDetailWindow.loadedFolder = noteDetailFolderInput.text
+                                        noteDetailWindow.loadedBody = noteDetailBodyInput.text
+                                        noteDetailWindow.noteRevision = Number(cur.revision || cur.baseRevision || 0)
+                                        noteDetailWindow.noteMutationSeq = curSeq
+                                        root.showToast(i18n.tr("Note was updated in Notes Hub; loaded latest saved version."))
+                                        return
+                                    }
+                                    break
+                                }
+                            }
+                        }
+                        var baseRev = (isCopy || targetId === "") ? 0 : noteDetailWindow.noteRevision
+                        noteDetailWindow.noteId = backend.saveIcloudNote(targetId, noteDetailTitleInput.text, noteDetailBodyInput.text, noteDetailFolderInput.text, baseRev)
                         noteDetailWindow.noteSyncSource = "local_hub"
+                        noteDetailWindow.loadedTitle = noteDetailTitleInput.text
+                        noteDetailWindow.loadedFolder = noteDetailFolderInput.text
+                        noteDetailWindow.loadedBody = noteDetailBodyInput.text
+                        var updatedList = backend.icloudNotes
+                        for (var j = 0; j < updatedList.length; ++j) {
+                            var saved = updatedList[j]
+                            if (saved && saved.id === noteDetailWindow.noteId) {
+                                noteDetailWindow.noteMutationSeq = Number(saved.clientMutationSeq || 0)
+                                break
+                            }
+                        }
                         noteTitleInput.text = noteDetailTitleInput.text
                         noteBodyInput.text = noteDetailBodyInput.text
                         noteFolderInput.text = noteDetailFolderInput.text
                         icloudNotesPopup.selectedNoteId = noteDetailWindow.noteId
                         icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                        icloudNotesPopup.selectedNoteRevision = noteDetailWindow.noteRevision
+                        icloudNotesPopup.selectedNoteMutationSeq = noteDetailWindow.noteMutationSeq
                     }
                 }
 
@@ -5389,6 +5463,8 @@ ApplicationWindow {
         property string selectedNoteId: ""
         property string selectedNoteFolder: "Notes"
         property string selectedNoteSyncSource: "local_hub"
+        property int selectedNoteRevision: 0
+        property int selectedNoteMutationSeq: 0
 
         contentItem: ColumnLayout {
             anchors.fill: parent
@@ -5409,6 +5485,8 @@ ApplicationWindow {
                     onClicked: {
                         icloudNotesPopup.selectedNoteId = ""
                         icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                        icloudNotesPopup.selectedNoteRevision = 0
+                        icloudNotesPopup.selectedNoteMutationSeq = 0
                         noteTitleInput.text = ""
                         noteFolderInput.text = "Notes"
                         noteBodyInput.text = ""
@@ -5493,19 +5571,28 @@ ApplicationWindow {
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
+                                    var loadedRev = Number(modelData.revision || modelData.baseRevision || 0)
+                                    var loadedSeq = Number(modelData.clientMutationSeq || 0)
                                     icloudNotesPopup.selectedNoteId = modelData.id || ""
                                     icloudNotesPopup.selectedNoteSyncSource = modelData.syncSource || "local_hub"
+                                    icloudNotesPopup.selectedNoteRevision = loadedRev
+                                    icloudNotesPopup.selectedNoteMutationSeq = loadedSeq
                                     noteTitleInput.text = modelData.title || ""
                                     noteFolderInput.text = modelData.folder || "Notes"
                                     noteBodyInput.text = modelData.body || modelData.snippet || ""
 
                                     noteDetailWindow.noteId = modelData.id || ""
                                     noteDetailWindow.noteSyncSource = modelData.syncSource || "local_hub"
+                                    noteDetailWindow.noteRevision = loadedRev
+                                    noteDetailWindow.noteMutationSeq = loadedSeq
                                     noteDetailWindow.targetChatGuid = backend.selectedChatGuid
                                     noteDetailWindow.targetChatTitle = backend.selectedChatTitle
                                     noteDetailTitleInput.text = modelData.title || ""
                                     noteDetailFolderInput.text = modelData.folder || "Notes"
                                     noteDetailBodyInput.text = modelData.body || modelData.snippet || ""
+                                    noteDetailWindow.loadedTitle = noteDetailTitleInput.text
+                                    noteDetailWindow.loadedFolder = noteDetailFolderInput.text
+                                    noteDetailWindow.loadedBody = noteDetailBodyInput.text
                                     noteDetailWindow.show()
                                     noteDetailWindow.raise()
                                     noteDetailWindow.requestActivate()
@@ -5569,9 +5656,30 @@ ApplicationWindow {
                                       ? ("📋 " + i18n.tr("Copy to Local Hub"))
                                       : ("💾 " + i18n.tr("Save"))
                                 onClicked: {
-                                    var targetId = icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro" ? "" : icloudNotesPopup.selectedNoteId
-                                    icloudNotesPopup.selectedNoteId = backend.saveIcloudNote(targetId, noteTitleInput.text, noteBodyInput.text, noteFolderInput.text)
+                                    var isCopy = icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro"
+                                    var targetId = isCopy ? "" : icloudNotesPopup.selectedNoteId
+                                    var baseRev = (isCopy || targetId === "") ? 0 : icloudNotesPopup.selectedNoteRevision
+                                    icloudNotesPopup.selectedNoteId = backend.saveIcloudNote(targetId, noteTitleInput.text, noteBodyInput.text, noteFolderInput.text, baseRev)
                                     icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                                    var updatedList = backend.icloudNotes
+                                    for (var i = 0; i < updatedList.length; ++i) {
+                                        var saved = updatedList[i]
+                                        if (saved && saved.id === icloudNotesPopup.selectedNoteId) {
+                                            icloudNotesPopup.selectedNoteMutationSeq = Number(saved.clientMutationSeq || 0)
+                                            break
+                                        }
+                                    }
+                                    if (noteDetailWindow.noteId === icloudNotesPopup.selectedNoteId) {
+                                        noteDetailTitleInput.text = noteTitleInput.text
+                                        noteDetailBodyInput.text = noteBodyInput.text
+                                        noteDetailFolderInput.text = noteFolderInput.text
+                                        noteDetailWindow.loadedTitle = noteTitleInput.text
+                                        noteDetailWindow.loadedBody = noteBodyInput.text
+                                        noteDetailWindow.loadedFolder = noteFolderInput.text
+                                        noteDetailWindow.noteSyncSource = "local_hub"
+                                        noteDetailWindow.noteRevision = icloudNotesPopup.selectedNoteRevision
+                                        noteDetailWindow.noteMutationSeq = icloudNotesPopup.selectedNoteMutationSeq
+                                    }
                                 }
                             }
 
@@ -7554,46 +7662,77 @@ ApplicationWindow {
 
             MouseArea { anchors.fill: parent }
 
-            Row {
-                anchors.centerIn: parent
+            ListView {
+                id: photoThumbListView
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.topMargin: 10
+                anchors.bottomMargin: 10
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: Math.min(parent.width - 32, Math.max(66, count * 76 - 10))
+                orientation: ListView.Horizontal
                 spacing: 10
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                model: root.photoViewerItems
+                currentIndex: root.photoViewerIndex
 
-                Repeater {
-                    model: root.photoViewerItems
-                    delegate: Rectangle {
-                        required property var modelData
-                        required property int index
-                        width: 66
-                        height: 66
-                        radius: 8
-                        color: theme.darkBackground
-                        border.width: index === root.photoViewerIndex ? 2 : 1
-                        border.color: index === root.photoViewerIndex ? theme.accent : theme.muted
-                        clip: true
+                onCurrentIndexChanged: {
+                    if (currentIndex >= 0 && currentIndex < count) {
+                        positionViewAtIndex(currentIndex, ListView.Contain)
+                    }
+                }
+                onCountChanged: {
+                    if (currentIndex >= 0 && currentIndex < count) {
+                        Qt.callLater(function() {
+                            if (photoThumbListView.currentIndex >= 0 && photoThumbListView.currentIndex < photoThumbListView.count) {
+                                photoThumbListView.positionViewAtIndex(photoThumbListView.currentIndex, ListView.Center)
+                            }
+                        })
+                    }
+                }
 
-                        Image {
-                            anchors.fill: parent
-                            anchors.margins: 2
-                            source: modelData.localUrl || ""
-                            asynchronous: true
-                            cache: true
-                            autoTransform: true
-                            fillMode: Image.PreserveAspectCrop
-                            opacity: index === root.photoViewerIndex ? 1.0 : 0.65
+                delegate: Rectangle {
+                    required property var modelData
+                    required property int index
+                    width: 66
+                    height: 66
+                    radius: 8
+                    color: theme.darkBackground
+                    border.width: index === root.photoViewerIndex ? 2 : 1
+                    border.color: index === root.photoViewerIndex ? theme.accent : theme.muted
+                    clip: true
+
+                    Image {
+                        anchors.fill: parent
+                        anchors.margins: 2
+                        source: modelData.localUrl || ""
+                        asynchronous: true
+                        cache: true
+                        autoTransform: true
+                        fillMode: Image.PreserveAspectCrop
+                        opacity: index === root.photoViewerIndex ? 1.0 : 0.65
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            root.photoViewerIndex = index
+                            root.photoViewerZoom = 1.0
+                            root.photoViewerPanX = 0
+                            root.photoViewerPanY = 0
+                            var cur = root.photoViewerItems[index]
+                            if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0) {
+                                backend.openAttachment(cur.guid, cur.name || "")
+                            }
                         }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                root.photoViewerIndex = index
-                                root.photoViewerZoom = 1.0
-                                root.photoViewerPanX = 0
-                                root.photoViewerPanY = 0
-                                var cur = root.photoViewerItems[index]
-                                if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0) {
-                                    backend.openAttachment(cur.guid, cur.name || "")
-                                }
+                        onWheel: (wheel) => {
+                            var delta = wheel.angleDelta.x !== 0 ? wheel.angleDelta.x : wheel.angleDelta.y
+                            if (delta !== 0) {
+                                var maxContentX = Math.max(0, photoThumbListView.contentWidth - photoThumbListView.width)
+                                photoThumbListView.contentX = Math.max(0, Math.min(maxContentX, photoThumbListView.contentX - delta))
+                                wheel.accepted = true
                             }
                         }
                     }

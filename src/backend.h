@@ -249,7 +249,7 @@ public:
     Q_INVOKABLE static QString canonicalizeAddress(const QString &raw);
     Q_INVOKABLE static QString formatHandleForDisplay(const QString &raw);
     Q_INVOKABLE void fetchIcloudNotes();
-    Q_INVOKABLE QString saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder = QStringLiteral("Notes"));
+    Q_INVOKABLE QString saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder = QStringLiteral("Notes"), qint64 baseRevision = -1);
     Q_INVOKABLE void deleteIcloudNote(const QString &id);
     Q_INVOKABLE void fetchIcloudEvents();
     Q_INVOKABLE QString saveIcloudEvent(const QString &title, qint64 startMs, qint64 endMs, const QString &calendarName = QStringLiteral("Home"), const QString &notes = QString());
@@ -262,7 +262,7 @@ public:
     bool isSecureOrLocalIcloudEndpoint() const;
     void replayPendingIcloudMutations();
     void reconcileRemoteIcloudNotesForTest(const QJsonArray &data) { applyRemoteIcloudNotes(data); }
-    void reconcileRemoteIcloudEventsForTest(const QJsonArray &data) { applyRemoteIcloudEvents(data); }
+    void reconcileRemoteIcloudEventsForTest(const QJsonArray &data, const QString &acknowledgedEventId = QString()) { applyRemoteIcloudEvents(data, acknowledgedEventId); }
     quint64 icloudNotesGenerationForTest() const { return m_icloudNotesGeneration; }
     quint64 icloudEventsGenerationForTest() const { return m_icloudEventsGeneration; }
     void recordIcloudMutationFailureForTest(const QString &mutationKey) { recordIcloudMutationFailure(mutationKey); }
@@ -270,7 +270,9 @@ public:
     bool isIcloudMutationInBackoffForTest(const QString &mutationKey) const;
     bool isIcloudMutationPausedForTest(const QString &mutationKey) const { return m_icloudMutationPausedKeys.contains(mutationKey); }
     bool hasPendingIcloudNoteSaveForTest(const QString &noteId) const { return m_pendingIcloudNoteSaves.contains(noteId); }
+    bool hasPendingIcloudNoteDeleteForTest(const QString &noteId) const { return m_pendingIcloudNoteDeletes.contains(noteId); }
     bool hasPendingIcloudEventSaveForTest(const QString &evtId) const { return m_pendingIcloudEventSaves.contains(evtId); }
+    bool hasPendingIcloudEventDeleteForTest(const QString &evtId) const { return m_pendingIcloudEventDeletes.contains(evtId); }
     int icloudMutationRetryCountForTest(const QString &mutationKey) const { return m_icloudMutationRetryCounts.value(mutationKey, 0); }
     void scheduleIcloudMutationRetryForTest(bool immediate) { scheduleIcloudMutationRetry(immediate); }
 
@@ -408,7 +410,7 @@ private:
     void handleNetworkFailure(const QString &context);
     void handleNetworkSuccess();
     void applyRemoteIcloudNotes(const QJsonArray &data);
-    void applyRemoteIcloudEvents(const QJsonArray &data);
+    void applyRemoteIcloudEvents(const QJsonArray &data, const QString &acknowledgedEventId = QString());
     void scheduleIcloudMutationRetry(bool immediate);
     void recordIcloudMutationFailure(const QString &mutationKey);
     void clearIcloudMutationRetryState(const QString &mutationKey);

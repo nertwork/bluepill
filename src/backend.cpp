@@ -966,6 +966,31 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
         QFile::setPermissions(cfgPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     }
 
+    const bool endpointReplaced = !m_serverUrl.isEmpty() && !normPrimary.isEmpty() &&
+                                  normPrimary != m_serverUrl && normPrimary != m_secondaryServerUrl &&
+                                  (normSecondary.isEmpty() || (normSecondary != m_serverUrl && normSecondary != m_secondaryServerUrl));
+    if (endpointReplaced) {
+        m_icloudMutationRetryTimer.stop();
+        m_icloudMutationRetryScheduled = false;
+        m_icloudMutationRetryArmedDeadlineMs = 0;
+        for (auto it = m_inFlightIcloudNoteReplies.begin(); it != m_inFlightIcloudNoteReplies.end(); ++it) {
+            if (it.value()) it.value()->abort();
+        }
+        m_inFlightIcloudNoteReplies.clear();
+        for (auto it = m_inFlightIcloudEventReplies.begin(); it != m_inFlightIcloudEventReplies.end(); ++it) {
+            if (it.value()) it.value()->abort();
+        }
+        m_inFlightIcloudEventReplies.clear();
+        m_pendingIcloudNoteSaves.clear();
+        m_pendingIcloudNoteDeletes.clear();
+        m_pendingIcloudEventSaves.clear();
+        m_pendingIcloudEventDeletes.clear();
+        m_icloudMutationRetryCounts.clear();
+        m_icloudMutationNextRetryMs.clear();
+        m_icloudMutationPausedKeys.clear();
+        saveAppState();
+    }
+
     m_serverUrl = normPrimary;
     m_secondaryServerUrl = normSecondary;
     m_password = resolvedPassword;
@@ -4261,6 +4286,10 @@ void Backend::rebuildSelectedChatMessages() {
         const QVariantMap cm = curr.toMap();
         const QString g = cm.value(QStringLiteral("guid")).toString();
         if (g.startsWith(QStringLiteral("temp-")) || g.startsWith(QStringLiteral("bp-"))) {
+            const QString optChatGuid = cm.value(QStringLiteral("chatGuid")).toString();
+            if (!optChatGuid.isEmpty() && optChatGuid != m_selectedChatGuid) {
+                continue;
+            }
             const qint64 optTs = cm.value(QStringLiteral("optimisticCreatedAtMs")).toLongLong();
             if (optTs > 0 && (nowRebuildMs - optTs) > 45000LL) {
                 continue;
@@ -4346,7 +4375,9 @@ void Backend::loadChatMessages(const QString &chatGuid) {
 
     QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/message/query")),
                                       QJsonDocument(enrichBody).toJson(QJsonDocument::Compact));
-    m_activeMessagesReply = reply;
+    if (m_selectedChatGuid == chatGuid) {
+        m_activeMessagesReply = reply;
+    }
     connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid, reqSeq]() {
         reply->deleteLater();
         if (m_activeMessagesReply == reply) m_activeMessagesReply = nullptr;
@@ -4358,7 +4389,9 @@ void Backend::loadChatMessages(const QString &chatGuid) {
             const QString encodedGuid = QString::fromUtf8(QUrl::toPercentEncoding(chatGuid));
             const QString path = QStringLiteral("/api/v1/chat/%1/message?limit=150&sort=DESC&with=attachment,handle,attributedbody").arg(encodedGuid);
             QNetworkReply *fallbackReply = m_nam.get(makeRequest(path));
-            m_activeMessagesReply = fallbackReply;
+            if (m_selectedChatGuid == chatGuid) {
+                m_activeMessagesReply = fallbackReply;
+            }
             connect(fallbackReply, &QNetworkReply::finished, this, [this, fallbackReply, chatGuid, reqSeq]() {
                 fallbackReply->deleteLater();
                 if (m_activeMessagesReply == fallbackReply) m_activeMessagesReply = nullptr;
@@ -4375,26 +4408,24 @@ void Backend::loadChatMessages(const QString &chatGuid) {
                     return;
                 }
                 handleNetworkSuccess();
-                if (reqSeq != m_messageRequestSeq || m_selectedChatGuid != chatGuid) return;
-
                 const QJsonArray arr = QJsonDocument::fromJson(fallbackReply->readAll()).object().value(QStringLiteral("data")).toArray();
                 reconcileChatMessages(chatGuid, arr, true);
                 m_chatMessageOffset[chatGuid] = arr.size();
                 m_chatHasMoreMessages[chatGuid] = (arr.size() >= 150);
                 saveMessagesCache();
+                if (reqSeq != m_messageRequestSeq || m_selectedChatGuid != chatGuid) return;
                 emit olderMessagesChanged();
                 rebuildSelectedChatMessages();
             });
             return;
         }
         handleNetworkSuccess();
-        if (reqSeq != m_messageRequestSeq || m_selectedChatGuid != chatGuid) return;
-
         const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
         reconcileChatMessages(chatGuid, arr, true);
         m_chatMessageOffset[chatGuid] = arr.size();
         m_chatHasMoreMessages[chatGuid] = (arr.size() >= 150);
         saveMessagesCache();
+        if (reqSeq != m_messageRequestSeq || m_selectedChatGuid != chatGuid) return;
         emit olderMessagesChanged();
         rebuildSelectedChatMessages();
     });
@@ -5194,9 +5225,10 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
 
     const QString tempGuid = QStringLiteral("temp-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
 
-    // Optimistic UI append
+    // Optimistic UI append (scoped to target chatGuid so background sends never bleed into another selected chat's timeline)
     QVariantMap optimistic;
     optimistic.insert(QStringLiteral("guid"), tempGuid);
+    optimistic.insert(QStringLiteral("chatGuid"), chatGuid);
     optimistic.insert(QStringLiteral("text"), trimmed);
     optimistic.insert(QStringLiteral("formattedText"), formatMessageTextWithLinks(trimmed));
     optimistic.insert(QStringLiteral("verificationCode"), extractVerificationCode(trimmed));
@@ -5212,8 +5244,13 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     optimistic.insert(QStringLiteral("receiptText"), m_demoMode ? QStringLiteral("Delivered") : QStringLiteral("Sending..."));
     optimistic.insert(QStringLiteral("replyToGuid"), replyToGuid);
     optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), QDateTime::currentMSecsSinceEpoch());
-    m_messages.append(optimistic);
-    emit messagesChanged();
+    if (m_demoMode && m_demoChatMessages.contains(chatGuid)) {
+        m_demoChatMessages[chatGuid].append(optimistic);
+    }
+    if (chatGuid == m_selectedChatGuid) {
+        m_messages.append(optimistic);
+        emit messagesChanged();
+    }
 
     m_unreadOverrides.remove(chatGuid);
     for (ChatEntry &c : m_chats) {
@@ -5264,22 +5301,24 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
             }
             cacheMessageForChat(chatGuid, dataObj);
 
-            bool replaced = false;
-            for (int i = 0; i < m_messages.size(); ++i) {
-                QVariantMap m = m_messages[i].toMap();
-                const QString curG = m.value(QStringLiteral("guid")).toString();
-                if (curG == tempGuid || curG == realGuid) {
-                    m.insert(QStringLiteral("guid"), realGuid);
-                    m.insert(QStringLiteral("receiptText"), QStringLiteral("Delivered"));
-                    m_messages[i] = m;
-                    replaced = true;
-                    break;
+            if (chatGuid == m_selectedChatGuid) {
+                bool replaced = false;
+                for (int i = 0; i < m_messages.size(); ++i) {
+                    QVariantMap m = m_messages[i].toMap();
+                    const QString curG = m.value(QStringLiteral("guid")).toString();
+                    if (curG == tempGuid || curG == realGuid) {
+                        m.insert(QStringLiteral("guid"), realGuid);
+                        m.insert(QStringLiteral("receiptText"), QStringLiteral("Delivered"));
+                        m_messages[i] = m;
+                        replaced = true;
+                        break;
+                    }
                 }
-            }
-            if (replaced) {
-                emit messagesChanged();
-            } else {
-                rebuildSelectedChatMessages();
+                if (replaced) {
+                    emit messagesChanged();
+                } else {
+                    rebuildSelectedChatMessages();
+                }
             }
             saveMessagesCache();
             return true;
@@ -7803,7 +7842,7 @@ void Backend::applyRemoteIcloudNotes(const QJsonArray &data) {
     saveAppState();
 }
 
-void Backend::applyRemoteIcloudEvents(const QJsonArray &data) {
+void Backend::applyRemoteIcloudEvents(const QJsonArray &data, const QString &acknowledgedEventId) {
     QVariantList merged;
     QSet<QString> seenIds;
 
@@ -7823,15 +7862,22 @@ void Backend::applyRemoteIcloudEvents(const QJsonArray &data) {
 
     qint64 minRemoteStartMs = std::numeric_limits<qint64>::max();
     qint64 maxRemoteStartMs = std::numeric_limits<qint64>::min();
+    int inWindowCount = 0;
 
     for (const QJsonValue &v : data) {
         if (!v.isObject()) continue;
         QVariantMap m = v.toObject().toVariantMap();
         const QString id = m.value(QStringLiteral("id")).toString();
         if (id.isEmpty()) continue;
+        const bool isOutOfWindowAck = m.value(QStringLiteral("outsideWindow")).toBool() ||
+                                      (!acknowledgedEventId.isEmpty() && id == acknowledgedEventId);
+        m.remove(QStringLiteral("outsideWindow"));
         const qint64 sMs = m.value(QStringLiteral("startMs")).toLongLong();
-        if (sMs < minRemoteStartMs) minRemoteStartMs = sMs;
-        if (sMs > maxRemoteStartMs) maxRemoteStartMs = sMs;
+        if (!isOutOfWindowAck) {
+            if (sMs < minRemoteStartMs) minRemoteStartMs = sMs;
+            if (sMs > maxRemoteStartMs) maxRemoteStartMs = sMs;
+            ++inWindowCount;
+        }
         if (m_pendingIcloudEventDeletes.contains(id)) continue;
         if (seenIds.contains(id)) continue;
         const QString calTitle = m.value(QStringLiteral("calendarTitle")).toString().trimmed();
@@ -7845,7 +7891,7 @@ void Backend::applyRemoteIcloudEvents(const QJsonArray &data) {
 
     // If the relay response was capped at its 250-event window, preserve locally known events
     // whose startMs falls strictly outside the returned [minRemoteStartMs, maxRemoteStartMs] window.
-    if (data.size() >= 250 && minRemoteStartMs <= maxRemoteStartMs) {
+    if ((data.size() >= 250 || inWindowCount >= 249) && minRemoteStartMs <= maxRemoteStartMs) {
         for (const QVariant &existingVar : m_icloudEvents) {
             const QVariantMap existingMap = existingVar.toMap();
             const QString existingId = existingMap.value(QStringLiteral("id")).toString();
@@ -8144,7 +8190,8 @@ void Backend::replayPendingIcloudMutations() {
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
                 ++m_icloudNotesSnapshotEpoch;
-                if (httpStatus == 401 || httpStatus == 403) {
+                const bool isAuthFailure = (httpStatus == 401) || (httpStatus == 403 && !doc.value(QStringLiteral("data")).isArray());
+                if (isAuthFailure) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
                     emit toastMessage(QStringLiteral("iCloud Hub authentication required; pending note deletion preserved."));
@@ -8243,7 +8290,7 @@ void Backend::replayPendingIcloudMutations() {
                         }
                     }
                     if (gen == m_icloudEventsGeneration) {
-                        applyRemoteIcloudEvents(dataArr);
+                        applyRemoteIcloudEvents(dataArr, evtId);
                     } else {
                         saveAppState();
                     }
@@ -8259,7 +8306,7 @@ void Backend::replayPendingIcloudMutations() {
                         clearIcloudMutationRetryState(mutKey);
                         m_pendingIcloudEventSaves.remove(evtId);
                         if (gen == m_icloudEventsGeneration) {
-                            applyRemoteIcloudEvents(doc.value(QStringLiteral("data")).toArray());
+                            applyRemoteIcloudEvents(doc.value(QStringLiteral("data")).toArray(), evtId);
                         } else {
                             saveAppState();
                         }
@@ -8342,7 +8389,8 @@ void Backend::replayPendingIcloudMutations() {
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
                 ++m_icloudEventsSnapshotEpoch;
-                if (httpStatus == 401 || httpStatus == 403) {
+                const bool isAuthFailure = (httpStatus == 401) || (httpStatus == 403 && !doc.value(QStringLiteral("data")).isArray());
+                if (isAuthFailure) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
                     emit toastMessage(QStringLiteral("iCloud Hub authentication required; pending event deletion preserved."));
@@ -8390,7 +8438,7 @@ void Backend::fetchIcloudNotes() {
     });
 }
 
-QString Backend::saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder) {
+QString Backend::saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder, qint64 baseRevision) {
     QString actualId = id.trimmed();
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     const quint64 gen = ++m_icloudNotesGeneration;
@@ -8399,24 +8447,24 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
     }
 
     qint64 baseRev = 0;
-    if (m_pendingIcloudNoteSaves.contains(actualId)) {
-        const QVariantMap pendMap = m_pendingIcloudNoteSaves.value(actualId);
-        baseRev = qMax(
-            pendMap.value(QStringLiteral("baseRevision")).toLongLong(),
-            pendMap.value(QStringLiteral("conflictServerRevision")).toLongLong()
-        );
-    }
-    for (int i = 0; i < m_icloudNotes.size(); ++i) {
-        const QVariantMap existingMap = m_icloudNotes.at(i).toMap();
-        if (existingMap.value(QStringLiteral("id")).toString() == actualId) {
-            baseRev = qMax(
-                baseRev,
-                qMax(
-                    existingMap.value(QStringLiteral("revision")).toLongLong(),
-                    existingMap.value(QStringLiteral("conflictServerRevision")).toLongLong()
-                )
-            );
-            break;
+    if (baseRevision >= 0) {
+        baseRev = baseRevision;
+    } else {
+        if (m_pendingIcloudNoteSaves.contains(actualId)) {
+            const QVariantMap pendMap = m_pendingIcloudNoteSaves.value(actualId);
+            baseRev = pendMap.value(QStringLiteral("baseRevision")).toLongLong();
+        }
+        if (baseRev <= 0) {
+            for (int i = 0; i < m_icloudNotes.size(); ++i) {
+                const QVariantMap existingMap = m_icloudNotes.at(i).toMap();
+                if (existingMap.value(QStringLiteral("id")).toString() == actualId) {
+                    baseRev = qMax(
+                        existingMap.value(QStringLiteral("baseRevision")).toLongLong(),
+                        existingMap.value(QStringLiteral("revision")).toLongLong()
+                    );
+                    break;
+                }
+            }
         }
     }
 
@@ -8594,10 +8642,23 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
 void Backend::deleteIcloudNote(const QString &id) {
     if (id.isEmpty()) return;
     const QString mutKey = QStringLiteral("note_del:") + id;
+    const QString saveKey = QStringLiteral("note_save:") + id;
+    const QVariantMap pendSave = m_pendingIcloudNoteSaves.value(id);
+    const bool neverSentLocalCreate = m_pendingIcloudNoteSaves.contains(id) &&
+                                      pendSave.value(QStringLiteral("baseRevision")).toLongLong() <= 0 &&
+                                      pendSave.value(QStringLiteral("revision")).toLongLong() <= 0 &&
+                                      !m_inFlightIcloudNoteReplies.value(id) &&
+                                      m_icloudMutationRetryCounts.value(saveKey, 0) == 0 &&
+                                      !m_icloudMutationNextRetryMs.contains(saveKey) &&
+                                      !m_icloudMutationPausedKeys.contains(saveKey);
     clearIcloudMutationRetryState(mutKey);
-    clearIcloudMutationRetryState(QStringLiteral("note_save:") + id);
+    clearIcloudMutationRetryState(saveKey);
     m_pendingIcloudNoteSaves.remove(id);
-    m_pendingIcloudNoteDeletes.insert(id);
+    if (neverSentLocalCreate) {
+        m_pendingIcloudNoteDeletes.remove(id);
+    } else {
+        m_pendingIcloudNoteDeletes.insert(id);
+    }
     const quint64 gen = ++m_icloudNotesGeneration;
 
     for (int i = 0; i < m_icloudNotes.size(); ++i) {
@@ -8608,6 +8669,7 @@ void Backend::deleteIcloudNote(const QString &id) {
     }
     emit icloudNotesChanged();
     saveAppState();
+    if (neverSentLocalCreate) return;
 
     // Queue behind any already in-flight HTTP request for this noteId instead of dispatching concurrently
     if (isSecureOrLocalIcloudEndpoint() && !m_inFlightIcloudNoteReplies.value(id)) {
@@ -8646,7 +8708,8 @@ void Backend::deleteIcloudNote(const QString &id) {
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
                 ++m_icloudNotesSnapshotEpoch;
-                if (httpStatus == 401 || httpStatus == 403) {
+                const bool isAuthFailure = (httpStatus == 401) || (httpStatus == 403 && !dataVal.isArray());
+                if (isAuthFailure) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
                     emit toastMessage(QStringLiteral("iCloud Hub authentication required; pending note deletion preserved."));
@@ -8802,7 +8865,7 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
                         }
                     }
                     if (gen == m_icloudEventsGeneration) {
-                        applyRemoteIcloudEvents(dataArr);
+                        applyRemoteIcloudEvents(dataArr, id);
                     } else {
                         saveAppState();
                     }
@@ -8843,7 +8906,7 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
                             clearIcloudMutationRetryState(mutKey);
                             m_pendingIcloudEventSaves.remove(id);
                             if (gen == m_icloudEventsGeneration) {
-                                applyRemoteIcloudEvents(dataVal.toArray());
+                                applyRemoteIcloudEvents(dataVal.toArray(), id);
                             } else {
                                 saveAppState();
                             }
@@ -8887,10 +8950,23 @@ QString Backend::saveIcloudEvent(const QString &title, qint64 startMs, qint64 en
 void Backend::deleteIcloudEvent(const QString &id) {
     if (id.isEmpty()) return;
     const QString mutKey = QStringLiteral("evt_del:") + id;
+    const QString saveKey = QStringLiteral("evt_save:") + id;
+    const QVariantMap pendSave = m_pendingIcloudEventSaves.value(id);
+    const bool neverSentLocalCreate = m_pendingIcloudEventSaves.contains(id) &&
+                                      pendSave.value(QStringLiteral("baseRevision")).toLongLong() <= 0 &&
+                                      pendSave.value(QStringLiteral("revision")).toLongLong() <= 0 &&
+                                      !m_inFlightIcloudEventReplies.value(id) &&
+                                      m_icloudMutationRetryCounts.value(saveKey, 0) == 0 &&
+                                      !m_icloudMutationNextRetryMs.contains(saveKey) &&
+                                      !m_icloudMutationPausedKeys.contains(saveKey);
     clearIcloudMutationRetryState(mutKey);
-    clearIcloudMutationRetryState(QStringLiteral("evt_save:") + id);
+    clearIcloudMutationRetryState(saveKey);
     m_pendingIcloudEventSaves.remove(id);
-    m_pendingIcloudEventDeletes.insert(id);
+    if (neverSentLocalCreate) {
+        m_pendingIcloudEventDeletes.remove(id);
+    } else {
+        m_pendingIcloudEventDeletes.insert(id);
+    }
     const quint64 gen = ++m_icloudEventsGeneration;
 
     for (int i = 0; i < m_icloudEvents.size(); ++i) {
@@ -8901,6 +8977,7 @@ void Backend::deleteIcloudEvent(const QString &id) {
     }
     emit icloudEventsChanged();
     saveAppState();
+    if (neverSentLocalCreate) return;
 
     // Queue behind any already in-flight HTTP request for this evtId instead of dispatching concurrently
     if (isSecureOrLocalIcloudEndpoint() && !m_inFlightIcloudEventReplies.value(id)) {
@@ -8939,7 +9016,8 @@ void Backend::deleteIcloudEvent(const QString &id) {
             }
             if (httpStatus >= 400 && httpStatus < 500 && httpStatus != 408 && httpStatus != 429) {
                 ++m_icloudEventsSnapshotEpoch;
-                if (httpStatus == 401 || httpStatus == 403) {
+                const bool isAuthFailure = (httpStatus == 401) || (httpStatus == 403 && !dataVal.isArray());
+                if (isAuthFailure) {
                     m_icloudMutationPausedKeys.insert(mutKey);
                     m_icloudMutationNextRetryMs.remove(mutKey);
                     emit toastMessage(QStringLiteral("iCloud Hub authentication required; pending event deletion preserved."));

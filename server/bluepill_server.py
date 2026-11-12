@@ -1602,7 +1602,8 @@ class BluePillEngine:
         return None
 
     def _cached_converted_jpeg_path(self, real_path: str, resize: Optional[int] = None) -> str:
-        os.makedirs(self.icloud_photos_cache_dir, exist_ok=True)
+        os.makedirs(self.icloud_photos_cache_dir, mode=0o700, exist_ok=True)
+        os.chmod(self.icloud_photos_cache_dir, 0o700)
         digest = hashlib.sha256(f"{os.path.realpath(real_path)}:{int(resize or 0)}".encode("utf-8")).hexdigest()[:24]
         return os.path.join(self.icloud_photos_cache_dir, f"{digest}.jpg")
 
@@ -3024,7 +3025,8 @@ class BluePillEngine:
         photos_lib = os.path.expanduser(self.photos_library_path)
         photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
         has_photos_db = os.path.exists(photos_db)
-        seen_guids: set[str] = set()
+        seen_chat_guids: set[str] = set()
+        seen_lib_guids: set[str] = set()
         chat_photos: List[Dict[str, Any]] = []
         lib_photos: List[Dict[str, Any]] = []
 
@@ -3073,7 +3075,7 @@ class BluePillEngine:
                     rows = conn.execute(chat_sql, (fetch_limit,)).fetchall()
                     for r in rows:
                         g = str(r["guid"] or "").strip()
-                        if not g or g in seen_guids:
+                        if not g or g in seen_chat_guids:
                             continue
                         fn = str(r["filename"] or "").strip()
                         raw_path = os.path.expanduser(fn) if fn else ""
@@ -3094,7 +3096,7 @@ class BluePillEngine:
                             or lower_name.endswith((".heic", ".heif"))
                         ):
                             continue
-                        seen_guids.add(g)
+                        seen_chat_guids.add(g)
                         mime = str(r["mime_type"] or "image/jpeg")
                         dim_path = ""
                         if exists_on_disk:
@@ -3161,7 +3163,7 @@ class BluePillEngine:
                         ).fetchall()
                         for ar in rows:
                             zuuid = str(ar["ZUUID"] or "").strip()
-                            if not zuuid or zuuid in seen_guids:
+                            if not zuuid or zuuid in seen_lib_guids:
                                 continue
                             zfn = str(ar["ZFILENAME"] or f"asset_{zuuid[:8]}").strip()
                             zdir = str(ar["ZDIRECTORY"] or "").strip()
@@ -3199,7 +3201,7 @@ class BluePillEngine:
                                 resolved_asset is not None
                                 or (sys.platform == "darwin" and bool(zdir and zfn) and os.path.exists("/usr/bin/brctl"))
                             )
-                            seen_guids.add(zuuid)
+                            seen_lib_guids.add(zuuid)
                             lib_photos.append({
                                 "guid": zuuid,
                                 "name": zfn,
@@ -3215,21 +3217,37 @@ class BluePillEngine:
                                 "isPortrait": False,
                                 "_dimPath": dim_path,
                             })
+                            if len(lib_photos) >= window_limit:
+                                break
                 finally:
                     pconn.close()
             except sqlite3.Error as exc:
                 self.logger.debug("[photos] Photos.sqlite check: %s", exc)
 
-        # Prefix-stable interleave so every window is an exact prefix of every larger window across pagination offsets
+        # Prefix-stable interleave with in-order cross-source deduplication so every window
+        # is an exact prefix of every larger window across pagination offsets even when sources share GUIDs
         photos: List[Dict[str, Any]] = []
+        seen_interleaved: set[str] = set()
         ci = li = 0
         while len(photos) < window_limit and (ci < len(chat_photos) or li < len(lib_photos)):
-            if ci < len(chat_photos):
-                photos.append(chat_photos[ci])
+            while ci < len(chat_photos):
+                cand_c = chat_photos[ci]
                 ci += 1
-            if li < len(lib_photos) and len(photos) < window_limit:
-                photos.append(lib_photos[li])
+                cg = cand_c["guid"]
+                if cg not in seen_interleaved:
+                    seen_interleaved.add(cg)
+                    photos.append(cand_c)
+                    break
+            if len(photos) >= window_limit:
+                break
+            while li < len(lib_photos):
+                cand_l = lib_photos[li]
                 li += 1
+                lg = cand_l["guid"]
+                if lg not in seen_interleaved:
+                    seen_interleaved.add(lg)
+                    photos.append(cand_l)
+                    break
         page_photos = photos[clamped_offset : clamped_offset + clamped_limit]
         for item in page_photos:
             dim_path = str(item.pop("_dimPath", "") or "")
@@ -3256,7 +3274,8 @@ class BluePillEngine:
         has_more = len(batch) > clamped_limit
         photos = batch[:clamped_limit]
         next_offset = (clamped_offset + len(photos)) if has_more else None
-        os.makedirs(self.icloud_photos_cache_dir, exist_ok=True)
+        os.makedirs(self.icloud_photos_cache_dir, mode=0o700, exist_ok=True)
+        os.chmod(self.icloud_photos_cache_dir, 0o700)
 
         unpurged_count = 0
         transcoded_count = 0
@@ -3270,6 +3289,7 @@ class BluePillEngine:
             if not guid:
                 continue
             processed_count += 1
+            photo_failed = False
             is_evicted = p.get("isCloudEvicted", False)
             if is_evicted:
                 res = self.download_cloud_attachment(guid)
@@ -3277,6 +3297,7 @@ class BluePillEngine:
                     unpurged_count += 1
                 else:
                     failed_count += 1
+                    photo_failed = True
                     err_msg = str(
                         res.get("error")
                         or res.get("message")
@@ -3291,10 +3312,26 @@ class BluePillEngine:
                 ext = os.path.splitext(src_path)[1].lower()
                 if sys.platform == "darwin" and ext in (".heic", ".heif", ".tiff", ".tif") and os.path.exists("/usr/bin/sips"):
                     cached_target = self._cached_converted_jpeg_path(src_path, None)
-                    already_cached = os.path.exists(cached_target)
-                    self._postprocess_resolved_attachment(src_path, src_mime, convert_heic=True, resize=None)
-                    if os.path.exists(cached_target) or already_cached:
-                        transcoded_count += 1
+                    try:
+                        out_path, _ = self._postprocess_resolved_attachment(
+                            src_path, src_mime, convert_heic=True, resize=None
+                        )
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        out_path = ""
+                        if not photo_failed:
+                            failed_count += 1
+                            photo_failed = True
+                        if len(errors) < 20:
+                            errors.append({"guid": guid, "error": f"Failed to convert photo {guid}: {exc}"})
+                    else:
+                        if out_path == cached_target and os.path.exists(cached_target) and os.path.getsize(cached_target) > 0:
+                            transcoded_count += 1
+                        else:
+                            if not photo_failed:
+                                failed_count += 1
+                                photo_failed = True
+                            if len(errors) < 20:
+                                errors.append({"guid": guid, "error": f"Failed to convert photo {guid} to JPEG"})
 
         synced_count = unpurged_count + transcoded_count
         status_str = "ok" if failed_count == 0 else ("partial" if synced_count > 0 else "error")
@@ -4065,10 +4102,9 @@ class BluePillEngine:
             selected = res[:clamped_limit]
             clean_inc = str(include_event_id or "").strip()
             if clean_inc and clean_inc in events_by_id and not any(e.get("id") == clean_inc for e in selected):
-                if len(selected) >= clamped_limit and selected:
-                    selected[-1] = events_by_id[clean_inc]
-                else:
-                    selected.append(events_by_id[clean_inc])
+                inc_copy = dict(events_by_id[clean_inc])
+                inc_copy["outsideWindow"] = True
+                selected.append(inc_copy)
             selected.sort(key=lambda x: int(x.get("startMs", 0)))
             return selected
 
@@ -4778,6 +4814,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           <button onclick="closePhotosModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
         </div>
       </div>
+      <div id="photosSyncStatusBanner" style="display:none;padding:8px 18px;font-size:12px;border-bottom:1px solid var(--border);"></div>
       <div id="photosGrid" style="flex:1;overflow-y:auto;padding:14px;display:grid;grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));gap:12px;"></div>
     </div>
   </div>
@@ -4826,6 +4863,11 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         const resp = await fetch(apiUrl('/api/v1/icloud/notes'));
         const j = await resp.json();
         allNotes = j.data || [];
+        for (const item of allNotes) {
+          if (item && item.id && !pendingDeleteById[item.id]) {
+            delete deletedNoteSeqById[item.id];
+          }
+        }
         renderNotesList();
         if (allNotes.length > 0 && !selectedNoteId) selectNote(allNotes[0].id);
       } catch (err) { console.error('Error loading notes:', err); }
@@ -4927,7 +4969,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         body: JSON.stringify(reqBody)
       });
       const j = await resp.json();
-      const wasDeletedConcurrently = Boolean(pendingDeleteById[nid] || ((deletedNoteSeqById[nid] || 0) > 0 && !reqBody.allowRecreate));
+      const wasDeletedConcurrently = Boolean(pendingDeleteById[nid] || ((Number(deletedNoteSeqById[nid]) || 0) >= reqAttemptSeq && !reqBody.allowRecreate));
       if (resp.ok && j.status === 200 && !wasDeletedConcurrently) {
         delete deletedNoteSeqById[nid];
       }
@@ -4974,7 +5016,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       } else if (j.status === 409) {
         if (reqAttemptSeq >= conflictSaveAttemptSeq) {
           if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
-          const srvNote = allNotes.find(item => item.id === nid);
+          const srvNote = responseSavedNote;
           const conflictText = document.getElementById('noteConflictText');
           const overwriteBtn = document.getElementById('noteConflictOverwriteBtn');
           const reloadBtn = document.getElementById('noteConflictReloadBtn');
@@ -4988,6 +5030,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
             if (overwriteBtn) overwriteBtn.textContent = 'Overwrite with Draft';
             if (reloadBtn) reloadBtn.style.display = 'inline-block';
           } else {
+            allNotes = allNotes.filter(item => item && item.id !== nid);
             conflictServerRevision = null;
             conflictNoteDeleted = true;
             if (conflictText) conflictText.textContent = '⚠ This note was deleted on the server. Your draft is preserved.';
@@ -5235,6 +5278,8 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
     async function syncAllPhotos() {
       const btn = document.getElementById('syncPhotosBtn');
+      const statusBanner = document.getElementById('photosSyncStatusBanner');
+      if (statusBanner) { statusBanner.style.display = 'none'; statusBanner.textContent = ''; }
       if (btn) { btn.disabled = true; btn.textContent = '⏳ Syncing...'; }
       try {
         const resp = await fetch(apiUrl('/api/v1/icloud/photos/sync'), {
@@ -5242,20 +5287,47 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({limit: 250, syncAll: true})
         });
-        const j = await resp.json();
+        let j = null;
+        try { j = await resp.json(); } catch (_) { j = null; }
+        if (!resp.ok || !j || (j.status !== 200 && j.status !== 202)) {
+          throw new Error((j && j.message) || ('Photo sync request failed (HTTP ' + resp.status + ')'));
+        }
         let job = (j && j.data) ? j.data : {};
         while (job && job.state === 'running' && job.jobId) {
           await new Promise(r => setTimeout(r, 400));
           const pollResp = await fetch(apiUrl('/api/v1/icloud/photos/sync?jobId=' + encodeURIComponent(job.jobId)));
-          const pollJson = await pollResp.json();
-          job = (pollJson && pollJson.data) ? pollJson.data : {};
+          let pollJson = null;
+          try { pollJson = await pollResp.json(); } catch (_) { pollJson = null; }
+          if (!pollResp.ok || !pollJson || pollJson.status !== 200) {
+            throw new Error((pollJson && pollJson.message) || ('Photo sync status poll failed (HTTP ' + pollResp.status + ')'));
+          }
+          job = pollJson.data || {};
           if (btn && typeof job.processed === 'number') {
             btn.textContent = '⏳ Syncing (' + job.processed + ')...';
           }
         }
         await loadPhotos();
+        const failedCount = Number((job && job.failed) || 0);
+        const syncedCount = Number((job && job.synced) || 0);
+        if (job && (job.state === 'failed' || job.status === 'error' || job.status === 'partial' || failedCount > 0)) {
+          const detailMsg = job.error || (Array.isArray(job.errors) && job.errors[0] && job.errors[0].error) || (failedCount + ' photo(s) failed to sync');
+          if (statusBanner) {
+            statusBanner.style.background = syncedCount > 0 ? '#3d2c12' : '#3d1518';
+            statusBanner.style.color = syncedCount > 0 ? '#d29922' : '#f85149';
+            statusBanner.textContent = (syncedCount > 0
+              ? ('⚠ Partial sync (' + syncedCount + ' synced, ' + failedCount + ' failed): ')
+              : '⚠ Photo sync failed: ') + detailMsg;
+            statusBanner.style.display = 'block';
+          }
+        }
       } catch (e) {
         console.error('Photo sync error:', e);
+        if (statusBanner) {
+          statusBanner.style.background = '#3d1518';
+          statusBanner.style.color = '#f85149';
+          statusBanner.textContent = '⚠ ' + ((e && e.message) ? e.message : String(e));
+          statusBanner.style.display = 'block';
+        }
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = '⬇ Sync All Photos'; }
       }
@@ -6198,9 +6270,11 @@ def run_selftest(engine: BluePillEngine) -> int:
                 "CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, guid TEXT, original_guid TEXT, filename TEXT, mime_type TEXT, total_bytes INTEGER, transfer_state INTEGER, transfer_name TEXT, is_sticker INTEGER);"
             )
             for idx in range(140):
+                # Include cross-source overlapping GUIDs at different page offsets to verify prefix-stable deduplication
+                row_guid = "shared-overlap-001" if idx == 80 else ("shared-overlap-002" if idx == 135 else f"chat-guid-{idx:03d}")
                 mconn.execute(
                     "INSERT INTO attachment (ROWID, guid, filename, mime_type, total_bytes, transfer_state, transfer_name, is_sticker) VALUES (?, ?, ?, 'image/jpeg', 1024, 5, ?, 0);",
-                    (idx + 1, f"chat-guid-{idx:03d}", sample_jpg, f"IMG_{idx:04d}.JPG"),
+                    (idx + 1, row_guid, sample_jpg, f"IMG_{idx:04d}.JPG"),
                 )
             mconn.commit()
         finally:
@@ -6219,9 +6293,10 @@ def run_selftest(engine: BluePillEngine) -> int:
             for idx in range(140):
                 fname = f"IMG_LIB_{idx:04d}.JPG"
                 shutil.copy2(sample_jpg, os.path.join(orig_zero_dir, fname))
+                lib_guid = "shared-overlap-001" if idx == 0 else ("shared-overlap-002" if idx == 70 else f"lib-guid-{idx:03d}")
                 pconn.execute(
                     "INSERT INTO ZASSET (ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY, ZTRASHEDSTATE, ZDATECREATED) VALUES (?, ?, 'public.jpeg', '0', 0, ?);",
-                    (f"lib-guid-{idx:03d}", fname, float(1000 - idx)),
+                    (lib_guid, fname, float(1000 - idx)),
                 )
             pconn.commit()
         finally:
@@ -6238,25 +6313,26 @@ def run_selftest(engine: BluePillEngine) -> int:
             if len(page) < 48:
                 break
             cur_off += len(page)
-        assert len(paged_guids) == 280, f"Expected 280 paged photos, got {len(paged_guids)}"
-        assert len(set(paged_guids)) == 280, "Pagination produced duplicate photo GUIDs"
-        assert sum(1 for g in paged_guids if g.startswith("chat-guid-")) == 140
-        assert sum(1 for g in paged_guids if g.startswith("lib-guid-")) == 140
+        assert len(paged_guids) == 278, f"Expected 278 unique paged photos (with 2 overlaps), got {len(paged_guids)}"
+        assert len(set(paged_guids)) == 278, "Pagination produced duplicate photo GUIDs"
+        assert "shared-overlap-001" in paged_guids and "shared-overlap-002" in paged_guids
+        assert sum(1 for g in paged_guids if g.startswith("chat-guid-")) == 138
+        assert sum(1 for g in paged_guids if g.startswith("lib-guid-")) == 138
 
         # Verify sync_icloud_photos(limit=250) preserves the 251st lookahead record (hasMore=True, nextOffset=250)
         batch1 = test_eng.sync_icloud_photos(limit=250, offset=0)
         assert batch1["hasMore"] is True and batch1["nextOffset"] == 250, f"Expected hasMore=True at limit=250, got {batch1}"
         batch2 = test_eng.sync_icloud_photos(limit=250, offset=250)
-        assert batch2["hasMore"] is False and batch2["processed"] == 30, f"Expected 30 remaining photos, got {batch2}"
+        assert batch2["hasMore"] is False and batch2["processed"] == 28, f"Expected 28 remaining photos, got {batch2}"
 
-        # Verify background sync job processes all 280 photos across both pages
+        # Verify background sync job processes all 278 unique photos across both pages
         job_snap = test_eng.start_icloud_photos_sync_job(limit=250, offset=0, sync_all=True)
         for _ in range(40):
             if job_snap.get("state") != "running":
                 break
             time.sleep(0.05)
             job_snap = test_eng.get_icloud_photos_sync_job(job_snap["jobId"])
-        assert job_snap["state"] == "completed" and job_snap["processed"] == 280, f"Expected 280 processed in job, got {job_snap}"
+        assert job_snap["state"] == "completed" and job_snap["processed"] == 278, f"Expected 278 processed in job, got {job_snap}"
 
         # Verify failed photo download is propagated in sync_icloud_photos result
         mconn = sqlite3.connect(mixed_chat_db)
@@ -6299,8 +6375,10 @@ def run_selftest(engine: BluePillEngine) -> int:
         )
         test_eng._atomic_write_json(test_eng._get_calendar_events_json_path(), evts_260)
         snap_with_far = test_eng.query_icloud_events(limit=250, include_event_id="evt-far-future-conflict")
-        assert len(snap_with_far) == 250
-        assert any(e.get("id") == "evt-far-future-conflict" for e in snap_with_far)
+        assert len(snap_with_far) == 251
+        assert any(e.get("id") == "evt-near-249" for e in snap_with_far), "250th in-window event must not be displaced"
+        far_entry = next((e for e in snap_with_far if e.get("id") == "evt-far-future-conflict"), None)
+        assert far_entry is not None and far_entry.get("outsideWindow") is True
     finally:
         srv.shutdown()
         srv.server_close()
