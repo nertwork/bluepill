@@ -5015,6 +5015,7 @@ ApplicationWindow {
                         Rectangle {
                             id: icloudPhotosBtn
                             objectName: "icloudPhotosBtn"
+                            visible: root.width >= 760
                             Layout.preferredWidth: 38
                             Layout.preferredHeight: 38
                             Layout.alignment: Qt.AlignVCenter
@@ -5110,7 +5111,7 @@ ApplicationWindow {
             RowLayout {
                 Layout.fillWidth: true
                 Text {
-                    text: "📝 " + i18n.tr("iCloud Notes")
+                    text: "📝 " + i18n.tr("iCloud (Read-Only) & Local Hub Notes")
                     font.pixelSize: theme.fontSize + 3
                     font.bold: true
                     color: theme.brightForeground
@@ -5266,7 +5267,7 @@ ApplicationWindow {
                             Button {
                                 text: "💾 " + i18n.tr("Save")
                                 onClicked: {
-                                    backend.saveIcloudNote(icloudNotesPopup.selectedNoteId, noteTitleInput.text, noteBodyInput.text, noteFolderInput.text)
+                                    icloudNotesPopup.selectedNoteId = backend.saveIcloudNote(icloudNotesPopup.selectedNoteId, noteTitleInput.text, noteBodyInput.text, noteFolderInput.text)
                                 }
                             }
 
@@ -5327,7 +5328,7 @@ ApplicationWindow {
             RowLayout {
                 Layout.fillWidth: true
                 Text {
-                    text: "📅 " + i18n.tr("iCloud Calendar")
+                    text: "📅 " + i18n.tr("iCloud (Read-Only) & Local Hub Calendar")
                     font.pixelSize: theme.fontSize + 3
                     font.bold: true
                     color: theme.brightForeground
@@ -5362,7 +5363,15 @@ ApplicationWindow {
                     ComboBox {
                         id: eventCalendarSelector
                         Layout.preferredWidth: 120
-                        model: ["Home", "Work", "Family", "Calendar"]
+                        model: {
+                            var cals = backend.icloudCalendars || []
+                            var names = []
+                            for (var i = 0; i < cals.length; ++i) {
+                                var t = (cals[i] && cals[i].title) ? String(cals[i].title).trim() : ""
+                                if (t.length > 0 && names.indexOf(t) === -1) names.push(t)
+                            }
+                            return names.length > 0 ? names : ["Home", "Work", "Family", "Calendar"]
+                        }
                     }
 
                     Button {
@@ -5531,7 +5540,7 @@ ApplicationWindow {
                             Image {
                                 anchors.fill: parent
                                 fillMode: Image.PreserveAspectCrop
-                                source: modelData.guid ? backend.attachmentDownloadUrl(modelData.guid) : ""
+                                source: (modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : ""
                                 asynchronous: true
                             }
 
@@ -5575,17 +5584,21 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 text: modelData.isCloudEvicted ? "☁ Unpurge" : "View"
                                 onClicked: {
-                                    if (modelData.guid) backend.downloadCloudAttachment(modelData.guid)
+                                    if (!modelData.guid) return
+                                    if (modelData.isCloudEvicted) {
+                                        backend.downloadCloudAttachment(modelData.guid)
+                                    } else {
+                                        backend.openAttachment(modelData.guid, modelData.name || "photo.jpg")
+                                    }
                                 }
                             }
 
                             Button {
                                 text: "📤"
-                                enabled: backend.selectedChatGuid !== "" && modelData.guid
+                                enabled: backend.selectedChatGuid !== "" && !!modelData.guid
                                 onClicked: {
                                     if (modelData.guid) {
-                                        var photoUrl = backend.attachmentDownloadUrl(modelData.guid)
-                                        backend.sendMessage(backend.selectedChatGuid, photoUrl, "")
+                                        backend.shareIcloudPhotoToChat(backend.selectedChatGuid, modelData.guid, modelData.name || "photo.jpg")
                                         icloudPhotosPopup.close()
                                     }
                                 }

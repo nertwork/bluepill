@@ -245,14 +245,19 @@ public:
     Q_INVOKABLE static QString canonicalizeAddress(const QString &raw);
     Q_INVOKABLE static QString formatHandleForDisplay(const QString &raw);
     Q_INVOKABLE void fetchIcloudNotes();
-    Q_INVOKABLE void saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder = QStringLiteral("Notes"));
+    Q_INVOKABLE QString saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder = QStringLiteral("Notes"));
     Q_INVOKABLE void deleteIcloudNote(const QString &id);
     Q_INVOKABLE void fetchIcloudEvents();
-    Q_INVOKABLE void saveIcloudEvent(const QString &title, qint64 startMs, qint64 endMs, const QString &calendarName = QStringLiteral("Home"), const QString &notes = QString());
+    Q_INVOKABLE QString saveIcloudEvent(const QString &title, qint64 startMs, qint64 endMs, const QString &calendarName = QStringLiteral("Home"), const QString &notes = QString());
     Q_INVOKABLE void deleteIcloudEvent(const QString &id);
     Q_INVOKABLE void fetchIcloudPhotos();
     Q_INVOKABLE void downloadCloudAttachment(const QString &attachmentGuid);
+    Q_INVOKABLE void shareIcloudPhotoToChat(const QString &chatGuid, const QString &attachmentGuid, const QString &fileName = QString());
     Q_INVOKABLE QString attachmentDownloadUrl(const QString &guid) const;
+    bool isSecureOrLocalIcloudEndpoint() const;
+    void replayPendingIcloudMutations();
+    void reconcileRemoteIcloudNotesForTest(const QJsonArray &data) { applyRemoteIcloudNotes(data); }
+    void reconcileRemoteIcloudEventsForTest(const QJsonArray &data) { applyRemoteIcloudEvents(data); }
 
     // Network & Failover state
     QString currentServerUrl() const { return m_serverUrl; }
@@ -385,6 +390,8 @@ private:
     void playNotificationSound();
     void handleNetworkFailure(const QString &context);
     void handleNetworkSuccess();
+    void applyRemoteIcloudNotes(const QJsonArray &data);
+    void applyRemoteIcloudEvents(const QJsonArray &data);
 
     QNetworkAccessManager m_nam;
     QNetworkAccessManager m_sendNam;
@@ -490,4 +497,10 @@ private:
     QVariantList m_icloudEvents;
     QVariantList m_icloudCalendars;
     QVariantList m_icloudPhotos;
+    quint64 m_icloudNotesGeneration = 0;
+    quint64 m_icloudEventsGeneration = 0;
+    QHash<QString, QVariantMap> m_pendingIcloudNoteSaves;
+    QSet<QString> m_pendingIcloudNoteDeletes;
+    QHash<QString, QVariantMap> m_pendingIcloudEventSaves;
+    QSet<QString> m_pendingIcloudEventDeletes;
 };

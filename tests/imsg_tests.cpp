@@ -3339,15 +3339,26 @@ private slots:
     void testIcloudNotesLifecycle() {
         Backend backend(false);
         QTemporaryDir tempDir;
-        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_notes.json")));
+        const QString statePath = tempDir.filePath(QStringLiteral("state_notes.json"));
+        backend.setStateFilePath(statePath);
 
         QVERIFY(backend.icloudNotes().isEmpty());
 
-        // Create Note
-        backend.saveIcloudNote(QStringLiteral("note_test_1"), QStringLiteral("Meeting Notes"), QStringLiteral("Discuss Q3 sync and calendar items"), QStringLiteral("Work"));
+        // Create Note (including auto-generated ID return value)
+        const QString genId = backend.saveIcloudNote(QString(), QStringLiteral("Auto ID Note"), QStringLiteral("Body 0"), QStringLiteral("Notes"));
+        QVERIFY(genId.startsWith(QStringLiteral("note_")));
+        backend.deleteIcloudNote(genId);
+
+        const QString savedId = backend.saveIcloudNote(QStringLiteral("note_test_1"), QStringLiteral("Meeting Notes"), QStringLiteral("Discuss Q3 sync and calendar items"), QStringLiteral("Work"));
+        QCOMPARE(savedId, QStringLiteral("note_test_1"));
         QCOMPARE(backend.icloudNotes().size(), 1);
         QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("Meeting Notes"));
         QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("folder")).toString(), QStringLiteral("Work"));
+
+        // Verify state file has 0600 owner-only permissions
+        QFileInfo fi(statePath);
+        QVERIFY(fi.exists());
+        QCOMPARE(fi.permissions() & (QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ReadOther | QFileDevice::WriteOther), QFileDevice::Permissions());
 
         // Update Note
         backend.saveIcloudNote(QStringLiteral("note_test_1"), QStringLiteral("Updated Meeting Notes"), QStringLiteral("New action items"), QStringLiteral("Work"));
@@ -3355,8 +3366,19 @@ private slots:
         QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("Updated Meeting Notes"));
         QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("body")).toString(), QStringLiteral("New action items"));
 
+        // Reconciling with an empty remote array while note_test_1 is still pending offline save preserves note_test_1
+        backend.reconcileRemoteIcloudNotesForTest(QJsonArray());
+        QCOMPARE(backend.icloudNotes().size(), 1);
+
         // Delete Note
         backend.deleteIcloudNote(QStringLiteral("note_test_1"));
+        QCOMPARE(backend.icloudNotes().size(), 0);
+
+        // Reconciling with a stale remote array containing deleted note_test_1 keeps it deleted while delete is pending
+        QJsonObject staleNote;
+        staleNote.insert(QStringLiteral("id"), QStringLiteral("note_test_1"));
+        staleNote.insert(QStringLiteral("title"), QStringLiteral("Stale Remote Title"));
+        backend.reconcileRemoteIcloudNotesForTest(QJsonArray{staleNote});
         QCOMPARE(backend.icloudNotes().size(), 0);
     }
 
@@ -3368,12 +3390,15 @@ private slots:
         QVERIFY(backend.icloudEvents().isEmpty());
 
         // Create Event
-        backend.saveIcloudEvent(QStringLiteral("BluePill Architecture Review"), 1700000000000, 1700003600000, QStringLiteral("Work"), QStringLiteral("Discuss iCloud Hub sync"));
+        const QString evtId = backend.saveIcloudEvent(QStringLiteral("BluePill Architecture Review"), 1700000000000, 1700003600000, QStringLiteral("Work"), QStringLiteral("Discuss iCloud Hub sync"));
         QCOMPARE(backend.icloudEvents().size(), 1);
-        const QString evtId = backend.icloudEvents().first().toMap().value(QStringLiteral("id")).toString();
         QVERIFY(!evtId.isEmpty());
         QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("BluePill Architecture Review"));
         QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("calendarTitle")).toString(), QStringLiteral("Work"));
+
+        // Offline pending event survives remote snapshot reconciliation
+        backend.reconcileRemoteIcloudEventsForTest(QJsonArray());
+        QCOMPARE(backend.icloudEvents().size(), 1);
 
         // Delete Event
         backend.deleteIcloudEvent(evtId);
