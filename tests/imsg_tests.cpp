@@ -3627,7 +3627,7 @@ private slots:
             failPersistNoteBackend.setStateFilePath(blockerFile + QStringLiteral("/state.json"));
             failPersistNoteBackend.loadCredentials();
             const QString failNoteId = failPersistNoteBackend.saveIcloudNote(QString(), QStringLiteral("Unwritable State Note"), QStringLiteral("Body"), QStringLiteral("Notes"));
-            QCoreApplication::processEvents();
+            QTest::qWait(300);
             QCOMPARE(unwritableNotePostCount, 0);
             failPersistNoteBackend.deleteIcloudNote(failNoteId);
             QVERIFY(!failPersistNoteBackend.hasPendingIcloudNoteSaveForTest(failNoteId));
@@ -3655,15 +3655,33 @@ private slots:
 
         // Saving with a stale baseRevision (< 6) preserves the draft and keeps the conflict paused without re-submitting
         liveBackend.saveIcloudNote(QStringLiteral("note_real_conflict"), QStringLiteral("Conflict Note Edited"), QStringLiteral("Updated Draft"), QStringLiteral("Notes"), 1);
-        QCoreApplication::processEvents();
+        QTest::qWait(300);
         QCOMPARE(noteRealConflictCount, 1);
         QVERIFY(liveBackend.isIcloudMutationPausedForTest(conflictKey));
         QVERIFY(liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_real_conflict")));
 
-        // Explicit reload recovery adopts the server version (revision 6) and clears the paused conflict
+        // Verify Save-as-Copy followed by reloadConflictedIcloudNoteServerVersion preserves the user's draft in the new copy
+        // while restoring the conflicted note to the server version (revision 6 / "Different Server Body")
+        const QString conflictCopyId = liveBackend.saveIcloudNote(QString(), QStringLiteral("Conflict Note Edited"), QStringLiteral("Updated Draft"), QStringLiteral("Notes"), 0);
+        QVERIFY(!conflictCopyId.isEmpty());
+        QVERIFY(conflictCopyId != QStringLiteral("note_real_conflict"));
         QVERIFY(liveBackend.reloadConflictedIcloudNoteServerVersion(QStringLiteral("note_real_conflict")));
         QVERIFY(!liveBackend.isIcloudMutationPausedForTest(conflictKey));
         QVERIFY(!liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_real_conflict")));
+        bool foundCopyDraft = false;
+        bool foundReloadedServer = false;
+        for (const QVariant &nv : liveBackend.icloudNotes()) {
+            const QVariantMap nm = nv.toMap();
+            if (nm.value(QStringLiteral("id")).toString() == conflictCopyId) {
+                foundCopyDraft = (nm.value(QStringLiteral("title")).toString() == QStringLiteral("Conflict Note Edited") &&
+                                  nm.value(QStringLiteral("body")).toString() == QStringLiteral("Updated Draft"));
+            } else if (nm.value(QStringLiteral("id")).toString() == QStringLiteral("note_real_conflict")) {
+                foundReloadedServer = (nm.value(QStringLiteral("body")).toString() == QStringLiteral("Different Server Body") &&
+                                       nm.value(QStringLiteral("revision")).toLongLong() == 6);
+            }
+        }
+        QVERIFY(foundCopyDraft);
+        QVERIFY(foundReloadedServer);
 
         for (const char *k : credVars) {
             const QByteArray key(k);
@@ -3951,7 +3969,7 @@ private slots:
                 QStringLiteral("Work"),
                 QStringLiteral("Notes")
             );
-            QCoreApplication::processEvents();
+            QTest::qWait(300);
             QCOMPARE(evtRequestCount, 2);
             failPersistEvtBackend.deleteIcloudEvent(failEvtId);
             QVERIFY(!failPersistEvtBackend.hasPendingIcloudEventSaveForTest(failEvtId));
