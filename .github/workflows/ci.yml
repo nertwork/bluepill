@@ -7,8 +7,52 @@ on:
     branches: [main, master]
 
 jobs:
+  lint-and-validate:
+    name: Lint, Syntax & Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Zero-PII & Secret Sanitization Audit
+        run: |
+          python3 -c '
+          import os, re, sys
+          forbidden = [
+              r"bluebubbles\.ilb", r"bluebubbles\.home", r"home\.nertwork",
+              r"172\.28\.", r"jfarr", r"Sponsee", r"Amberwood"
+          ]
+          rx = re.compile("|".join(forbidden), re.IGNORECASE)
+          hits = []
+          for dp, dn, fn in os.walk("."):
+              for skip in [".git", "build", "obj", "moc", "rcc"]:
+                  if skip in dn: dn.remove(skip)
+              for f in fn:
+                  if f.endswith((".png", ".wav", ".svg")): continue
+                  p = os.path.join(dp, f)
+                  if "workflows/" in p: continue
+                  with open(p, errors="ignore") as fh:
+                      for i, line in enumerate(fh, 1):
+                          if rx.search(line):
+                              hits.append(f"{p}:{i}: {line.strip()}")
+          if hits:
+              print("Forbidden PII/internal strings found:\n" + "\n".join(hits))
+              sys.exit(1)
+          print("Zero-PII audit passed across all repository files.")
+          '
+
+      - name: Python Relay Server Compilation & Self-Test
+        run: |
+          python3 -m py_compile server/bluepill_server.py
+          python3 server/bluepill_server.py --selftest
+
+      - name: Shell Scripts & Homebrew Formula Syntax Verification
+        run: |
+          bash -n bin/build bin/test
+          ruby -c Formula/bluepill.rb
+
   build-and-test:
-    name: Arch Linux Build, 49 Unit Tests & Package
+    name: Arch Linux Build, Unit Tests & Package
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
@@ -50,7 +94,7 @@ jobs:
       - name: Compile imsg (C++20 / Qt6)
         run: ./bin/build
 
-      - name: Run Full 49-Test Suite (Offscreen QPA)
+      - name: Run Full Test Suite (Offscreen QPA)
         run: QT_QPA_PLATFORM=offscreen ./bin/test
 
       - name: Verify Demo Mode Offscreen Screenshot Rendering
