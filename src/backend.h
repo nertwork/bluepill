@@ -104,6 +104,10 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList voiceRecordingWaveform READ voiceRecordingWaveform NOTIFY voiceRecordingChanged)
     Q_PROPERTY(QVariantList scheduledMessages READ scheduledMessages NOTIFY scheduledMessagesChanged)
     Q_PROPERTY(QStringList selectedChatParticipants READ selectedChatParticipants NOTIFY selectedChatChanged)
+    Q_PROPERTY(QVariantList icloudNotes READ icloudNotes NOTIFY icloudNotesChanged)
+    Q_PROPERTY(QVariantList icloudEvents READ icloudEvents NOTIFY icloudEventsChanged)
+    Q_PROPERTY(QVariantList icloudCalendars READ icloudCalendars NOTIFY icloudEventsChanged)
+    Q_PROPERTY(QVariantList icloudPhotos READ icloudPhotos NOTIFY icloudPhotosChanged)
 
 
 public:
@@ -154,6 +158,11 @@ public:
     QVariantList voiceRecordingWaveform() const { return m_voiceRecordingWaveform; }
     QVariantList scheduledMessages() const { return m_scheduledMessages; }
     QStringList selectedChatParticipants() const;
+    QVariantList icloudNotes() const { return m_icloudNotes; }
+    QVariantList icloudEvents() const { return m_icloudEvents; }
+    QVariantList icloudCalendars() const { return m_icloudCalendars; }
+    QVariantList icloudPhotos() const { return m_icloudPhotos; }
+    void setIcloudPhotosForTest(const QVariantList &list) { m_icloudPhotos = list; emit icloudPhotosChanged(); }
 
 
     void setWindowActive(bool active);
@@ -235,6 +244,15 @@ public:
     Q_INVOKABLE QVariantList searchContacts(const QString &query = QString(), int limit = 15) const;
     Q_INVOKABLE static QString canonicalizeAddress(const QString &raw);
     Q_INVOKABLE static QString formatHandleForDisplay(const QString &raw);
+    Q_INVOKABLE void fetchIcloudNotes();
+    Q_INVOKABLE void saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder = QStringLiteral("Notes"));
+    Q_INVOKABLE void deleteIcloudNote(const QString &id);
+    Q_INVOKABLE void fetchIcloudEvents();
+    Q_INVOKABLE void saveIcloudEvent(const QString &title, qint64 startMs, qint64 endMs, const QString &calendarName = QStringLiteral("Home"), const QString &notes = QString());
+    Q_INVOKABLE void deleteIcloudEvent(const QString &id);
+    Q_INVOKABLE void fetchIcloudPhotos();
+    Q_INVOKABLE void downloadCloudAttachment(const QString &attachmentGuid);
+    Q_INVOKABLE QString attachmentDownloadUrl(const QString &guid) const;
 
     // Network & Failover state
     QString currentServerUrl() const { return m_serverUrl; }
@@ -300,6 +318,9 @@ public:
     int runCliSend(const QString &target, const QString &message, bool asJson);
 
 signals:
+    void icloudNotesChanged();
+    void icloudEventsChanged();
+    void icloudPhotosChanged();
     void statusChanged();
     void configChanged();
     void loadingChanged();
@@ -465,5 +486,8 @@ private:
     QString m_currentVoiceRecordingPath;
 
     QVariantList m_scheduledMessages;
-
+    QVariantList m_icloudNotes;
+    QVariantList m_icloudEvents;
+    QVariantList m_icloudCalendars;
+    QVariantList m_icloudPhotos;
 };

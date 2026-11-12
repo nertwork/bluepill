@@ -1246,6 +1246,128 @@ ApplicationWindow {
                         }
                     }
 
+                    // iCloud Hub Quick Navigation Bar (Notes, Calendar, Photos)
+                    Rectangle {
+                        id: icloudHubBar
+                        objectName: "icloudHubBar"
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 32
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.bottomMargin: 4
+                        color: "transparent"
+
+                        RowLayout {
+                            anchors.fill: parent
+                            spacing: 6
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                radius: 6
+                                color: notesHover.containsMouse ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
+                                border.color: notesHover.containsMouse ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                border.width: 1
+
+                                RowLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 4
+                                    Text {
+                                        text: "📝"
+                                        font.pixelSize: theme.fontSize - 1
+                                    }
+                                    Text {
+                                        text: "Notes"
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.foreground
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: notesHover
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        backend.fetchIcloudNotes()
+                                        icloudNotesPopup.open()
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                radius: 6
+                                color: calHover.containsMouse ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
+                                border.color: calHover.containsMouse ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                border.width: 1
+
+                                RowLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 4
+                                    Text {
+                                        text: "📅"
+                                        font.pixelSize: theme.fontSize - 1
+                                    }
+                                    Text {
+                                        text: "Cal"
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.foreground
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: calHover
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        backend.fetchIcloudEvents()
+                                        icloudCalendarPopup.open()
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                radius: 6
+                                color: photosHover.containsMouse ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
+                                border.color: photosHover.containsMouse ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                border.width: 1
+
+                                RowLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 4
+                                    Text {
+                                        text: "☁️"
+                                        font.pixelSize: theme.fontSize - 1
+                                    }
+                                    Text {
+                                        text: "Photos"
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.foreground
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: photosHover
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        backend.fetchIcloudPhotos()
+                                        icloudPhotosPopup.open()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Pinned Conversations Bar (synced from macOS pinning.plist / user pins)
                     Rectangle {
                         id: pinnedChatsBar
@@ -4889,6 +5011,38 @@ ApplicationWindow {
                             ToolTip.delay: 400
                         }
 
+                        // iCloud Photos Hub Button
+                        Rectangle {
+                            id: icloudPhotosBtn
+                            objectName: "icloudPhotosBtn"
+                            Layout.preferredWidth: 38
+                            Layout.preferredHeight: 38
+                            Layout.alignment: Qt.AlignVCenter
+                            radius: theme.radius
+                            color: icloudPhotosBtnMouse.containsMouse ? theme.lighterBackground : "transparent"
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "☁️"
+                                font.pixelSize: theme.fontSize + 2
+                            }
+
+                            MouseArea {
+                                id: icloudPhotosBtnMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    backend.fetchIcloudPhotos()
+                                    icloudPhotosPopup.open()
+                                }
+                            }
+
+                            ToolTip.visible: icloudPhotosBtnMouse.containsMouse
+                            ToolTip.text: i18n.tr("iCloud & iMessage Photos")
+                            ToolTip.delay: 400
+                        }
+
                         // Send Button
                         Rectangle {
                             Layout.preferredWidth: 82
@@ -4918,6 +5072,521 @@ ApplicationWindow {
                                         root.replyTargetGuid = ""
                                         root.replyTargetSender = ""
                                         root.replyTargetText = ""
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // iCloud Notes Popup
+    Popup {
+        id: icloudNotesPopup
+        objectName: "icloudNotesPopup"
+        modal: true
+        focus: true
+        anchors.centerIn: parent
+        width: Math.min(900, root.width - 40)
+        height: Math.min(640, root.height - 40)
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            color: theme.darkBackground
+            radius: theme.radius + 4
+            border.width: 1
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.4)
+        }
+
+        property string selectedNoteId: ""
+        property string selectedNoteFolder: "Notes"
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 16
+            spacing: 12
+
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    text: "📝 " + i18n.tr("iCloud Notes")
+                    font.pixelSize: theme.fontSize + 3
+                    font.bold: true
+                    color: theme.brightForeground
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "+ " + i18n.tr("New Note")
+                    onClicked: {
+                        icloudNotesPopup.selectedNoteId = ""
+                        noteTitleInput.text = ""
+                        noteFolderInput.text = "Notes"
+                        noteBodyInput.text = ""
+                        noteTitleInput.forceActiveFocus()
+                    }
+                }
+                Button {
+                    text: "✕"
+                    onClicked: icloudNotesPopup.close()
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 14
+
+                ColumnLayout {
+                    Layout.preferredWidth: 280
+                    Layout.fillHeight: true
+                    spacing: 8
+
+                    TextField {
+                        id: noteSearchInput
+                        Layout.fillWidth: true
+                        placeholderText: i18n.tr("Search notes...")
+                        color: theme.foreground
+                    }
+
+                    ListView {
+                        id: notesListView
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        model: {
+                            var q = noteSearchInput.text.trim().toLowerCase()
+                            var all = backend.icloudNotes
+                            if (q.length === 0) return all
+                            return all.filter(function(n) {
+                                var t = (n.title || "").toLowerCase()
+                                var b = (n.body || n.snippet || "").toLowerCase()
+                                return t.indexOf(q) !== -1 || b.indexOf(q) !== -1
+                            })
+                        }
+                        spacing: 4
+
+                        delegate: Rectangle {
+                            width: notesListView.width
+                            height: 60
+                            radius: 6
+                            color: icloudNotesPopup.selectedNoteId === (modelData.id || "")
+                                   ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.25)
+                                   : (itemMouse.containsMouse ? theme.lighterBackground : theme.background)
+                            border.color: icloudNotesPopup.selectedNoteId === (modelData.id || "") ? theme.accent : "transparent"
+                            border.width: 1
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                spacing: 2
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.title || i18n.tr("Untitled Note")
+                                    font.bold: true
+                                    font.pixelSize: theme.fontSize
+                                    color: theme.brightForeground
+                                    elide: Text.ElideRight
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.snippet || modelData.body || ""
+                                    font.pixelSize: theme.fontSize - 2
+                                    color: theme.darkForeground
+                                    elide: Text.ElideRight
+                                }
+                            }
+
+                            MouseArea {
+                                id: itemMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    icloudNotesPopup.selectedNoteId = modelData.id || ""
+                                    noteTitleInput.text = modelData.title || ""
+                                    noteFolderInput.text = modelData.folder || "Notes"
+                                    noteBodyInput.text = modelData.body || modelData.snippet || ""
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    color: theme.background
+                    radius: 8
+                    border.color: Qt.rgba(1, 1, 1, 0.1)
+                    border.width: 1
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 8
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            TextField {
+                                id: noteTitleInput
+                                Layout.fillWidth: true
+                                placeholderText: i18n.tr("Note Title")
+                                font.bold: true
+                                font.pixelSize: theme.fontSize + 1
+                                color: theme.brightForeground
+                            }
+                            TextField {
+                                id: noteFolderInput
+                                Layout.preferredWidth: 120
+                                placeholderText: i18n.tr("Folder")
+                                text: "Notes"
+                                color: theme.foreground
+                            }
+                        }
+
+                        ScrollView {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            TextArea {
+                                id: noteBodyInput
+                                placeholderText: i18n.tr("Write note content here...")
+                                color: theme.foreground
+                                wrapMode: TextArea.Wrap
+                                font.pixelSize: theme.fontSize
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Button {
+                                text: "💾 " + i18n.tr("Save")
+                                onClicked: {
+                                    backend.saveIcloudNote(icloudNotesPopup.selectedNoteId, noteTitleInput.text, noteBodyInput.text, noteFolderInput.text)
+                                }
+                            }
+
+                            Button {
+                                text: "📤 " + i18n.tr("Send to Chat")
+                                enabled: backend.selectedChatGuid !== "" && (noteTitleInput.text.trim().length > 0 || noteBodyInput.text.trim().length > 0)
+                                onClicked: {
+                                    var textToSend = noteTitleInput.text.trim()
+                                    if (noteBodyInput.text.trim().length > 0) {
+                                        textToSend = (textToSend.length > 0 ? ("* " + textToSend + " *\n\n") : "") + noteBodyInput.text.trim()
+                                    }
+                                    backend.sendMessage(backend.selectedChatGuid, textToSend, "")
+                                    icloudNotesPopup.close()
+                                }
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            Button {
+                                text: "🗑 " + i18n.tr("Delete")
+                                enabled: icloudNotesPopup.selectedNoteId !== ""
+                                onClicked: {
+                                    backend.deleteIcloudNote(icloudNotesPopup.selectedNoteId)
+                                    icloudNotesPopup.selectedNoteId = ""
+                                    noteTitleInput.text = ""
+                                    noteBodyInput.text = ""
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // iCloud Calendar Popup
+    Popup {
+        id: icloudCalendarPopup
+        objectName: "icloudCalendarPopup"
+        modal: true
+        focus: true
+        anchors.centerIn: parent
+        width: Math.min(880, root.width - 40)
+        height: Math.min(620, root.height - 40)
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            color: theme.darkBackground
+            radius: theme.radius + 4
+            border.width: 1
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.4)
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 16
+            spacing: 12
+
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    text: "📅 " + i18n.tr("iCloud Calendar")
+                    font.pixelSize: theme.fontSize + 3
+                    font.bold: true
+                    color: theme.brightForeground
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "✕"
+                    onClicked: icloudCalendarPopup.close()
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 48
+                color: theme.background
+                radius: 6
+                border.color: Qt.rgba(1, 1, 1, 0.1)
+                border.width: 1
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    spacing: 8
+
+                    TextField {
+                        id: eventTitleInput
+                        Layout.fillWidth: true
+                        placeholderText: i18n.tr("Event summary / title...")
+                        color: theme.brightForeground
+                    }
+
+                    ComboBox {
+                        id: eventCalendarSelector
+                        Layout.preferredWidth: 120
+                        model: ["Home", "Work", "Family", "Calendar"]
+                    }
+
+                    Button {
+                        text: "+1h"
+                        onClicked: {
+                            if (eventTitleInput.text.trim().length === 0) return
+                            var now = Date.now()
+                            backend.saveIcloudEvent(eventTitleInput.text.trim(), now + 3600000, now + 7200000, eventCalendarSelector.currentText, "")
+                            eventTitleInput.text = ""
+                        }
+                    }
+
+                    Button {
+                        text: "+ " + i18n.tr("Add Event")
+                        onClicked: {
+                            if (eventTitleInput.text.trim().length === 0) return
+                            var now = Date.now()
+                            backend.saveIcloudEvent(eventTitleInput.text.trim(), now, now + 3600000, eventCalendarSelector.currentText, "")
+                            eventTitleInput.text = ""
+                        }
+                    }
+                }
+            }
+
+            ListView {
+                id: eventsListView
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                model: backend.icloudEvents
+                spacing: 6
+
+                delegate: Rectangle {
+                    width: eventsListView.width
+                    height: 56
+                    radius: 6
+                    color: theme.background
+                    border.color: Qt.rgba(1, 1, 1, 0.08)
+                    border.width: 1
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 12
+
+                        Rectangle {
+                            Layout.preferredWidth: 4
+                            Layout.fillHeight: true
+                            radius: 2
+                            color: modelData.calendarTitle === "Work" ? "#007AFF" : (modelData.calendarTitle === "Family" ? "#FF9500" : "#30D158")
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Text {
+                                text: modelData.title || i18n.tr("Untitled Event")
+                                font.bold: true
+                                font.pixelSize: theme.fontSize
+                                color: theme.brightForeground
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                text: {
+                                    var d = new Date(modelData.startMs || Date.now())
+                                    return (modelData.calendarTitle || "Calendar") + " · " + d.toLocaleString(Qt.locale(), "ddd, MMM d h:mm AP")
+                                }
+                                font.pixelSize: theme.fontSize - 2
+                                color: theme.darkForeground
+                            }
+                        }
+
+                        Button {
+                            text: "📤 " + i18n.tr("Share")
+                            enabled: backend.selectedChatGuid !== ""
+                            onClicked: {
+                                var d = new Date(modelData.startMs || Date.now())
+                                var shareText = "📅 " + (modelData.title || "Event") + "\n" + d.toLocaleString(Qt.locale(), "ddd, MMM d, yyyy h:mm AP")
+                                backend.sendMessage(backend.selectedChatGuid, shareText, "")
+                                icloudCalendarPopup.close()
+                            }
+                        }
+
+                        Button {
+                            text: "🗑"
+                            onClicked: {
+                                if (modelData.id) backend.deleteIcloudEvent(modelData.id)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // iCloud Photos Popup
+    Popup {
+        id: icloudPhotosPopup
+        objectName: "icloudPhotosPopup"
+        modal: true
+        focus: true
+        anchors.centerIn: parent
+        width: Math.min(880, root.width - 40)
+        height: Math.min(620, root.height - 40)
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            color: theme.darkBackground
+            radius: theme.radius + 4
+            border.width: 1
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.4)
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 16
+            spacing: 12
+
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    text: "☁️ " + i18n.tr("iCloud & iMessage Photos")
+                    font.pixelSize: theme.fontSize + 3
+                    font.bold: true
+                    color: theme.brightForeground
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "🔄 " + i18n.tr("Refresh")
+                    onClicked: backend.fetchIcloudPhotos()
+                }
+                Button {
+                    text: "✕"
+                    onClicked: icloudPhotosPopup.close()
+                }
+            }
+
+            GridView {
+                id: photosGridView
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                cellWidth: 160
+                cellHeight: 180
+                model: backend.icloudPhotos
+
+                delegate: Rectangle {
+                    width: 150
+                    height: 170
+                    radius: 8
+                    color: theme.background
+                    border.color: Qt.rgba(1, 1, 1, 0.1)
+                    border.width: 1
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        spacing: 4
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 95
+                            radius: 6
+                            color: theme.darkBackground
+                            clip: true
+
+                            Image {
+                                anchors.fill: parent
+                                fillMode: Image.PreserveAspectCrop
+                                source: modelData.guid ? backend.attachmentDownloadUrl(modelData.guid) : ""
+                                asynchronous: true
+                            }
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "🖼"
+                                font.pixelSize: 24
+                                visible: parent.children[0].status !== Image.Ready
+                            }
+
+                            Rectangle {
+                                anchors.top: parent.top
+                                anchors.right: parent.right
+                                anchors.margins: 4
+                                width: 20
+                                height: 20
+                                radius: 10
+                                color: modelData.isCloudEvicted ? "#FF9500" : "#30D158"
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: modelData.isCloudEvicted ? "☁" : "✓"
+                                    font.pixelSize: 11
+                                    color: "#ffffff"
+                                }
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: modelData.name || "Photo"
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.foreground
+                            elide: Text.ElideMiddle
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Button {
+                                Layout.fillWidth: true
+                                text: modelData.isCloudEvicted ? "☁ Unpurge" : "View"
+                                onClicked: {
+                                    if (modelData.guid) backend.downloadCloudAttachment(modelData.guid)
+                                }
+                            }
+
+                            Button {
+                                text: "📤"
+                                enabled: backend.selectedChatGuid !== "" && modelData.guid
+                                onClicked: {
+                                    if (modelData.guid) {
+                                        var photoUrl = backend.attachmentDownloadUrl(modelData.guid)
+                                        backend.sendMessage(backend.selectedChatGuid, photoUrl, "")
+                                        icloudPhotosPopup.close()
                                     }
                                 }
                             }

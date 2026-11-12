@@ -22,6 +22,8 @@ import io
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import datetime
+import gzip
 import mimetypes
 import os
 import platform
@@ -1552,18 +1554,42 @@ class BluePillEngine:
             suffix_uuid = clean_guid.split("_")[-1] if "_" in clean_guid else clean_guid
             row = conn.execute(
                 """
-                SELECT filename, mime_type, transfer_name
+                SELECT filename, mime_type, transfer_name, transfer_state, total_bytes
                 FROM attachment
                 WHERE guid = ? OR original_guid = ? OR guid LIKE ?
                 ORDER BY ROWID DESC LIMIT 1
                 """,
                 (clean_guid, clean_guid, f"%{suffix_uuid}"),
             ).fetchone()
-            if not row or not row["filename"]:
+            if not row:
                 return None
-            raw_path = os.path.expanduser(str(row["filename"]))
-            real_path = os.path.realpath(raw_path)
-            if not os.path.exists(real_path):
+            raw_path = os.path.expanduser(str(row["filename"] or ""))
+            real_path = os.path.realpath(raw_path) if raw_path else ""
+            t_state = int(row["transfer_state"] or 0) if "transfer_state" in row.keys() else 5
+            exists_on_disk = bool(real_path and os.path.exists(real_path))
+
+            if not exists_on_disk or t_state != 5:
+                self._send_private_api_action("download-purged-attachment", {"attachmentGuid": clean_guid})
+                if sys.platform == "darwin" and os.path.exists(self.db_path):
+                    for _ in range(8):
+                        time.sleep(0.35)
+                        row2 = conn.execute(
+                            """
+                            SELECT filename, mime_type, transfer_name, transfer_state, total_bytes
+                            FROM attachment
+                            WHERE guid = ? OR original_guid = ? OR guid LIKE ?
+                            ORDER BY ROWID DESC LIMIT 1
+                            """,
+                            (clean_guid, clean_guid, f"%{suffix_uuid}"),
+                        ).fetchone()
+                        if row2 and row2["filename"]:
+                            rp2 = os.path.realpath(os.path.expanduser(str(row2["filename"])))
+                            if os.path.exists(rp2):
+                                real_path = rp2
+                                exists_on_disk = True
+                                row = row2
+                                break
+            if not exists_on_disk:
                 return None
             mime = (
                 row["mime_type"]
@@ -2633,6 +2659,536 @@ class BluePillEngine:
             for sid in dead:
                 self._sessions.pop(sid, None)
 
+
+    def _send_private_api_action(self, action: str, data: Dict[str, Any]) -> bool:
+        return self._send_helper_payload(action, data)
+
+    def get_attachment_file(
+        self,
+        guid: str,
+        convert_heic: bool = False,
+        resize: Optional[int] = None,
+        transcode_audio: bool = False,
+    ) -> Optional[Tuple[str, str]]:
+        return self.resolve_attachment_file(
+            guid, convert_heic=convert_heic, resize=resize, transcode_audio=transcode_audio
+        )
+
+    def download_cloud_attachment(self, guid: str) -> Dict[str, Any]:
+        clean_guid = urllib.parse.unquote(guid).strip()
+        self._send_private_api_action("download-purged-attachment", {"attachmentGuid": clean_guid})
+        resolved = self.resolve_attachment_file(clean_guid)
+        if resolved:
+            return {"guid": clean_guid, "downloaded": True, "path": resolved[0], "mimeType": resolved[1]}
+        return {"guid": clean_guid, "downloaded": False, "path": "", "mimeType": ""}
+
+    def query_icloud_photos(self, limit: int = 48) -> List[Dict[str, Any]]:
+        photos: List[Dict[str, Any]] = []
+        seen_guids: set[str] = set()
+
+        # 1. Query chat.db image attachments
+        if os.path.exists(self.db_path):
+            try:
+                conn = self._open_chat_db()
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT guid, filename, mime_type, total_bytes, transfer_state, transfer_name
+                        FROM attachment
+                        WHERE mime_type LIKE 'image/%'
+                        ORDER BY ROWID DESC
+                        LIMIT ?
+                        """,
+                        (int(limit),),
+                    ).fetchall()
+                    for r in rows:
+                        g = str(r["guid"] or "").strip()
+                        if not g or g in seen_guids:
+                            continue
+                        seen_guids.add(g)
+                        fn = str(r["filename"] or "").strip()
+                        raw_path = os.path.expanduser(fn) if fn else ""
+                        real_p = os.path.realpath(raw_path) if raw_path else ""
+                        exists_on_disk = bool(real_p and os.path.exists(real_p))
+                        t_state = int(r["transfer_state"] or 0) if "transfer_state" in r.keys() else 5
+                        name = (
+                            str(r["transfer_name"] or "").strip()
+                            or (os.path.basename(real_p) if real_p else "")
+                            or f"photo_{g[:8]}.jpg"
+                        )
+                        photos.append({
+                            "guid": g,
+                            "name": name,
+                            "mimeType": str(r["mime_type"] or "image/jpeg"),
+                            "totalBytes": int(r["total_bytes"] or 0),
+                            "isCloudEvicted": (not exists_on_disk),
+                            "transferState": t_state,
+                            "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(g)}/live",
+                        })
+                finally:
+                    conn.close()
+            except Exception as exc:
+                self.logger.warning("[photos] chat.db image query failed: %s", exc)
+
+        # 2. Check Photos.sqlite if present on macOS
+        photos_db = os.path.expanduser("~/Pictures/Photos Library.photoslibrary/database/Photos.sqlite")
+        if os.path.exists(photos_db):
+            try:
+                pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+                try:
+                    pconn.row_factory = sqlite3.Row
+                    asset_count_row = pconn.execute("SELECT count(*) FROM ZASSET;").fetchone()
+                    if asset_count_row and asset_count_row[0] > 0:
+                        rows = pconn.execute(
+                            """
+                            SELECT ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY
+                            FROM ZASSET
+                            WHERE ZFILENAME IS NOT NULL
+                            ORDER BY ZDATECREATED DESC LIMIT ?
+                            """,
+                            (int(limit),),
+                        ).fetchall()
+                        for ar in rows:
+                            zuuid = str(ar["ZUUID"] or "")
+                            if not zuuid or zuuid in seen_guids:
+                                continue
+                            seen_guids.add(zuuid)
+                            photos.append({
+                                "guid": zuuid,
+                                "name": str(ar["ZFILENAME"] or f"asset_{zuuid[:8]}"),
+                                "mimeType": "image/jpeg",
+                                "totalBytes": 0,
+                                "isCloudEvicted": False,
+                                "transferState": 5,
+                                "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(zuuid)}/live",
+                            })
+                finally:
+                    pconn.close()
+            except Exception as exc:
+                self.logger.debug("[photos] Photos.sqlite check: %s", exc)
+
+        return photos[:limit]
+
+    def _get_notes_json_path(self) -> str:
+        d = os.path.expanduser("~/.config/bluepill")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "icloud_notes.json")
+
+    def _get_deleted_notes_json_path(self) -> str:
+        d = os.path.expanduser("~/.config/bluepill")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "deleted_notes.json")
+
+    def query_icloud_notes(self) -> List[Dict[str, Any]]:
+        notes_path = self._get_notes_json_path()
+        deleted_path = self._get_deleted_notes_json_path()
+        deleted_ids: set[str] = set()
+        if os.path.exists(deleted_path):
+            try:
+                with open(deleted_path, "r", encoding="utf-8") as f:
+                    deleted_ids = set(json.load(f))
+            except Exception:
+                pass
+
+        local_notes: List[Dict[str, Any]] = []
+        if os.path.exists(notes_path):
+            try:
+                with open(notes_path, "r", encoding="utf-8") as f:
+                    local_notes = json.load(f)
+            except Exception:
+                local_notes = []
+        else:
+            welcome = {
+                "id": "welcome-note",
+                "title": "Welcome to BluePill iCloud Notes",
+                "body": "Synced across your Apple devices and Linux desktop via BluePill iCloud Hub.",
+                "folder": "Notes",
+                "updatedAtMs": int(time.time() * 1000),
+            }
+            local_notes = [welcome]
+            try:
+                with open(notes_path, "w", encoding="utf-8") as f:
+                    json.dump(local_notes, f, indent=2)
+                os.chmod(notes_path, 0o600)
+            except Exception:
+                pass
+
+        notes_by_id: Dict[str, Dict[str, Any]] = {}
+        for n in local_notes:
+            nid = str(n.get("id") or "").strip()
+            if nid and nid not in deleted_ids:
+                notes_by_id[nid] = n
+
+        macos_notes_db = os.path.expanduser("~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")
+        if os.path.exists(macos_notes_db):
+            try:
+                conn = sqlite3.connect(f"file:{macos_notes_db}?mode=ro", uri=True)
+                try:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        """
+                        SELECT c.ZIDENTIFIER, c.ZTITLE1, c.ZSNIPPET, c.ZMODIFICATIONDATE1, d.ZDATA
+                        FROM ZICCLOUDSYNCINGOBJECT c
+                        LEFT JOIN ZICNOTEDATA d ON c.ZNOTEDATA = d.Z_PK
+                        WHERE c.ZTITLE1 IS NOT NULL AND (c.ZMARKEDFORDELETION IS NULL OR c.ZMARKEDFORDELETION != 1)
+                        ORDER BY c.ZMODIFICATIONDATE1 DESC LIMIT 150
+                        """
+                    ).fetchall()
+                    for r in rows:
+                        nid = str(r["ZIDENTIFIER"] or "").strip()
+                        if not nid or nid in deleted_ids:
+                            continue
+                        mod_date = float(r["ZMODIFICATIONDATE1"] or 0)
+                        updated_ms = int((mod_date + 978307200) * 1000) if mod_date else int(time.time() * 1000)
+                        title = str(r["ZTITLE1"] or "").strip()
+                        snippet = str(r["ZSNIPPET"] or "").strip()
+                        body = snippet
+                        zdata = r["ZDATA"]
+                        if zdata:
+                            try:
+                                decomp = gzip.decompress(zdata)
+                                text_parts = [s.decode("utf-8", errors="ignore") for s in re.findall(b"[\x20-\x7E\n\t]{4,}", decomp)]
+                                if text_parts:
+                                    body = "\n\n".join(text_parts).strip()
+                            except Exception:
+                                pass
+                        if nid not in notes_by_id or notes_by_id[nid].get("updatedAtMs", 0) < updated_ms:
+                            notes_by_id[nid] = {
+                                "id": nid,
+                                "title": title or "Untitled Note",
+                                "body": body or snippet or "",
+                                "folder": "Notes",
+                                "updatedAtMs": updated_ms,
+                            }
+                finally:
+                    conn.close()
+            except Exception as exc:
+                self.logger.debug("[notes] NoteStore.sqlite check: %s", exc)
+
+        sorted_notes = sorted(notes_by_id.values(), key=lambda x: x.get("updatedAtMs", 0), reverse=True)
+        return sorted_notes
+
+    def save_icloud_note(self, note: Dict[str, Any]) -> List[Dict[str, Any]]:
+        nid = str(note.get("id") or f"note-{uuid.uuid4()}").strip()
+        title = str(note.get("title") or "Untitled Note").strip()
+        body = str(note.get("body") or "").strip()
+        folder = str(note.get("folder") or "Notes").strip()
+        updated_at = int(note.get("updatedAtMs") or int(time.time() * 1000))
+
+        notes_path = self._get_notes_json_path()
+        notes = []
+        if os.path.exists(notes_path):
+            try:
+                with open(notes_path, "r", encoding="utf-8") as f:
+                    notes = json.load(f)
+            except Exception:
+                notes = []
+
+        found = False
+        for item in notes:
+            if item.get("id") == nid:
+                item["title"] = title
+                item["body"] = body
+                item["folder"] = folder
+                item["updatedAtMs"] = updated_at
+                found = True
+                break
+        if not found:
+            notes.insert(0, {
+                "id": nid,
+                "title": title,
+                "body": body,
+                "folder": folder,
+                "updatedAtMs": updated_at,
+            })
+
+        with open(notes_path, "w", encoding="utf-8") as f:
+            json.dump(notes, f, indent=2)
+        os.chmod(notes_path, 0o600)
+
+        deleted_path = self._get_deleted_notes_json_path()
+        if os.path.exists(deleted_path):
+            try:
+                with open(deleted_path, "r", encoding="utf-8") as f:
+                    del_ids = json.load(f)
+                if nid in del_ids:
+                    del_ids = [d for d in del_ids if d != nid]
+                    with open(deleted_path, "w", encoding="utf-8") as f:
+                        json.dump(del_ids, f, indent=2)
+            except Exception:
+                pass
+
+        return self.query_icloud_notes()
+
+    def delete_icloud_note(self, note_id: str) -> List[Dict[str, Any]]:
+        clean_id = str(note_id).strip()
+        notes_path = self._get_notes_json_path()
+        if os.path.exists(notes_path):
+            try:
+                with open(notes_path, "r", encoding="utf-8") as f:
+                    notes = json.load(f)
+                notes = [n for n in notes if n.get("id") != clean_id]
+                with open(notes_path, "w", encoding="utf-8") as f:
+                    json.dump(notes, f, indent=2)
+                os.chmod(notes_path, 0o600)
+            except Exception:
+                pass
+
+        deleted_path = self._get_deleted_notes_json_path()
+        del_ids = []
+        if os.path.exists(deleted_path):
+            try:
+                with open(deleted_path, "r", encoding="utf-8") as f:
+                    del_ids = json.load(f)
+            except Exception:
+                del_ids = []
+        if clean_id not in del_ids:
+            del_ids.append(clean_id)
+            with open(deleted_path, "w", encoding="utf-8") as f:
+                json.dump(del_ids, f, indent=2)
+            os.chmod(deleted_path, 0o600)
+
+        return self.query_icloud_notes()
+
+    def _get_calendar_events_json_path(self) -> str:
+        d = os.path.expanduser("~/.config/bluepill")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "calendar_events.json")
+
+    def _get_deleted_events_json_path(self) -> str:
+        d = os.path.expanduser("~/.config/bluepill")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "deleted_events.json")
+
+    def query_icloud_calendars(self) -> List[Dict[str, Any]]:
+        calendars = [
+            {"id": "default", "title": "Home", "color": "#0A84FF"},
+            {"id": "work", "title": "Work", "color": "#CC73E1"},
+            {"id": "family", "title": "Family", "color": "#FF9500"},
+            {"id": "birthdays", "title": "Birthdays", "color": "#8295AF"},
+        ]
+        cal_db = os.path.expanduser("~/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb")
+        if not os.path.exists(cal_db):
+            cal_db = os.path.expanduser("~/Library/Calendars/Calendar.sqlitedb")
+        if os.path.exists(cal_db):
+            try:
+                conn = sqlite3.connect(f"file:{cal_db}?mode=ro", uri=True)
+                try:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute("SELECT ROWID, title, color FROM Calendar WHERE title IS NOT NULL").fetchall()
+                    if rows:
+                        cals = []
+                        for r in rows:
+                            cals.append({
+                                "id": str(r["ROWID"]),
+                                "title": str(r["title"]),
+                                "color": str(r["color"] or "#0A84FF"),
+                            })
+                        return cals
+                finally:
+                    conn.close()
+            except Exception as exc:
+                self.logger.debug("[calendar] Calendar query failed: %s", exc)
+        return calendars
+
+    def query_icloud_events(self, limit: int = 250) -> List[Dict[str, Any]]:
+        events_path = self._get_calendar_events_json_path()
+        deleted_path = self._get_deleted_events_json_path()
+        deleted_ids: set[str] = set()
+        if os.path.exists(deleted_path):
+            try:
+                with open(deleted_path, "r", encoding="utf-8") as f:
+                    deleted_ids = set(json.load(f))
+            except Exception:
+                pass
+
+        events_by_id: Dict[str, Dict[str, Any]] = {}
+
+        if os.path.exists(events_path):
+            try:
+                with open(events_path, "r", encoding="utf-8") as f:
+                    local_evts = json.load(f)
+                for ev in local_evts:
+                    eid = str(ev.get("id") or "").strip()
+                    if eid and eid not in deleted_ids:
+                        events_by_id[eid] = ev
+            except Exception:
+                pass
+
+        cal_db = os.path.expanduser("~/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb")
+        if not os.path.exists(cal_db):
+            cal_db = os.path.expanduser("~/Library/Calendars/Calendar.sqlitedb")
+        if os.path.exists(cal_db):
+            try:
+                conn = sqlite3.connect(f"file:{cal_db}?mode=ro", uri=True)
+                try:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        """
+                        SELECT ci.ROWID, ci.summary, ci.description, ci.start_date, ci.end_date, ci.all_day, ci.calendar_id, ci.unique_identifier, c.title as calendar_title, c.color as calendar_color
+                        FROM CalendarItem ci
+                        LEFT JOIN Calendar c ON ci.calendar_id = c.ROWID
+                        WHERE ci.summary IS NOT NULL
+                        ORDER BY ci.start_date DESC LIMIT 150
+                        """
+                    ).fetchall()
+                    for r in rows:
+                        eid = str(r["unique_identifier"] or r["ROWID"]).strip()
+                        if not eid or eid in deleted_ids:
+                            continue
+                        start_date = float(r["start_date"] or 0)
+                        end_date = float(r["end_date"] or start_date + 3600)
+                        start_ms = int((start_date + 978307200) * 1000)
+                        end_ms = int((end_date + 978307200) * 1000)
+                        if eid not in events_by_id:
+                            events_by_id[eid] = {
+                                "id": eid,
+                                "title": str(r["summary"] or "").strip(),
+                                "notes": str(r["description"] or "").strip(),
+                                "startMs": start_ms,
+                                "endMs": end_ms,
+                                "allDay": bool(r["all_day"]),
+                                "calendarName": str(r["calendar_title"] or "Home"),
+                                "calendarColor": str(r["calendar_color"] or "#0A84FF"),
+                                "location": "",
+                            }
+                finally:
+                    conn.close()
+            except Exception as exc:
+                self.logger.debug("[calendar] CalendarItem query failed: %s", exc)
+
+        res = list(events_by_id.values())
+        res.sort(key=lambda x: x.get("startMs", 0), reverse=True)
+        return res[:limit]
+
+    def save_icloud_event(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        eid = str(event.get("id") or f"evt-{uuid.uuid4()}").strip()
+        title = str(event.get("title") or "New Event").strip()
+        cal_name = str(event.get("calendarName") or "Home").strip()
+        start_ms = int(event.get("startMs") or int(time.time() * 1000))
+        end_ms = int(event.get("endMs") or (start_ms + 3600000))
+        location = str(event.get("location") or "").strip()
+        notes = str(event.get("notes") or "").strip()
+        all_day = bool(event.get("allDay", False))
+
+        events_path = self._get_calendar_events_json_path()
+        events = []
+        if os.path.exists(events_path):
+            try:
+                with open(events_path, "r", encoding="utf-8") as f:
+                    events = json.load(f)
+            except Exception:
+                events = []
+
+        found = False
+        new_item = {
+            "id": eid,
+            "title": title,
+            "calendarName": cal_name,
+            "startMs": start_ms,
+            "endMs": end_ms,
+            "location": location,
+            "notes": notes,
+            "allDay": all_day,
+        }
+        for i, item in enumerate(events):
+            if item.get("id") == eid:
+                events[i] = new_item
+                found = True
+                break
+        if not found:
+            events.insert(0, new_item)
+
+        with open(events_path, "w", encoding="utf-8") as f:
+            json.dump(events, f, indent=2)
+        os.chmod(events_path, 0o600)
+
+        deleted_path = self._get_deleted_events_json_path()
+        if os.path.exists(deleted_path):
+            try:
+                with open(deleted_path, "r", encoding="utf-8") as f:
+                    del_ids = json.load(f)
+                if eid in del_ids:
+                    del_ids = [d for d in del_ids if d != eid]
+                    with open(deleted_path, "w", encoding="utf-8") as f:
+                        json.dump(del_ids, f, indent=2)
+            except Exception:
+                pass
+
+        return self.query_icloud_events()
+
+    def delete_icloud_event(self, event_id: str) -> List[Dict[str, Any]]:
+        clean_id = str(event_id).strip()
+        events_path = self._get_calendar_events_json_path()
+        if os.path.exists(events_path):
+            try:
+                with open(events_path, "r", encoding="utf-8") as f:
+                    events = json.load(f)
+                events = [e for e in events if e.get("id") != clean_id]
+                with open(events_path, "w", encoding="utf-8") as f:
+                    json.dump(events, f, indent=2)
+                os.chmod(events_path, 0o600)
+            except Exception:
+                pass
+
+        deleted_path = self._get_deleted_events_json_path()
+        del_ids = []
+        if os.path.exists(deleted_path):
+            try:
+                with open(deleted_path, "r", encoding="utf-8") as f:
+                    del_ids = json.load(f)
+            except Exception:
+                del_ids = []
+        if clean_id not in del_ids:
+            del_ids.append(clean_id)
+            with open(deleted_path, "w", encoding="utf-8") as f:
+                json.dump(del_ids, f, indent=2)
+            os.chmod(deleted_path, 0o600)
+
+        return self.query_icloud_events()
+
+    def generate_calendar_ics(self) -> str:
+        events = self.query_icloud_events(limit=500)
+        lines = [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//BluePill//iCloud Calendar Sync//EN",
+            "CALSCALE:GREGORIAN",
+            "METHOD:PUBLISH",
+        ]
+        now_dt = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        for ev in events:
+            eid = ev.get("id", str(uuid.uuid4()))
+            title = str(ev.get("title", "")).replace("\n", " ").strip()
+            notes = str(ev.get("notes", "")).replace("\n", "\\n").strip()
+            loc = str(ev.get("location", "")).replace("\n", " ").strip()
+            start_ms = int(ev.get("startMs", 0))
+            end_ms = int(ev.get("endMs", start_ms + 3600000))
+            all_day = bool(ev.get("allDay", False))
+
+            start_dt = datetime.datetime.fromtimestamp(start_ms / 1000.0, tz=datetime.timezone.utc)
+            end_dt = datetime.datetime.fromtimestamp(end_ms / 1000.0, tz=datetime.timezone.utc)
+
+            lines.append("BEGIN:VEVENT")
+            lines.append(f"UID:{eid}@bluepill")
+            lines.append(f"DTSTAMP:{now_dt}")
+            if all_day:
+                lines.append(f"DTSTART;VALUE=DATE:{start_dt.strftime('%Y%m%d')}")
+                lines.append(f"DTEND;VALUE=DATE:{end_dt.strftime('%Y%m%d')}")
+            else:
+                lines.append(f"DTSTART:{start_dt.strftime('%Y%m%dT%H%M%SZ')}")
+                lines.append(f"DTEND:{end_dt.strftime('%Y%m%dT%H%M%SZ')}")
+            lines.append(f"SUMMARY:{title}")
+            if notes:
+                lines.append(f"DESCRIPTION:{notes}")
+            if loc:
+                lines.append(f"LOCATION:{loc}")
+            lines.append("END:VEVENT")
+
+        lines.append("END:VCALENDAR")
+        lines.append("")
+        return "\r\n".join(lines)
+
     def handle_rpc(self, method: str, params: Dict[str, Any]) -> Any:
         if method in ("ping", "api.ping"):
             return "pong"
@@ -2679,8 +3235,28 @@ class BluePillEngine:
             return self.get_attachment_waveform(str(params.get("guid") or ""))
         if method in ("chat.state", "api.chat.state"):
             return self.get_chat_state()
+        if method in ("icloud.photos", "api.icloud.photos"):
+            return self.query_icloud_photos(int(params.get("limit", 48) or 48))
+        if method in ("icloud.notes", "api.icloud.notes"):
+            return self.query_icloud_notes()
+        if method in ("icloud.note.save", "api.icloud.note.save"):
+            return self.save_icloud_note(params)
+        if method in ("icloud.note.delete", "api.icloud.note.delete"):
+            return self.delete_icloud_note(str(params.get("id") or params.get("noteId") or ""))
+        if method in ("icloud.calendars", "api.icloud.calendars"):
+            return self.query_icloud_calendars()
+        if method in ("icloud.events", "api.icloud.events"):
+            return self.query_icloud_events(int(params.get("limit", 250) or 250))
+        if method in ("icloud.event.save", "api.icloud.event.save"):
+            return self.save_icloud_event(params)
+        if method in ("icloud.event.delete", "api.icloud.event.delete"):
+            return self.delete_icloud_event(str(params.get("id") or params.get("eventId") or ""))
+        if method in ("attachment.download", "api.attachment.download"):
+            return self.download_cloud_attachment(str(params.get("guid") or params.get("attachmentGuid") or ""))
         raise ValueError(f"Unknown RPC method: {method}")
 
+
+BluePillBackend = BluePillEngine
 
 WEB_UI_HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -2798,7 +3374,12 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       <span>BluePill Web UI</span>
       <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.1.0 · Zero-Electron macOS Relay</span>
     </div>
-    <span id="serverBadge" class="status-pill">Enter API Key to Connect</span>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button onclick="openNotesModal()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;display:flex;align-items:center;gap:4px;">📝 Notes</button>
+      <button onclick="openCalendarModal()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;display:flex;align-items:center;gap:4px;">📅 Calendar</button>
+      <button onclick="openPhotosModal()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;display:flex;align-items:center;gap:4px;">☁️ Photos</button>
+      <span id="serverBadge" class="status-pill">Enter API Key to Connect</span>
+    </div>
   </header>
   <div class="layout">
     <aside class="sidebar">
@@ -3060,6 +3641,247 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
     if (apiKey) connectRelay();
   </script>
+
+  <!-- Notes Modal -->
+  <div id="notesModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:820px;max-width:92vw;height:540px;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);">
+        <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📝 iCloud Notes Hub</span>
+        <button onclick="closeNotesModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
+      </div>
+      <div style="display:flex;flex:1;overflow:hidden;">
+        <div style="width:280px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:rgba(255,255,255,0.02);">
+          <div style="padding:10px;border-bottom:1px solid var(--border);display:flex;gap:6px;">
+            <input id="notesSearchInput" oninput="filterNotes()" placeholder="Search notes..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px;" />
+            <button onclick="newNote()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 10px;font-weight:600;font-size:12px;cursor:pointer;">+ New</button>
+          </div>
+          <div id="notesList" style="flex:1;overflow-y:auto;padding:6px;"></div>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;padding:14px;gap:10px;">
+          <input id="noteTitleInput" placeholder="Note Title" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:14px;font-weight:600;" />
+          <input id="noteFolderInput" placeholder="Folder (e.g. Notes, Work)" value="Notes" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--muted);font-size:12px;" />
+          <textarea id="noteBodyInput" placeholder="Write note content..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--text);font-size:13px;resize:none;font-family:inherit;"></textarea>
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div style="display:flex;gap:8px;">
+              <button onclick="saveCurrentNote()" style="background:var(--green);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-weight:600;font-size:12px;cursor:pointer;">💾 Save</button>
+              <button onclick="sendNoteToChat()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;">📤 Send to Chat</button>
+            </div>
+            <button onclick="deleteCurrentNote()" style="background:#212832;color:#f85149;border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;">🗑 Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Calendar Modal -->
+  <div id="calendarModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:820px;max-width:92vw;height:540px;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📅 iCloud Calendar Sync</span>
+          <button onclick="downloadCalendarIcs()" style="background:#212832;color:var(--accent2);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">📥 Download .ics</button>
+        </div>
+        <button onclick="closeCalendarModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
+      </div>
+      <div style="padding:12px 18px;border-bottom:1px solid var(--border);background:rgba(255,255,255,0.02);display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+        <input id="evtTitleInput" placeholder="Event title..." style="flex:2;min-width:180px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px;" />
+        <input id="evtCalendarInput" placeholder="Calendar (Home, Work)" value="Home" style="width:130px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px;" />
+        <input id="evtDateInput" type="datetime-local" style="width:170px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:11px;" />
+        <button onclick="saveNewEvent()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-weight:600;font-size:12px;cursor:pointer;">+ Add Event</button>
+      </div>
+      <div id="eventsList" style="flex:1;overflow-y:auto;padding:12px 18px;display:flex;flex-direction:column;gap:8px;"></div>
+    </div>
+  </div>
+
+  <!-- Photos Modal -->
+  <div id="photosModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:860px;max-width:92vw;height:560px;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);">
+        <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">☁️ iCloud Photos & Attachment Unpurge</span>
+        <button onclick="closePhotosModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
+      </div>
+      <div id="photosGrid" style="flex:1;overflow-y:auto;padding:14px;display:grid;grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));gap:12px;"></div>
+    </div>
+  </div>
+
+  <script>
+    let allNotes = [];
+    let selectedNoteId = null;
+    let allEvents = [];
+
+    function openNotesModal() {
+      document.getElementById('notesModal').style.display = 'flex';
+      loadNotes();
+    }
+    function closeNotesModal() {
+      document.getElementById('notesModal').style.display = 'none';
+    }
+    async function loadNotes() {
+      try {
+        const resp = await fetch(apiUrl('/api/v1/icloud/notes'));
+        const j = await resp.json();
+        allNotes = j.data || [];
+        renderNotesList();
+        if (allNotes.length > 0 && !selectedNoteId) selectNote(allNotes[0].id);
+      } catch (err) { console.error('Error loading notes:', err); }
+    }
+    function renderNotesList() {
+      const q = (document.getElementById('notesSearchInput').value || '').toLowerCase();
+      const list = document.getElementById('notesList');
+      list.innerHTML = '';
+      const filtered = allNotes.filter(n => (n.title || '').toLowerCase().includes(q) || (n.body || '').toLowerCase().includes(q));
+      for (const n of filtered) {
+        const item = document.createElement('div');
+        item.style.cssText = 'padding:8px 10px;margin-bottom:4px;border-radius:6px;cursor:pointer;background:' + (n.id === selectedNoteId ? '#212832' : 'transparent') + ';border:1px solid ' + (n.id === selectedNoteId ? 'var(--accent)' : 'transparent') + ';';
+        item.innerHTML = '<div style="font-weight:600;font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (n.title || 'Untitled') + '</div><div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (n.body || '').slice(0, 40) + '</div>';
+        item.onclick = () => selectNote(n.id);
+        list.appendChild(item);
+      }
+    }
+    function filterNotes() { renderNotesList(); }
+    function selectNote(id) {
+      selectedNoteId = id;
+      const n = allNotes.find(item => item.id === id);
+      if (n) {
+        document.getElementById('noteTitleInput').value = n.title || '';
+        document.getElementById('noteFolderInput').value = n.folder || 'Notes';
+        document.getElementById('noteBodyInput').value = n.body || '';
+      }
+      renderNotesList();
+    }
+    function newNote() {
+      selectedNoteId = 'note-' + Date.now();
+      document.getElementById('noteTitleInput').value = '';
+      document.getElementById('noteFolderInput').value = 'Notes';
+      document.getElementById('noteBodyInput').value = '';
+      document.getElementById('noteTitleInput').focus();
+    }
+    async function saveCurrentNote() {
+      const title = document.getElementById('noteTitleInput').value.trim() || 'Untitled Note';
+      const folder = document.getElementById('noteFolderInput').value.trim() || 'Notes';
+      const body = document.getElementById('noteBodyInput').value;
+      const nid = selectedNoteId || ('note-' + Date.now());
+      const resp = await fetch(apiUrl('/api/v1/icloud/notes'), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id: nid, title, folder, body, updatedAtMs: Date.now()})
+      });
+      const j = await resp.json();
+      allNotes = j.data || [];
+      selectNote(nid);
+    }
+    async function deleteCurrentNote() {
+      if (!selectedNoteId) return;
+      const resp = await fetch(apiUrl('/api/v1/icloud/notes/' + encodeURIComponent(selectedNoteId)), { method: 'DELETE' });
+      const j = await resp.json();
+      allNotes = j.data || [];
+      selectedNoteId = allNotes.length > 0 ? allNotes[0].id : null;
+      if (selectedNoteId) selectNote(selectedNoteId); else newNote();
+    }
+    function sendNoteToChat() {
+      const title = document.getElementById('noteTitleInput').value;
+      const body = document.getElementById('noteBodyInput').value;
+      const fullText = (title ? title + '
+' : '') + body;
+      if (!fullText) return;
+      const inp = document.getElementById('msgInput');
+      if (inp) { inp.value = fullText; inp.focus(); }
+      closeNotesModal();
+    }
+
+    function openCalendarModal() {
+      document.getElementById('calendarModal').style.display = 'flex';
+      loadEvents();
+    }
+    function closeCalendarModal() {
+      document.getElementById('calendarModal').style.display = 'none';
+    }
+    async function loadEvents() {
+      try {
+        const resp = await fetch(apiUrl('/api/v1/icloud/events'));
+        const j = await resp.json();
+        allEvents = j.data || [];
+        renderEventsList();
+      } catch (err) { console.error('Error loading events:', err); }
+    }
+    function renderEventsList() {
+      const list = document.getElementById('eventsList');
+      list.innerHTML = '';
+      for (const ev of allEvents) {
+        const item = document.createElement('div');
+        item.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;';
+        const d = ev.startMs ? new Date(ev.startMs).toLocaleString() : 'Anytime';
+        const cal = ev.calendarName || ev.calendarTitle || 'Home';
+        item.innerHTML = '<div style="flex:1;"><div style="display:flex;gap:8px;align-items:center;"><span style="font-weight:600;font-size:13px;color:var(--text);">' + (ev.title || 'Untitled Event') + '</span><span style="font-size:10px;background:#212832;color:var(--accent2);border:1px solid var(--border);border-radius:4px;padding:2px 6px;">' + cal + '</span></div><div style="font-size:11px;color:var(--muted);margin-top:2px;">🕒 ' + d + (ev.location ? ' · 📍 ' + ev.location : '') + '</div></div><div style="display:flex;gap:6px;"><button onclick="shareEvent('' + ev.id + '')" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;">📤 Share</button><button onclick="deleteEvent('' + ev.id + '')" style="background:#212832;color:#f85149;border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;">🗑</button></div>';
+        list.appendChild(item);
+      }
+    }
+    async function saveNewEvent() {
+      const title = document.getElementById('evtTitleInput').value.trim();
+      if (!title) return;
+      const cal = document.getElementById('evtCalendarInput').value.trim() || 'Home';
+      const dtVal = document.getElementById('evtDateInput').value;
+      const startMs = dtVal ? new Date(dtVal).getTime() : Date.now() + 3600000;
+      const endMs = startMs + 3600000;
+      const resp = await fetch(apiUrl('/api/v1/icloud/events'), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({title, calendarName: cal, startMs, endMs})
+      });
+      const j = await resp.json();
+      allEvents = j.data || [];
+      document.getElementById('evtTitleInput').value = '';
+      renderEventsList();
+    }
+    async function deleteEvent(id) {
+      const resp = await fetch(apiUrl('/api/v1/icloud/events/' + encodeURIComponent(id)), { method: 'DELETE' });
+      const j = await resp.json();
+      allEvents = j.data || [];
+      renderEventsList();
+    }
+    function shareEvent(id) {
+      const ev = allEvents.find(e => e.id === id);
+      if (!ev) return;
+      const d = ev.startMs ? new Date(ev.startMs).toLocaleString() : '';
+      const text = '📅 ' + ev.title + (d ? ' on ' + d : '') + (ev.location ? ' at ' + ev.location : '');
+      const inp = document.getElementById('msgInput');
+      if (inp) { inp.value = text; inp.focus(); }
+      closeCalendarModal();
+    }
+    function downloadCalendarIcs() {
+      window.open(apiUrl('/api/v1/icloud/calendar.ics'), '_blank');
+    }
+
+    function openPhotosModal() {
+      document.getElementById('photosModal').style.display = 'flex';
+      loadPhotos();
+    }
+    function closePhotosModal() {
+      document.getElementById('photosModal').style.display = 'none';
+    }
+    async function loadPhotos() {
+      try {
+        const resp = await fetch(apiUrl('/api/v1/icloud/photos'));
+        const j = await resp.json();
+        const photos = j.data || [];
+        const grid = document.getElementById('photosGrid');
+        grid.innerHTML = '';
+        for (const p of photos) {
+          const card = document.createElement('div');
+          card.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px;';
+          const imgUrl = apiUrl('/api/v1/attachment/' + encodeURIComponent(p.guid) + '/live');
+          const isEvicted = p.isCloudEvicted;
+          card.innerHTML = '<div style="width:100%;height:120px;border-radius:6px;background:#151b23;display:flex;align-items:center;justify-content:center;overflow:hidden;"><img src="' + imgUrl + '" style="max-width:100%;max-height:100%;object-fit:cover;" onerror="this.style.display='none';this.nextElementSibling.style.display='block';" /><div style="display:none;color:var(--muted);font-size:24px;">🖼</div></div><div style="font-size:11px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (p.name || p.guid) + '</div><div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-size:10px;padding:1px 6px;border-radius:4px;' + (isEvicted ? 'background:#3d2c12;color:#d29922;' : 'background:#1c3322;color:#3fb950;') + '">' + (isEvicted ? '☁️ iCloud' : '✓ Local') + '</span><button onclick="downloadAttachmentLive('' + p.guid + '')" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:10px;cursor:pointer;">⬇ Live</button></div>';
+          grid.appendChild(card);
+        }
+      } catch (err) { console.error('Error loading photos:', err); }
+    }
+    async function downloadAttachmentLive(guid) {
+      await fetch(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/download'), { method: 'POST' });
+      window.open(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/live'), '_blank');
+    }
+  </script>
+
 </body>
 </html>
 """
@@ -3355,6 +4177,36 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, self.engine.get_chat_state())
             return
 
+        if path == "/api/v1/icloud/photos":
+            qs = urllib.parse.parse_qs(parsed.query)
+            lim = int((qs.get("limit") or [48])[0] or 48)
+            self._send_json(200, self.engine.query_icloud_photos(limit=lim))
+            return
+
+        if path == "/api/v1/icloud/notes":
+            self._send_json(200, self.engine.query_icloud_notes())
+            return
+
+        if path == "/api/v1/icloud/calendars":
+            self._send_json(200, self.engine.query_icloud_calendars())
+            return
+
+        if path == "/api/v1/icloud/events":
+            qs = urllib.parse.parse_qs(parsed.query)
+            lim = int((qs.get("limit") or [250])[0] or 250)
+            self._send_json(200, self.engine.query_icloud_events(limit=lim))
+            return
+
+        if path == "/api/v1/icloud/calendar.ics":
+            ics_text = self.engine.generate_calendar_ics().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/calendar; charset=UTF-8")
+            self.send_header("Content-Disposition", 'attachment; filename="bluepill_icloud_calendar.ics"')
+            self.send_header("Content-Length", str(len(ics_text)))
+            self.end_headers()
+            self.wfile.write(ics_text)
+            return
+
         self._send_json(404, None, f"Not found: {path}")
 
     def do_POST(self) -> None:
@@ -3481,6 +4333,20 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, self.engine.manage_participant(cg, addr, action))
             return
 
+        if path == "/api/v1/icloud/notes":
+            self._send_json(200, self.engine.save_icloud_note(body))
+            return
+
+        if path == "/api/v1/icloud/events":
+            self._send_json(200, self.engine.save_icloud_event(body))
+            return
+
+        m_att_dl = re.match(r"^/api/v1/attachment/([^/]+)/download$", path)
+        if m_att_dl:
+            att_guid = urllib.parse.unquote(m_att_dl.group(1))
+            self._send_json(200, self.engine.download_cloud_attachment(att_guid))
+            return
+
         if path == "/rpc":
             req_id = body.get("id")
             method = str(body.get("method") or "")
@@ -3529,6 +4395,18 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             cg = urllib.parse.unquote(m_part_del.group(1))
             addr = urllib.parse.unquote(m_part_del.group(2))
             self._send_json(200, self.engine.manage_participant(cg, addr, "remove"))
+            return
+
+        m_note = re.match(r"^/api/v1/icloud/notes/([^/]+)$", path)
+        if m_note:
+            note_id = urllib.parse.unquote(m_note.group(1))
+            self._send_json(200, self.engine.delete_icloud_note(note_id))
+            return
+
+        m_evt = re.match(r"^/api/v1/icloud/events/([^/]+)$", path)
+        if m_evt:
+            evt_id = urllib.parse.unquote(m_evt.group(1))
+            self._send_json(200, self.engine.delete_icloud_event(evt_id))
             return
 
         self._send_json(200, {"deleted": True})
@@ -3624,6 +4502,91 @@ def run_selftest(engine: BluePillEngine) -> int:
         ) as log_resp:
             log_json = json.loads(log_resp.read().decode("utf-8"))
         assert log_json["status"] == 200 and log_json["data"]["count"] > 0, f"Logs endpoint failed: {log_json}"
+
+        # iCloud Notes Verification
+        notes_init = test_eng.query_icloud_notes()
+        assert isinstance(notes_init, list), "query_icloud_notes must return list"
+        saved_notes = test_eng.save_icloud_note({"id": "st-note-direct", "title": "Direct Note", "body": "Body Direct"})
+        assert any(n.get("id") == "st-note-direct" for n in saved_notes), "Direct note save failed"
+        del_notes = test_eng.delete_icloud_note("st-note-direct")
+        assert not any(n.get("id") == "st-note-direct" for n in del_notes), "Direct note delete failed"
+
+        # HTTP Notes verification
+        req_post_note = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/icloud/notes?password=selftest-secret",
+            data=json.dumps({"id": "st-note-http", "title": "HTTP Note", "body": "HTTP Body"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req_post_note, timeout=5.0) as resp:
+            http_notes = json.loads(resp.read().decode("utf-8"))["data"]
+        assert any(n.get("id") == "st-note-http" for n in http_notes), "HTTP note post failed"
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/icloud/notes?password=selftest-secret", timeout=5.0) as resp:
+            list_notes = json.loads(resp.read().decode("utf-8"))["data"]
+        assert any(n.get("id") == "st-note-http" for n in list_notes), "HTTP note get failed"
+
+        req_del_note = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/icloud/notes/st-note-http?password=selftest-secret",
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req_del_note, timeout=5.0) as resp:
+            after_del_notes = json.loads(resp.read().decode("utf-8"))["data"]
+        assert not any(n.get("id") == "st-note-http" for n in after_del_notes), "HTTP note delete failed"
+
+        # iCloud Calendars & Events Verification
+        cals = test_eng.query_icloud_calendars()
+        assert isinstance(cals, list), "query_icloud_calendars must return list"
+        evts = test_eng.query_icloud_events()
+        assert isinstance(evts, list), "query_icloud_events must return list"
+        saved_evts = test_eng.save_icloud_event({"id": "st-evt-direct", "title": "Direct Event", "startMs": 1700000000000, "endMs": 1700003600000})
+        assert any(e.get("id") == "st-evt-direct" for e in saved_evts), "Direct event save failed"
+        ics_data = test_eng.generate_calendar_ics()
+        assert "BEGIN:VCALENDAR" in ics_data and "st-evt-direct" in ics_data, "ICS generator missing event"
+        del_evts = test_eng.delete_icloud_event("st-evt-direct")
+        assert not any(e.get("id") == "st-evt-direct" for e in del_evts), "Direct event delete failed"
+
+        # HTTP Events verification
+        req_post_evt = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/icloud/events?password=selftest-secret",
+            data=json.dumps({"id": "st-evt-http", "title": "HTTP Event", "startMs": 1700000000000, "endMs": 1700003600000}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req_post_evt, timeout=5.0) as resp:
+            http_evts = json.loads(resp.read().decode("utf-8"))["data"]
+        assert any(e.get("id") == "st-evt-http" for e in http_evts), "HTTP event post failed"
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/icloud/events?password=selftest-secret", timeout=5.0) as resp:
+            list_evts = json.loads(resp.read().decode("utf-8"))["data"]
+        assert any(e.get("id") == "st-evt-http" for e in list_evts), "HTTP event get failed"
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/icloud/calendar.ics?password=selftest-secret", timeout=5.0) as resp:
+            ics_http = resp.read().decode("utf-8")
+        assert "BEGIN:VCALENDAR" in ics_http and "st-evt-http" in ics_http, "HTTP ICS feed failed"
+
+        req_del_evt = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/icloud/events/st-evt-http?password=selftest-secret",
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req_del_evt, timeout=5.0) as resp:
+            after_del_evts = json.loads(resp.read().decode("utf-8"))["data"]
+        assert not any(e.get("id") == "st-evt-http" for e in after_del_evts), "HTTP event delete failed"
+
+        # iCloud Photos & Attachment Download verification
+        photos_list = test_eng.query_icloud_photos(limit=10)
+        assert isinstance(photos_list, list), "query_icloud_photos must return list"
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/icloud/photos?password=selftest-secret", timeout=5.0) as resp:
+            http_photos = json.loads(resp.read().decode("utf-8"))["data"]
+        assert isinstance(http_photos, list), "HTTP photos get failed"
+
+        # RPC checks
+        rpc_notes = test_eng.handle_rpc("icloud.notes", {})
+        assert isinstance(rpc_notes, list), "RPC icloud.notes failed"
+        rpc_evts = test_eng.handle_rpc("icloud.events", {})
+        assert isinstance(rpc_evts, list), "RPC icloud.events failed"
+        rpc_photos = test_eng.handle_rpc("icloud.photos", {})
+        assert isinstance(rpc_photos, list), "RPC icloud.photos failed"
     finally:
         srv.shutdown()
         srv.server_close()

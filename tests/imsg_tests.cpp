@@ -3327,6 +3327,79 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("property string activeScreenEffect:")));
         QVERIFY(qml.contains(QStringLiteral("function triggerExpressiveEffect(effectText)")));
         QVERIFY(qml.contains(QStringLiteral("function playBubbleEffect(effectLabel)")));
+
+        // Verify BluePill iCloud Hub (Notes, Calendar, Photos)
+        QVERIFY(qml.contains(QStringLiteral("id: icloudHubBar")));
+        QVERIFY(qml.contains(QStringLiteral("id: icloudPhotosBtn")));
+        QVERIFY(qml.contains(QStringLiteral("id: icloudNotesPopup")));
+        QVERIFY(qml.contains(QStringLiteral("id: icloudCalendarPopup")));
+        QVERIFY(qml.contains(QStringLiteral("id: icloudPhotosPopup")));
+    }
+
+    void testIcloudNotesLifecycle() {
+        Backend backend(false);
+        QTemporaryDir tempDir;
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_notes.json")));
+
+        QVERIFY(backend.icloudNotes().isEmpty());
+
+        // Create Note
+        backend.saveIcloudNote(QStringLiteral("note_test_1"), QStringLiteral("Meeting Notes"), QStringLiteral("Discuss Q3 sync and calendar items"), QStringLiteral("Work"));
+        QCOMPARE(backend.icloudNotes().size(), 1);
+        QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("Meeting Notes"));
+        QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("folder")).toString(), QStringLiteral("Work"));
+
+        // Update Note
+        backend.saveIcloudNote(QStringLiteral("note_test_1"), QStringLiteral("Updated Meeting Notes"), QStringLiteral("New action items"), QStringLiteral("Work"));
+        QCOMPARE(backend.icloudNotes().size(), 1);
+        QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("Updated Meeting Notes"));
+        QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("body")).toString(), QStringLiteral("New action items"));
+
+        // Delete Note
+        backend.deleteIcloudNote(QStringLiteral("note_test_1"));
+        QCOMPARE(backend.icloudNotes().size(), 0);
+    }
+
+    void testIcloudCalendarEventsLifecycle() {
+        Backend backend(false);
+        QTemporaryDir tempDir;
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_events.json")));
+
+        QVERIFY(backend.icloudEvents().isEmpty());
+
+        // Create Event
+        backend.saveIcloudEvent(QStringLiteral("BluePill Architecture Review"), 1700000000000, 1700003600000, QStringLiteral("Work"), QStringLiteral("Discuss iCloud Hub sync"));
+        QCOMPARE(backend.icloudEvents().size(), 1);
+        const QString evtId = backend.icloudEvents().first().toMap().value(QStringLiteral("id")).toString();
+        QVERIFY(!evtId.isEmpty());
+        QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("BluePill Architecture Review"));
+        QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("calendarTitle")).toString(), QStringLiteral("Work"));
+
+        // Delete Event
+        backend.deleteIcloudEvent(evtId);
+        QCOMPARE(backend.icloudEvents().size(), 0);
+    }
+
+    void testIcloudPhotosAndUnpurge() {
+        Backend backend(false);
+        QTemporaryDir tempDir;
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_photos.json")));
+
+        QVariantList samplePhotos;
+        QVariantMap p1;
+        p1.insert(QStringLiteral("guid"), QStringLiteral("att_cloud_123"));
+        p1.insert(QStringLiteral("name"), QStringLiteral("vacation.heic"));
+        p1.insert(QStringLiteral("mimeType"), QStringLiteral("image/heic"));
+        p1.insert(QStringLiteral("isCloudEvicted"), true);
+        samplePhotos.append(p1);
+
+        backend.setIcloudPhotosForTest(samplePhotos);
+        QCOMPARE(backend.icloudPhotos().size(), 1);
+        QVERIFY(backend.icloudPhotos().first().toMap().value(QStringLiteral("isCloudEvicted")).toBool());
+
+        // Trigger unpurge/download
+        backend.downloadCloudAttachment(QStringLiteral("att_cloud_123"));
+        // Method should execute without crash even if offline
     }
 
 };
