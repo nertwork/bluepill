@@ -1837,7 +1837,7 @@ private slots:
         QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
         const QString qml = QString::fromUtf8(qmlFile.readAll());
         QVERIFY(qml.contains(QStringLiteral("function focusAndScrollChat()")));
-        QVERIFY(qml.contains(QStringLiteral("backend.selectChat(chatGuid)\n                                    root.focusAndScrollChat()")));
+        QVERIFY(qml.contains(QStringLiteral("backend.selectChat(chatGuid)\n                                    if (win) Qt.callLater(function() { win.focusAndScrollChat() })")));
     }
 
     void testV162MessageListKeyboardNavigation() {
@@ -2999,7 +2999,29 @@ private slots:
         tempMsg.insert(QStringLiteral("isFromMe"), true);
         tempMsg.insert(QStringLiteral("dateCreated"), 1794368786000LL);
         tempMsg.insert(QStringLiteral("chats"), QJsonArray{chatObj});
-        b.ingestMessagesForTest(QJsonArray{tempMsg}, false);
+        const QString chatGuidB = QStringLiteral("iMessage;-;+16268203709");
+        QJsonObject chatObjB;
+        chatObjB.insert(QStringLiteral("guid"), chatGuidB);
+        chatObjB.insert(QStringLiteral("chatIdentifier"), QStringLiteral("+16268203709"));
+        chatObjB.insert(QStringLiteral("style"), 45);
+        QJsonObject msgB;
+        msgB.insert(QStringLiteral("guid"), QStringLiteral("real-grayson-msg-1"));
+        msgB.insert(QStringLiteral("text"), QStringLiteral("Existing Grayson message"));
+        msgB.insert(QStringLiteral("isFromMe"), false);
+        msgB.insert(QStringLiteral("dateCreated"), 1794368700000LL);
+        msgB.insert(QStringLiteral("chats"), QJsonArray{chatObjB});
+
+        b.ingestMessagesForTest(QJsonArray{tempMsg, msgB}, false);
+        b.selectChat(chatGuid);
+        QCOMPARE(b.messages().size(), 1);
+
+        // Switching from chatGuid (which has temp-*) to chatGuidB must NEVER bleed temp-* into chatGuidB!
+        b.selectChat(chatGuidB);
+        QCOMPARE(b.messages().size(), 1);
+        QCOMPARE(b.messages().first().toMap().value(QStringLiteral("guid")).toString(),
+                 QStringLiteral("real-grayson-msg-1"));
+
+        // Switch back to chatGuid -> still has its 1 message
         b.selectChat(chatGuid);
         QCOMPARE(b.messages().size(), 1);
 

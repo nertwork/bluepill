@@ -770,7 +770,27 @@ void Backend::loadMessagesCache() {
     f.close();
     const QJsonArray messagesArr = root.value(QStringLiteral("messages")).toArray();
     if (!messagesArr.isEmpty()) {
-        processIncomingMessages(messagesArr, true);
+        QJsonArray cleanArr;
+        for (const QJsonValue &v : messagesArr) {
+            const QJsonObject m = v.toObject();
+            const QString g = m.value(QStringLiteral("guid")).toString().trimmed();
+            if (g.isEmpty() || g.startsWith(QStringLiteral("temp-")) || g.startsWith(QStringLiteral("bp-"))) {
+                continue;
+            }
+            const QString cacheRoom = m.value(QStringLiteral("cacheRoomnames")).toString().trimmed();
+            const QString grpTitle = m.value(QStringLiteral("groupTitle")).toString().trimmed();
+            const QJsonArray cArr = m.value(QStringLiteral("chats")).toArray();
+            if (!cArr.isEmpty()) {
+                const QString firstCg = cArr.first().toObject().value(QStringLiteral("guid")).toString();
+                if (firstCg.contains(QStringLiteral(";-;")) && (!cacheRoom.isEmpty() || !grpTitle.isEmpty() || g == QStringLiteral("3A1763E9-2610-4F96-800E-7862A7B01D0A"))) {
+                    continue;
+                }
+            }
+            cleanArr.append(m);
+        }
+        if (!cleanArr.isEmpty()) {
+            processIncomingMessages(cleanArr, true);
+        }
     }
 }
 
@@ -821,6 +841,10 @@ void Backend::flushMessagesCacheNow(bool async) const {
 
         int keptForChat = 0;
         for (QJsonObject m : chatMsgs) {
+            const QString mg = m.value(QStringLiteral("guid")).toString().trimmed();
+            if (mg.isEmpty() || mg.startsWith(QStringLiteral("temp-")) || mg.startsWith(QStringLiteral("bp-"))) {
+                continue;
+            }
             const qint64 dc = m.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
             if (keptForChat >= 30 && dc > 0 && dc < cutoffMs) {
                 continue;
@@ -2545,21 +2569,33 @@ void Backend::reconcileServerUnreadMessages(const QJsonArray &unreadMessages) {
 
         QJsonArray chatsArr = m.value(QStringLiteral("chats")).toArray();
         if (chatsArr.isEmpty()) {
-            const QString handleAddr = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("address")).toString().trimmed();
-            if (!handleAddr.isEmpty()) {
-                QString svc = m.value(QStringLiteral("service")).toString().trimmed();
-                if (svc.isEmpty()) {
-                    svc = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("service")).toString().trimmed();
-                }
-                if (svc.isEmpty()) {
-                    svc = QStringLiteral("SMS");
-                }
+            const QString cacheRoom = m.value(QStringLiteral("cacheRoomnames")).toString().trimmed();
+            const QString grpTitle = m.value(QStringLiteral("groupTitle")).toString().trimmed();
+            QString svc = m.value(QStringLiteral("service")).toString().trimmed();
+            if (svc.isEmpty()) {
+                svc = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("service")).toString().trimmed();
+            }
+            if (svc.isEmpty()) {
+                svc = QStringLiteral("SMS");
+            }
+            if (!cacheRoom.isEmpty()) {
                 QJsonObject synthChat;
-                synthChat.insert(QStringLiteral("guid"), QStringLiteral("%1;-;%2").arg(svc, handleAddr));
-                synthChat.insert(QStringLiteral("chatIdentifier"), handleAddr);
-                synthChat.insert(QStringLiteral("style"), 45);
+                synthChat.insert(QStringLiteral("guid"), QStringLiteral("%1;+;%2").arg(svc, cacheRoom));
+                synthChat.insert(QStringLiteral("chatIdentifier"), cacheRoom);
+                if (!grpTitle.isEmpty()) synthChat.insert(QStringLiteral("displayName"), grpTitle);
+                synthChat.insert(QStringLiteral("style"), 43);
                 chatsArr.append(synthChat);
                 m.insert(QStringLiteral("chats"), chatsArr);
+            } else if (grpTitle.isEmpty()) {
+                const QString handleAddr = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("address")).toString().trimmed();
+                if (!handleAddr.isEmpty()) {
+                    QJsonObject synthChat;
+                    synthChat.insert(QStringLiteral("guid"), QStringLiteral("%1;-;%2").arg(svc, handleAddr));
+                    synthChat.insert(QStringLiteral("chatIdentifier"), handleAddr);
+                    synthChat.insert(QStringLiteral("style"), 45);
+                    chatsArr.append(synthChat);
+                    m.insert(QStringLiteral("chats"), chatsArr);
+                }
             }
         }
         if (chatsArr.isEmpty()) continue;
@@ -2571,7 +2607,7 @@ void Backend::reconcileServerUnreadMessages(const QJsonArray &unreadMessages) {
             m_lastMessageTimestamp = dateCreated;
         }
         const qint64 rowId = m.value(QStringLiteral("originalROWID")).toVariant().toLongLong();
-        if (rowId > m_highestMessageRowId) {
+        if (rowId > 0 && rowId < 100000000LL && !msgGuid.startsWith(QStringLiteral("temp-")) && !msgGuid.startsWith(QStringLiteral("bp-")) && rowId > m_highestMessageRowId) {
             m_highestMessageRowId = rowId;
         }
 
@@ -2906,24 +2942,41 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
 
         QJsonArray chatsArr = m.value(QStringLiteral("chats")).toArray();
         if (chatsArr.isEmpty()) {
-            const QString handleAddr = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("address")).toString().trimmed();
-            if (!handleAddr.isEmpty()) {
-                QString svc = m.value(QStringLiteral("service")).toString().trimmed();
-                if (svc.isEmpty()) {
-                    svc = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("service")).toString().trimmed();
-                }
-                if (svc.isEmpty()) {
-                    svc = QStringLiteral("SMS");
-                }
+            const QString cacheRoom = m.value(QStringLiteral("cacheRoomnames")).toString().trimmed();
+            const QString grpTitle = m.value(QStringLiteral("groupTitle")).toString().trimmed();
+            QString svc = m.value(QStringLiteral("service")).toString().trimmed();
+            if (svc.isEmpty()) {
+                svc = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("service")).toString().trimmed();
+            }
+            if (svc.isEmpty()) {
+                svc = QStringLiteral("SMS");
+            }
+            if (!cacheRoom.isEmpty()) {
                 QJsonObject synthChat;
-                synthChat.insert(QStringLiteral("guid"), QStringLiteral("%1;-;%2").arg(svc, handleAddr));
-                synthChat.insert(QStringLiteral("chatIdentifier"), handleAddr);
-                synthChat.insert(QStringLiteral("style"), 45);
+                synthChat.insert(QStringLiteral("guid"), QStringLiteral("%1;+;%2").arg(svc, cacheRoom));
+                synthChat.insert(QStringLiteral("chatIdentifier"), cacheRoom);
+                if (!grpTitle.isEmpty()) synthChat.insert(QStringLiteral("displayName"), grpTitle);
+                synthChat.insert(QStringLiteral("style"), 43);
                 chatsArr.append(synthChat);
                 m.insert(QStringLiteral("chats"), chatsArr);
+            } else if (grpTitle.isEmpty()) {
+                const QString handleAddr = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("address")).toString().trimmed();
+                if (!handleAddr.isEmpty()) {
+                    QJsonObject synthChat;
+                    synthChat.insert(QStringLiteral("guid"), QStringLiteral("%1;-;%2").arg(svc, handleAddr));
+                    synthChat.insert(QStringLiteral("chatIdentifier"), handleAddr);
+                    synthChat.insert(QStringLiteral("style"), 45);
+                    chatsArr.append(synthChat);
+                    m.insert(QStringLiteral("chats"), chatsArr);
+                }
             }
         }
         if (chatsArr.isEmpty()) continue;
+
+        const qint64 rowId = m.value(QStringLiteral("originalROWID")).toVariant().toLongLong();
+        if (rowId > 0 && rowId < 100000000LL && !msgGuid.startsWith(QStringLiteral("temp-")) && !msgGuid.startsWith(QStringLiteral("bp-")) && rowId > m_highestMessageRowId) {
+            m_highestMessageRowId = rowId;
+        }
 
         if (dateCreated > m_lastMessageTimestamp) {
             m_lastMessageTimestamp = dateCreated;
@@ -3564,6 +3617,8 @@ void Backend::selectChat(const QString &chatGuid) {
     if (m_chatMessagesCache.contains(chatGuid)) {
         m_attachmentDownloadQueue.clear();
     }
+    emit selectedChatChanged();
+
     if (!m_demoMode || m_chatMessagesCache.contains(chatGuid)) {
         rebuildSelectedChatMessages();
         prefetchRecentChatAttachments();
@@ -3572,8 +3627,6 @@ void Backend::selectChat(const QString &chatGuid) {
         m_messages = m_demoChatMessages.value(chatGuid);
         emit messagesChanged();
     }
-
-    emit selectedChatChanged();
     emit chatsChanged();
     emit olderMessagesChanged();
 
@@ -4209,8 +4262,16 @@ QVariantList Backend::buildMessageListFromApi(
         const QString metaBadgeText = metaParts.join(QStringLiteral(" · "));
         const QString otpCode = extractVerificationCode(text);
 
+        QString itemChatGuid = m.value(QStringLiteral("chatGuid")).toString().trimmed();
+        if (itemChatGuid.isEmpty()) {
+            const QJsonArray itemChats = m.value(QStringLiteral("chats")).toArray();
+            if (!itemChats.isEmpty()) {
+                itemChatGuid = itemChats.first().toObject().value(QStringLiteral("guid")).toString().trimmed();
+            }
+        }
         QVariantMap item;
         item.insert(QStringLiteral("guid"), guid);
+        item.insert(QStringLiteral("chatGuid"), itemChatGuid);
         item.insert(QStringLiteral("text"), text);
         item.insert(QStringLiteral("formattedText"), formatMessageTextWithLinks(text));
         item.insert(QStringLiteral("verificationCode"), otpCode);
@@ -4266,10 +4327,30 @@ QVariantList Backend::buildMessageListFromApi(
     return out;
 }
 
-void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &msg) {
+void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &rawMsg) {
     if (chatGuid.isEmpty()) return;
-    const QString msgGuid = msg.value(QStringLiteral("guid")).toString();
+    const QString msgGuid = rawMsg.value(QStringLiteral("guid")).toString();
     if (msgGuid.isEmpty()) return;
+    const QJsonArray msgChats = rawMsg.value(QStringLiteral("chats")).toArray();
+    if (!msgChats.isEmpty()) {
+        bool matchesTargetChat = false;
+        bool hasAnyChatGuid = false;
+        for (const QJsonValue &cv : msgChats) {
+            const QString cg = cv.toObject().value(QStringLiteral("guid")).toString().trimmed();
+            if (!cg.isEmpty()) {
+                hasAnyChatGuid = true;
+                if (cg == chatGuid) {
+                    matchesTargetChat = true;
+                    break;
+                }
+            }
+        }
+        if (hasAnyChatGuid && !matchesTargetChat) {
+            return;
+        }
+    }
+    QJsonObject msg = rawMsg;
+    msg.insert(QStringLiteral("chatGuid"), chatGuid);
     if (m_deletedMessageGuids.contains(msgGuid) || isMessageDeletedOrRetracted(msg)) {
         if (isMessageDeletedOrRetracted(msg)) {
             m_deletedMessageGuids.insert(msgGuid);
@@ -4446,11 +4527,11 @@ void Backend::rebuildSelectedChatMessages() {
         const QString g = cm.value(QStringLiteral("guid")).toString();
         if (g.startsWith(QStringLiteral("temp-")) || g.startsWith(QStringLiteral("bp-"))) {
             const QString optChatGuid = cm.value(QStringLiteral("chatGuid")).toString();
-            if (!optChatGuid.isEmpty() && optChatGuid != m_selectedChatGuid) {
+            if (optChatGuid.isEmpty() || optChatGuid != m_selectedChatGuid) {
                 continue;
             }
             const qint64 optTs = cm.value(QStringLiteral("optimisticCreatedAtMs")).toLongLong();
-            if (optTs > 0 && (nowRebuildMs - optTs) > 45000LL) {
+            if (optTs <= 0 || (nowRebuildMs - optTs) > 45000LL) {
                 continue;
             }
             const QString txt = cm.value(QStringLiteral("text")).toString().trimmed();
@@ -5472,6 +5553,10 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         }
         const QString realGuid = dataObj.value(QStringLiteral("guid")).toString();
         const qint64 dateCreated = dataObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+        const int sendErrCode = dataObj.value(QStringLiteral("error")).toInt(0);
+        if (sendErrCode != 0) {
+            return false;
+        }
 
         if (!realGuid.isEmpty() && !realGuid.startsWith(QStringLiteral("iMessage;")) && !realGuid.startsWith(QStringLiteral("SMS;"))) {
             m_seenMessageGuids.insert(realGuid);
@@ -5512,9 +5597,34 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         }
     };
 
-    auto sendViaNewChat = [this, chatGuid, trimmed, finalizeSentMessage, finishSendTrack]() {
+    auto markOptimisticFailed = [this, chatGuid, tempGuid]() {
+        if (m_chatMessagesCache.contains(chatGuid)) {
+            m_chatMessagesCache[chatGuid].remove(tempGuid);
+        }
+        if (chatGuid == m_selectedChatGuid) {
+            bool updated = false;
+            for (int i = 0; i < m_messages.size(); ++i) {
+                QVariantMap m = m_messages[i].toMap();
+                if (m.value(QStringLiteral("guid")).toString() == tempGuid) {
+                    m.insert(QStringLiteral("receiptText"), QStringLiteral("⚠ Not Delivered"));
+                    m.insert(QStringLiteral("isFailed"), true);
+                    m.insert(QStringLiteral("errorCode"), 4);
+                    m_messages[i] = m;
+                    updated = true;
+                    break;
+                }
+            }
+            if (updated) {
+                emit messagesChanged();
+            }
+        }
+        emit toastMessage(QStringLiteral("⚠ Message failed to send"));
+    };
+
+    auto sendViaNewChat = [this, chatGuid, trimmed, finalizeSentMessage, markOptimisticFailed, finishSendTrack]() {
         const QString addr = chatGuid.section(QStringLiteral(";-;"), 1);
         if (addr.isEmpty()) {
+            markOptimisticFailed();
             loadChatMessages(chatGuid);
             finishSendTrack();
             return;
@@ -5525,13 +5635,14 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         newChatPayload.insert(QStringLiteral("method"), QStringLiteral("private-api"));
         QNetworkRequest req3 = makeRequest(QStringLiteral("/api/v1/chat/new"));
         req3.setPriority(QNetworkRequest::HighPriority);
-        req3.setTransferTimeout(10000);
+        req3.setTransferTimeout(15000);
         QNetworkReply *r3 = m_sendNam.post(req3, QJsonDocument(newChatPayload).toJson(QJsonDocument::Compact));
-        connect(r3, &QNetworkReply::finished, this, [this, r3, chatGuid, finalizeSentMessage, finishSendTrack]() {
+        connect(r3, &QNetworkReply::finished, this, [this, r3, chatGuid, finalizeSentMessage, markOptimisticFailed, finishSendTrack]() {
             r3->deleteLater();
             const bool resolved = (r3->error() == QNetworkReply::NoError) && finalizeSentMessage(r3->readAll());
             fetchChatsMetadata();
             if (!resolved) {
+                markOptimisticFailed();
                 loadChatMessages(chatGuid);
             }
             finishSendTrack();
@@ -5542,9 +5653,9 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     emit sendingMessageChanged();
     QNetworkRequest sendReq = makeRequest(QStringLiteral("/api/v1/message/text"));
     sendReq.setPriority(QNetworkRequest::HighPriority);
-    sendReq.setTransferTimeout(10000);
+    sendReq.setTransferTimeout(15000);
     QNetworkReply *reply = m_sendNam.post(sendReq, QJsonDocument(payload).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid, trimmed, tempGuid, finalizeSentMessage, sendViaNewChat, finishSendTrack]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid, trimmed, tempGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
             const QByteArray errBytes = reply->isOpen() ? reply->readAll() : QByteArray();
@@ -5552,6 +5663,12 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
             const bool chatMissing = (status == 404 || errBytes.contains("Chat does not exist") || errBytes.contains("chat does not exist"));
             if (chatMissing && chatGuid.contains(QStringLiteral(";-;"))) {
                 sendViaNewChat();
+                return;
+            }
+            if (errBytes.contains("Message send failed") || reply->error() == QNetworkReply::TimeoutError) {
+                markOptimisticFailed();
+                loadChatMessages(chatGuid);
+                finishSendTrack();
                 return;
             }
 
@@ -5563,20 +5680,23 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
             fallback.insert(QStringLiteral("method"), QStringLiteral("apple-script"));
             QNetworkRequest req2 = makeRequest(QStringLiteral("/api/v1/message/text"));
             req2.setPriority(QNetworkRequest::HighPriority);
-            req2.setTransferTimeout(10000);
+            req2.setTransferTimeout(15000);
             QNetworkReply *r2 = m_sendNam.post(req2, QJsonDocument(fallback).toJson(QJsonDocument::Compact));
-            connect(r2, &QNetworkReply::finished, this, [this, r2, chatGuid, finalizeSentMessage, sendViaNewChat, finishSendTrack]() {
+            connect(r2, &QNetworkReply::finished, this, [this, r2, chatGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
                 r2->deleteLater();
                 if (r2->error() != QNetworkReply::NoError) {
-                    if (chatGuid.contains(QStringLiteral(";-;"))) {
+                    const QByteArray r2Err = r2->isOpen() ? r2->readAll() : QByteArray();
+                    if (!r2Err.contains("Message send failed") && chatGuid.contains(QStringLiteral(";-;"))) {
                         sendViaNewChat();
                         return;
                     }
+                    markOptimisticFailed();
                     loadChatMessages(chatGuid);
                     finishSendTrack();
                     return;
                 }
                 if (!finalizeSentMessage(r2->readAll())) {
+                    markOptimisticFailed();
                     loadChatMessages(chatGuid);
                 }
                 finishSendTrack();
@@ -5585,6 +5705,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         }
 
         if (!finalizeSentMessage(reply->readAll())) {
+            markOptimisticFailed();
             loadChatMessages(chatGuid);
         }
         finishSendTrack();
@@ -6136,6 +6257,7 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     };
     QVariantMap optimistic;
     optimistic.insert(QStringLiteral("guid"), tempGuid);
+    optimistic.insert(QStringLiteral("chatGuid"), chatGuid);
     optimistic.insert(QStringLiteral("text"), caption.trimmed());
     optimistic.insert(QStringLiteral("formattedText"), formatMessageTextWithLinks(caption.trimmed()));
     optimistic.insert(QStringLiteral("isFromMe"), true);
@@ -6158,9 +6280,11 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     }
     optimistic.insert(QStringLiteral("receiptText"), m_demoMode ? QStringLiteral("Delivered") : QStringLiteral("Sending..."));
     optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), QDateTime::currentMSecsSinceEpoch());
-    emit aboutToChangeMessages();
-    m_messages.append(optimistic);
-    emit messagesChanged();
+    if (chatGuid == m_selectedChatGuid) {
+        emit aboutToChangeMessages();
+        m_messages.append(optimistic);
+        emit messagesChanged();
+    }
     emit toastMessage(QStringLiteral("📎 Sending %1...").arg(fi.fileName()));
     if (m_demoMode || m_serverUrl.isEmpty()) return;
     QHttpMultiPart *multiPart = new QHttpMultiPart(QHttpMultiPart::FormDataType);
@@ -7772,6 +7896,7 @@ void Backend::sendMessageWithEffect(const QString &text, const QString &effectId
 
     QVariantMap optimistic;
     optimistic.insert(QStringLiteral("guid"), tempGuid);
+    optimistic.insert(QStringLiteral("chatGuid"), m_selectedChatGuid);
     optimistic.insert(QStringLiteral("text"), trimmed);
     optimistic.insert(QStringLiteral("formattedText"), formatMessageTextWithLinks(trimmed));
     optimistic.insert(QStringLiteral("verificationCode"), extractVerificationCode(trimmed));

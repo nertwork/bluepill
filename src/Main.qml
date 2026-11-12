@@ -18,6 +18,8 @@ ApplicationWindow {
     property string replyTargetGuid: ""
     property string replyTargetSender: ""
     property string replyTargetText: ""
+    property var chatDrafts: ({})
+    property string lastDraftChatGuid: ""
     property string hoveredActionMessageGuid: ""
     property string pinnedActionMessageGuid: ""
     readonly property string activeActionMessageGuid: pinnedActionMessageGuid !== "" ? pinnedActionMessageGuid : hoveredActionMessageGuid
@@ -520,6 +522,22 @@ ApplicationWindow {
         }
         function onSelectedChatChanged() {
             root.clearActionMenu()
+            root.replyTargetGuid = ""
+            root.replyTargetSender = ""
+            root.replyTargetText = ""
+            var newGuid = backend.selectedChatGuid || ""
+            if (root.lastDraftChatGuid !== "" && root.lastDraftChatGuid !== newGuid) {
+                var drafts = root.chatDrafts || ({})
+                drafts[root.lastDraftChatGuid] = composerInput.text
+                root.chatDrafts = drafts
+            }
+            if (root.lastDraftChatGuid !== newGuid) {
+                root.lastDraftChatGuid = newGuid
+                var savedDraft = (root.chatDrafts && newGuid !== "" && root.chatDrafts[newGuid] !== undefined) ? root.chatDrafts[newGuid] : ""
+                if (composerInput.text !== savedDraft) {
+                    composerInput.text = savedDraft
+                }
+            }
         }
         function onContactsChanged() {
             if (root.showNewChatModal) root.refreshNewChatSuggestions()
@@ -1622,8 +1640,10 @@ ApplicationWindow {
                                             if (mouse.button === Qt.RightButton) {
                                                 backend.togglePinChat(modelData.guid)
                                             } else {
-                                                backend.selectChat(modelData.guid)
-                                                root.focusAndScrollChat()
+                                                var win = root
+                                                var pinGuid = modelData.guid
+                                                backend.selectChat(pinGuid)
+                                                if (win) Qt.callLater(function() { win.focusAndScrollChat() })
                                             }
                                         }
                                     }
@@ -1843,7 +1863,7 @@ ApplicationWindow {
                                     var win = root
                                     chatContextMenuPopup.visible = false
                                     backend.selectChat(chatGuid)
-                                    root.focusAndScrollChat()
+                                    if (win) Qt.callLater(function() { win.focusAndScrollChat() })
                                 }
                             }
                         }
@@ -3305,6 +3325,7 @@ ApplicationWindow {
                     delegate: ColumnLayout {
                         id: msgDelegate
                         required property var modelData
+                        required property int index
                         property bool invisibleInkRevealed: false
                         readonly property bool isInvisibleInkMsg: (modelData.expressiveEffect === "🕵️ Invisible Ink") || ((modelData.sendEffectLabel || "").toLowerCase().indexOf("invisible ink") !== -1)
                         readonly property bool isAnyPartHovered: (bubbleHover.hovered || (typeof msgTextHover !== "undefined" && msgTextHover.hovered) || actionZoneHover.hovered || actionBarHover.hovered || (typeof invisibleInkMouse !== "undefined" && invisibleInkMouse.containsMouse))

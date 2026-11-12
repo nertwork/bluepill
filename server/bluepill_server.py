@@ -470,6 +470,7 @@ class BluePillEngine:
         self._load_deleted_state()
         self._load_chat_state()
         self._load_scheduled_messages()
+        self.enable_background_daemons = enable_background_daemons
         self.logger, self.log_file_path = setup_logging(log_to_stderr=enable_background_daemons)
         self._load_module_config()
 
@@ -690,10 +691,25 @@ class BluePillEngine:
                 except OSError:
                     pass
 
+        # 4. Messages.app & Private API helper dylib preflight on macOS
+        helper_dylib_path = "/Library/Application Support/BlueBubbles/BlueBubblesHelper.dylib"
+        helper_src_path = "/Applications/BlueBubbles.app/Contents/Resources/appResources/private-api/macos11/BlueBubblesHelper.dylib"
+        helper_dylib_installed = os.path.exists(helper_dylib_path)
+        if sys.platform == "darwin" and not helper_dylib_installed and fix and os.path.exists(helper_src_path):
+            try:
+                os.makedirs(os.path.dirname(helper_dylib_path), exist_ok=True)
+                shutil.copy2(helper_src_path, helper_dylib_path)
+                os.chmod(helper_dylib_path, 0o755)
+                helper_dylib_installed = True
+                actions_taken.append(f"Installed {helper_dylib_path}")
+            except OSError as exc:
+                warnings.append(f"BlueBubblesHelper.dylib missing at {helper_dylib_path}: {exc}")
+
         status_str = "ok" if not warnings else "warn"
         return {
             "status": status_str,
             "platform": sys.platform,
+            "privateApiHelperDylib": helper_dylib_installed,
             "modules": {
                 "notes": {
                     "enabled": self.enable_notes,
@@ -1025,6 +1041,9 @@ class BluePillEngine:
                 if cur_max > self._last_max_rowid:
                     prev_max = self._last_max_rowid
                     new_msgs = self.query_messages({"limit": min(25, cur_max - prev_max), "sort": "DESC"})
+                    if any(int(m.get("originalROWID") or 0) > prev_max and not m.get("chats") for m in new_msgs):
+                        time.sleep(0.18)
+                        new_msgs = self.query_messages({"limit": min(25, cur_max - prev_max), "sort": "DESC"})
                     self._last_max_rowid = cur_max
                     emitted = 0
                     for m in reversed(new_msgs):
@@ -1064,24 +1083,19 @@ class BluePillEngine:
         with self._helper_lock:
             if self._helper_clients:
                 return True
+        if getattr(self, "enable_background_daemons", False):
+            return False
         if sys.platform == "darwin":
             try:
                 out = subprocess.check_output(
-                    ["/usr/bin/pgrep", "-x", "Messages"],
-                    timeout=1.0,
+                    ["/usr/sbin/lsof", "-nP", f"-iTCP:{self.helper_port}", "-sTCP:ESTABLISHED"],
+                    timeout=1.5,
                     stderr=subprocess.DEVNULL,
-                )
-                if out.strip():
+                ).decode("utf-8", errors="replace")
+                if "Messages" in out:
                     return True
             except Exception:
                 pass
-        for port in (self.helper_port, 45670):
-            for host in ("127.0.0.1", "::1"):
-                try:
-                    with socket.create_connection((host, port), timeout=0.15):
-                        return True
-                except OSError:
-                    pass
         return False
 
     def get_detected_imessage_account(self) -> str:
@@ -1593,6 +1607,42 @@ class BluePillEngine:
 
             assoc_type = r["associated_message_type"]
             row_guid = r["guid"] or ""
+            row_keys = set(r.keys())
+            cache_room = (r["cache_roomnames"] if "cache_roomnames" in row_keys else "") or ""
+            msg_chats = list(chats_by_msg.get(mid, []))
+            if not msg_chats and cache_room:
+                try:
+                    cr_fb = conn.execute(
+                        "SELECT ROWID AS chat_rowid, guid, chat_identifier, display_name, style, is_archived, last_read_message_timestamp FROM chat WHERE chat_identifier = ? OR room_name = ? LIMIT 1",
+                        (cache_room, cache_room),
+                    ).fetchone()
+                    if cr_fb:
+                        msg_chats.append(
+                            {
+                                "originalROWID": int(cr_fb["chat_rowid"]),
+                                "guid": cr_fb["guid"] or "",
+                                "chatIdentifier": cr_fb["chat_identifier"] or "",
+                                "displayName": cr_fb["display_name"] or "",
+                                "style": int(cr_fb["style"] or 43),
+                                "isArchived": bool(cr_fb["is_archived"]),
+                                "lastReadMessageTimestamp": apple_ts_to_epoch_ms(cr_fb["last_read_message_timestamp"]),
+                            }
+                        )
+                except sqlite3.Error:
+                    pass
+                if not msg_chats:
+                    svc_prefix = r["service"] or "iMessage"
+                    msg_chats.append(
+                        {
+                            "originalROWID": 0,
+                            "guid": f"{svc_prefix};+;{cache_room}",
+                            "chatIdentifier": cache_room,
+                            "displayName": r["group_title"] or "",
+                            "style": 43,
+                            "isArchived": False,
+                            "lastReadMessageTimestamp": 0,
+                        }
+                    )
             msg_dict: Dict[str, Any] = {
                 "originalROWID": mid,
                 "guid": row_guid,
@@ -1602,7 +1652,8 @@ class BluePillEngine:
                 "handleId": int(r["handle_id"] or 0),
                 "handle": handle_obj,
                 "otherHandle": int(r["other_handle"] or 0),
-                "chats": chats_by_msg.get(mid, []),
+                "chats": msg_chats,
+                "cacheRoomnames": cache_room,
                 "attachments": atts_by_msg.get(mid, []),
                 "error": int(r["error"] or 0),
                 "dateCreated": apple_ts_to_epoch_ms(r["date"]),
@@ -1694,12 +1745,12 @@ class BluePillEngine:
                     sub_parts = re.split(r"\s+AND\s+", stmt, flags=re.IGNORECASE)
                     for sp in sub_parts:
                         m = re.match(
-                            r"^\s*([a-zA-Z0-9_.]+)\s*=\s*:([a-zA-Z0-9_]+)\s*$",
+                            r"^\s*([a-zA-Z0-9_.]+)\s*(=|>|>=|<|<=)\s*:([a-zA-Z0-9_]+)\s*$",
                             sp.strip(),
                         )
-                        if m and m.group(1) in allowed_cols and m.group(2) in args:
-                            clauses.append(f"{allowed_cols[m.group(1)]} = ?")
-                            params.append(args[m.group(2)])
+                        if m and m.group(1) in allowed_cols and m.group(3) in args:
+                            clauses.append(f"{allowed_cols[m.group(1)]} {m.group(2)} ?")
+                            params.append(args[m.group(3)])
 
             join_sql = ""
             if join_chat:
@@ -1729,8 +1780,9 @@ class BluePillEngine:
                 ("is_audio_message", "0"),
                 ("is_archive", "0"),
                 ("other_handle", "0"),
-                ("group_title", ""),
+                ("group_title", "''"),
                 ("group_action_type", "0"),
+                ("cache_roomnames", "''"),
             ]
             select_exprs = [
                 "message.ROWID AS ROWID",
@@ -2004,7 +2056,7 @@ class BluePillEngine:
             '  set targetFile to item 5 of argv',
             '  tell application "Messages"',
             '    try',
-            '      set targetChat to a reference to chat id targetChatGuid',
+            '      set targetChat to chat id targetChatGuid',
             '      if targetFile is not "" then',
             '        set theAttachment to targetFile as POSIX file',
             '        send theAttachment to targetChat',
@@ -2014,11 +2066,19 @@ class BluePillEngine:
             '        send targetMessage to targetChat',
             '      end if',
             '    on error',
-            '      if targetService is "SMS" then',
-            '        set targetAcct to 1st account whose service type = SMS',
-            '      else',
-            '        set targetAcct to 1st account whose service type = iMessage',
-            '      end if',
+            '      try',
+            '        if targetService is "SMS" then',
+            '          set targetAcct to account of (first chat whose id starts with "SMS;")',
+            '        else',
+            '          set targetAcct to account of (first chat whose id starts with "iMessage;")',
+            '        end if',
+            '      on error',
+            '        if targetService is "SMS" then',
+            '          set targetAcct to 1st account whose service type = SMS',
+            '        else',
+            '          set targetAcct to 1st account whose service type = iMessage',
+            '        end if',
+            '      end try',
             '      set theBuddy to participant targetBuddy of targetAcct',
             '      if targetFile is not "" then',
             '        set theAttachment to targetFile as POSIX file',
@@ -2046,7 +2106,7 @@ class BluePillEngine:
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                timeout=20.0,
+                timeout=8.0,
                 check=False,
             )
             if res.returncode != 0:
@@ -2140,9 +2200,13 @@ class BluePillEngine:
                         continue
                     if helper_guid and m_guid == helper_guid:
                         pass
-                    elif expected_text and str(m.get("text") or "").strip() != expected_text.strip():
-                        if not require_attachment:
+                    else:
+                        m_chats = m.get("chats") or []
+                        if chat_guid and m_chats and not any(c.get("guid") == chat_guid for c in m_chats):
                             continue
+                        if expected_text and str(m.get("text") or "").strip() != expected_text.strip():
+                            if not require_attachment:
+                                continue
                     if temp_guid and m_guid:
                         self.temp_guid_by_guid[m_guid] = temp_guid
                         m["tempGuid"] = temp_guid
@@ -2239,16 +2303,26 @@ class BluePillEngine:
             self.broadcast_socketio("new-message", db_msg)
             return db_msg
 
+        if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
+            self.logger.warning(
+                "[send_text] FAILED chat=%s tempGuid=%s method=%s elapsed_ms=%d",
+                chat_guid,
+                temp_guid,
+                used_method,
+                elapsed_ms,
+            )
+            raise RuntimeError(f"Message send failed for {chat_guid}")
+
         now_ms = int(time.time() * 1000)
         resolved_guid = helper_guid or temp_guid
-        if effect_id and resolved_guid:
+        if effect_id and resolved_guid and not resolved_guid.startswith("temp-"):
             self.chat_state.setdefault("messageEffects", {})[resolved_guid] = effect_id
             self.message_effects[resolved_guid] = effect_id
             self._save_chat_state()
         if helper_guid and temp_guid:
             self.temp_guid_by_guid[helper_guid] = temp_guid
         msg_obj: Dict[str, Any] = {
-            "originalROWID": int(now_ms % 1_000_000_000),
+            "originalROWID": self._get_max_message_rowid(),
             "guid": resolved_guid,
             "tempGuid": temp_guid,
             "text": message,
@@ -2257,7 +2331,7 @@ class BluePillEngine:
             "handle": None,
             "chats": [{"guid": chat_guid}],
             "attachments": [],
-            "error": 0 if (sent or sys.platform != "darwin") else 4,
+            "error": 0,
             "dateCreated": now_ms,
             "dateRead": 0,
             "dateDelivered": 0,
@@ -2279,9 +2353,6 @@ class BluePillEngine:
             resolved_guid,
             elapsed_ms,
         )
-        self._sent_history.append(msg_obj)
-        if len(self._sent_history) > 200:
-            self._sent_history = self._sent_history[-200:]
         self._sent_history.append(msg_obj)
         if len(self._sent_history) > 200:
             self._sent_history = self._sent_history[-200:]
@@ -2434,12 +2505,22 @@ class BluePillEngine:
             self.broadcast_socketio("new-message", db_msg)
             return db_msg
 
+        if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
+            self.logger.warning(
+                "[send_attachment] FAILED chat=%s tempGuid=%s file=%s elapsed_ms=%d",
+                chat_guid,
+                temp_guid,
+                safe_name,
+                elapsed_ms,
+            )
+            raise RuntimeError(f"Attachment send failed for {chat_guid}")
+
         now_ms = int(time.time() * 1000)
         resolved_guid = helper_guid or f"msg-{folder_uuid}"
         if temp_guid:
             self.temp_guid_by_guid[resolved_guid] = temp_guid
         msg_obj: Dict[str, Any] = {
-            "originalROWID": int(now_ms % 1_000_000_000),
+            "originalROWID": self._get_max_message_rowid(),
             "guid": resolved_guid,
             "tempGuid": temp_guid,
             "text": caption,
@@ -6238,7 +6319,10 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/message/attachment":
             fields = self._read_multipart_form()
-            self._send_json(200, self.engine.send_attachment(fields), "Attachment sent")
+            try:
+                self._send_json(200, self.engine.send_attachment(fields), "Attachment sent")
+            except RuntimeError as exc:
+                self._send_json(500, None, str(exc))
             return
 
         raw_body = self._read_json_body()
@@ -6267,9 +6351,14 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             service = str(body.get("service") or "iMessage")
             chat_guid = f"{service};-;{first_addr}" if first_addr else ""
             msg_text = str(body.get("message") or "").strip()
+            sent_msgs = []
             if chat_guid and msg_text:
-                self.engine.send_text({"chatGuid": chat_guid, "message": msg_text})
-            self._send_json(200, {"guid": chat_guid, "chatIdentifier": first_addr, "participants": [{"address": first_addr}]})
+                try:
+                    sent_msgs.append(self.engine.send_text({"chatGuid": chat_guid, "message": msg_text}))
+                except RuntimeError as exc:
+                    self._send_json(500, None, str(exc))
+                    return
+            self._send_json(200, {"guid": chat_guid, "chatIdentifier": first_addr, "participants": [{"address": first_addr}], "messages": sent_msgs})
             return
 
         if path == "/api/v1/message/query":
@@ -6281,7 +6370,10 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             return
 
         if path in ("/api/v1/message/text", "/api/v1/message/multipart"):
-            self._send_json(200, self.engine.send_text(body))
+            try:
+                self._send_json(200, self.engine.send_text(body))
+            except RuntimeError as exc:
+                self._send_json(500, None, str(exc))
             return
 
         if path == "/api/v1/message/react":
