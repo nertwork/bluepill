@@ -35,12 +35,12 @@ def convert_and_embed_html(md_path: str, html_path: str) -> bool:
     # Update TOC
     aside_regex = r"(<aside class=\"sidebar\">[\s\S]*?<div class=\"sidebar-title\">Table of Contents</div>\s*<div class=\"toc\">\s*)<div class=\"toc\">[\s\S]*?</div>(\s*</div>\s*</aside>)"
     if re.search(aside_regex, html_page):
-        html_page = re.sub(aside_regex, r"\g<1>" + toc_html + r"\g<2>", html_page)
+        html_page = re.sub(aside_regex, lambda m: m.group(1) + toc_html + m.group(2), html_page)
 
     # Update body in <main class="doc-content">
     main_regex = r"(<main class=\"doc-content\">\s*<div class=\"doc-banner\">[\s\S]*?</div>\s*)<h1 id=[\s\S]*?(</main>)"
     if re.search(main_regex, html_page):
-        html_page = re.sub(main_regex, r"\g<1>" + body_html + "\n        " + r"\g<2>", html_page)
+        html_page = re.sub(main_regex, lambda m: m.group(1) + body_html + "\n        " + m.group(2), html_page)
 
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_page)
