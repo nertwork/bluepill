@@ -466,8 +466,8 @@ class BluePillEngine:
         self.message_effects: Dict[str, str] = {}
         self._recent_effects: Dict[Tuple[str, str], Tuple[float, str]] = {}
         self._scheduled_lock = threading.Lock()
-        self._cancelled_scheduled_ids: Set[str] = set()
-        self._inflight_scheduled_ids: Set[str] = set()
+        self._cancelled_scheduled_ids: set[str] = set()
+        self._inflight_scheduled_ids: set[str] = set()
         self._sent_history: List[Dict[str, Any]] = []
         self._load_deleted_state()
         self._load_chat_state()
@@ -4500,7 +4500,23 @@ class BluePillEngine:
                         found_local = True
                         max_existing_ts = max(max_existing_ts, int(n.get("updatedAtMs") or 0))
 
-            if not found_local and clean_id not in del_map:
+            found_in_notestore = False
+            macos_notes_db = os.path.expanduser("~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")
+            if not found_local and clean_id not in del_map and os.path.exists(macos_notes_db):
+                try:
+                    conn = sqlite3.connect(f"file:{macos_notes_db}?mode=ro", uri=True)
+                    try:
+                        row = conn.execute(
+                            "SELECT 1 FROM ZICCLOUDSYNCINGOBJECT WHERE ZIDENTIFIER = ? LIMIT 1",
+                            (clean_id,),
+                        ).fetchone()
+                        found_in_notestore = row is not None
+                    finally:
+                        conn.close()
+                except sqlite3.Error:
+                    found_in_notestore = False
+
+            if not found_local and not found_in_notestore and clean_id not in del_map:
                 if raise_on_missing:
                     raise PermissionError(f"Cannot delete read-only or non-local note: {clean_id}")
                 return self.query_icloud_notes()
@@ -5432,7 +5448,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
   <div id="notesModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
     <div id="notesModalCard" style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:780px;max-width:88vw;height:520px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);gap:10px;">
-        <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📝 iCloud (Read-Only) & Local Hub Notes</span>
+        <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📝 iCloud & Local Hub Notes</span>
         <div style="display:flex;align-items:center;gap:8px;">
           <label style="font-size:12px;color:var(--muted);">Per page:</label>
           <select id="notesPageSizeSelect" onchange="changeNotesPageSize(this.value)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
@@ -5487,7 +5503,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div id="calendarModalCard" style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:740px;max-width:88vw;height:500px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);gap:10px;">
         <div style="display:flex;align-items:center;gap:12px;">
-          <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📅 iCloud (Read-Only) & Local Hub Calendar</span>
+          <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📅 iCloud & Local Hub Calendar</span>
           <button onclick="downloadCalendarIcs()" style="background:#212832;color:var(--accent2);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">📥 Download .ics</button>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
@@ -5684,8 +5700,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       }
       const delBtn = document.getElementById('deleteNoteBtn');
       if (delBtn) {
-        const isLocal = Boolean(n && (!n.syncSource || n.syncSource === 'local_hub'));
-        delBtn.style.display = isLocal ? 'inline-block' : 'none';
+        delBtn.style.display = n ? 'inline-block' : 'none';
       }
       renderNotesList();
     }

@@ -5502,19 +5502,24 @@ ApplicationWindow {
                     id: noteDetailHeadlineText
                     objectName: "noteDetailHeadlineText"
                     Layout.fillWidth: true
+                    Layout.preferredWidth: 0
+                    Layout.minimumWidth: 80
                     visible: noteDetailTitleInput.text.trim().length > 0
                     text: noteDetailTitleInput.text.trim()
                     font.bold: true
-                    font.pixelSize: theme.fontSize + 8
+                    font.pixelSize: theme.fontSize + 6
                     color: theme.brightForeground
-                    wrapMode: Text.WordWrap
-                    maximumLineCount: 2
+                    maximumLineCount: 1
                     elide: Text.ElideRight
                 }
 
                 Rectangle {
                     height: 28
                     width: syncBadgeText.implicitWidth + 16
+                    Layout.preferredWidth: syncBadgeText.implicitWidth + 16
+                    Layout.minimumWidth: syncBadgeText.implicitWidth + 16
+                    Layout.preferredHeight: 28
+                    Layout.alignment: Qt.AlignVCenter
                     radius: 14
                     color: noteDetailWindow.noteSyncSource === "apple_notes_ro"
                            ? Qt.rgba(theme.green.r, theme.green.g, theme.green.b, 0.18)
@@ -5524,7 +5529,7 @@ ApplicationWindow {
                     Text {
                         id: syncBadgeText
                         anchors.centerIn: parent
-                        text: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "🍏 Apple Notes (iCloud)" : "📝 Local Hub Note"
+                        text: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "🍏 iCloud Note (R/W)" : "📝 Local Hub Note"
                         font.pixelSize: 11
                         font.bold: true
                         color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
@@ -5534,6 +5539,9 @@ ApplicationWindow {
                 Button {
                     id: noteDetailFullScreenBtn
                     objectName: "noteDetailFullScreenBtn"
+                    Layout.preferredWidth: implicitWidth
+                    Layout.minimumWidth: implicitWidth
+                    Layout.alignment: Qt.AlignVCenter
                     text: noteDetailWindow.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen"))
                     onClicked: noteDetailWindow.isFullScreen = !noteDetailWindow.isFullScreen
                 }
@@ -5541,7 +5549,6 @@ ApplicationWindow {
 
             RowLayout {
                 Layout.fillWidth: true
-                visible: noteDetailWindow.noteSyncSource !== "apple_notes_ro"
                 spacing: 10
 
                 TextField {
@@ -5772,12 +5779,10 @@ ApplicationWindow {
                 spacing: 8
 
                 Button {
-                    text: noteDetailWindow.noteSyncSource === "apple_notes_ro"
-                          ? ("📋 " + i18n.tr("Copy to Local Hub"))
-                          : ("💾 " + i18n.tr("Save Note"))
+                    text: "💾 " + i18n.tr("Save Note")
                     onClicked: {
-                        var isCopy = noteDetailWindow.noteSyncSource === "apple_notes_ro"
-                        var targetId = isCopy ? "" : noteDetailWindow.noteId
+                        var isCopy = false
+                        var targetId = noteDetailWindow.noteId
                         if (targetId !== "" && (noteDetailWindow.noteHasServerConflict || noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision)) {
                             root.showToast(i18n.tr("Server conflict paused (rev %1). Choose Reload Latest, Save as Copy, or Overwrite.").arg(noteDetailWindow.noteConflictServerRevision))
                             return
@@ -5901,9 +5906,9 @@ ApplicationWindow {
 
                 Button {
                     text: "🗑 " + i18n.tr("Delete")
-                    enabled: noteDetailWindow.noteId !== "" && noteDetailWindow.noteSyncSource !== "apple_notes_ro"
+                    enabled: noteDetailWindow.noteId !== ""
                     onClicked: {
-                        if (noteDetailWindow.noteSyncSource === "apple_notes_ro") return
+                        if (noteDetailWindow.noteId === "") return
                         var deletedId = noteDetailWindow.noteId
                         backend.deleteIcloudNote(deletedId)
                         noteDetailWindow.noteId = ""
@@ -6111,7 +6116,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 spacing: 8
                 Text {
-                    text: "📝 " + i18n.tr("iCloud (Read-Only) & Local Hub Notes")
+                    text: "📝 " + i18n.tr("iCloud & Local Hub Notes")
                     font.pixelSize: theme.fontSize + 2
                     font.bold: true
                     color: theme.brightForeground
@@ -6333,18 +6338,23 @@ ApplicationWindow {
                                 id: notePopupHeadlineText
                                 objectName: "notePopupHeadlineText"
                                 Layout.fillWidth: true
+                                Layout.preferredWidth: 0
+                                Layout.minimumWidth: 60
                                 text: noteTitleInput.text.trim().length > 0 ? noteTitleInput.text.trim() : i18n.tr("Untitled Note")
                                 font.bold: true
-                                font.pixelSize: theme.fontSize + 4
+                                font.pixelSize: theme.fontSize + 3
                                 color: theme.brightForeground
-                                wrapMode: Text.WordWrap
-                                maximumLineCount: 2
+                                maximumLineCount: 1
                                 elide: Text.ElideRight
                             }
 
                             Rectangle {
                                 height: 24
                                 width: sideSyncBadgeTxt.implicitWidth + 14
+                                Layout.preferredWidth: sideSyncBadgeTxt.implicitWidth + 14
+                                Layout.minimumWidth: sideSyncBadgeTxt.implicitWidth + 14
+                                Layout.preferredHeight: 24
+                                Layout.alignment: Qt.AlignVCenter
                                 radius: 12
                                 color: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro"
                                        ? Qt.rgba(theme.green.r, theme.green.g, theme.green.b, 0.18)
@@ -6354,7 +6364,7 @@ ApplicationWindow {
                                 Text {
                                     id: sideSyncBadgeTxt
                                     anchors.centerIn: parent
-                                    text: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro" ? "🍏 Apple Notes" : "📝 Local Hub"
+                                    text: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro" ? "🍏 iCloud (R/W)" : "📝 Local Hub"
                                     font.pixelSize: 11
                                     font.bold: true
                                     color: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
@@ -6364,6 +6374,11 @@ ApplicationWindow {
                             Button {
                                 id: notePopOutBtn
                                 objectName: "notePopOutBtn"
+                                Layout.preferredWidth: implicitWidth
+                                Layout.minimumWidth: implicitWidth
+                                Layout.alignment: Qt.AlignVCenter
+                                rightPadding: 10
+                                leftPadding: 10
                                 text: "⤢ " + i18n.tr("Pop Out")
                                 enabled: icloudNotesPopup.selectedNoteId !== "" || noteTitleInput.text.trim().length > 0 || noteBodyInput.text.trim().length > 0
                                 onClicked: icloudNotesPopup.popOutCurrentNote()
@@ -6372,7 +6387,6 @@ ApplicationWindow {
 
                         RowLayout {
                             Layout.fillWidth: true
-                            visible: icloudNotesPopup.selectedNoteSyncSource !== "apple_notes_ro"
                             spacing: 8
                             TextField {
                                 id: noteTitleInput
@@ -6427,7 +6441,7 @@ ApplicationWindow {
                                 objectName: "noteBodyInput"
                                 placeholderText: i18n.tr("Write note content here...")
                                 placeholderTextColor: theme.darkForeground
-                                readOnly: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro"
+                                readOnly: false
                                 color: theme.brightForeground
                                 wrapMode: TextArea.Wrap
                                 selectByMouse: true
@@ -6621,12 +6635,10 @@ ApplicationWindow {
                             spacing: 6
 
                             Button {
-                                text: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro"
-                                      ? ("📋 " + i18n.tr("Copy to Local Hub"))
-                                      : ("💾 " + i18n.tr("Save"))
+                                text: "💾 " + i18n.tr("Save")
                                 onClicked: {
-                                    var isCopy = icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro"
-                                    var targetId = isCopy ? "" : icloudNotesPopup.selectedNoteId
+                                    var isCopy = false
+                                    var targetId = icloudNotesPopup.selectedNoteId
                                     if (targetId !== "" && (icloudNotesPopup.selectedNoteHasServerConflict ||
                                                             icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision)) {
                                         root.showToast(i18n.tr("Server conflict paused (rev %1). Choose Reload Server, Save as Copy, or Overwrite Server.").arg(icloudNotesPopup.selectedNoteConflictServerRevision))
@@ -6740,9 +6752,9 @@ ApplicationWindow {
 
                             Button {
                                 text: "🗑 " + i18n.tr("Delete")
-                                enabled: icloudNotesPopup.selectedNoteId !== "" && icloudNotesPopup.selectedNoteSyncSource !== "apple_notes_ro"
+                                enabled: icloudNotesPopup.selectedNoteId !== ""
                                 onClicked: {
-                                    if (icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro") return
+                                    if (icloudNotesPopup.selectedNoteId === "") return
                                     var deletedPopupId = icloudNotesPopup.selectedNoteId
                                     backend.deleteIcloudNote(deletedPopupId)
                                     icloudNotesPopup.selectedNoteId = ""
@@ -6855,7 +6867,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 spacing: 8
                 Text {
-                    text: "📅 " + i18n.tr("iCloud (Read-Only) & Local Hub Calendar")
+                    text: "📅 " + i18n.tr("iCloud & Local Hub Calendar")
                     font.pixelSize: theme.fontSize + 3
                     font.bold: true
                     color: theme.brightForeground

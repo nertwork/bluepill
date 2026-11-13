@@ -3394,6 +3394,8 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("objectName: \"photosPageSizeSelector\"")));
         QVERIFY(qml.contains(QStringLiteral("objectName: \"noteSideDetailPane\"")));
         QVERIFY(qml.contains(QStringLiteral("objectName: \"notePopOutBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("iCloud & Local Hub Notes")));
+        QVERIFY(!qml.contains(QStringLiteral("iCloud (Read-Only) & Local Hub Notes")));
         // Verify high-contrast dark green RCS/SMS sent bubble palette (#1B6E38 background, #268C48 border, #CBEFD8 metadata)
         QVERIFY(qml.contains(QStringLiteral("readonly property bool isGreenService:")));
         QVERIFY(qml.contains(QStringLiteral("#1B6E38")));
