@@ -435,12 +435,18 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#environment-variables">Environment Variables</a></li>
 </ul>
 </li>
-<li><a href="#2-headless-cli-commands-bluepill-imsg">2. Headless CLI Commands (bluepill &amp; imsg)</a></li>
-<li><a href="#3-keyboard-shortcuts">3. Keyboard Shortcuts</a></li>
+<li><a href="#2-desktop-state-preferences-configbluepillstatejson">2. Desktop State &amp; Preferences (~/.config/bluepill/state.json)</a><ul>
+<li><a href="#notification-audio-preferences">Notification &amp; Audio Preferences</a></li>
+<li><a href="#icloud-hub-module-toggles">iCloud Hub Module Toggles</a></li>
+</ul>
+</li>
+<li><a href="#3-headless-cli-commands-bluepill-imsg">3. Headless CLI Commands (bluepill &amp; imsg)</a></li>
+<li><a href="#4-keyboard-shortcuts">4. Keyboard Shortcuts</a></li>
 </ul>
 </li>
 </ul>
 </div>
+
 
             </div>
         </aside>
@@ -460,20 +466,19 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <h2 id="1-configuration-file-auto-migration">1. Configuration File &amp; Auto-Migration</h2>
 <p><code>BluePill</code> stores its server configuration in <code>~/.config/bluepill/config.json</code> with strict <code>0600</code> (<code>-rw-------</code>) owner-only permissions.
 - <strong>Automatic Migration from <code>imsg</code>:</strong> If <code>~/.config/bluepill/config.json</code> does not exist on first launch and <code>~/.config/imsg/config.json</code> is present, <code>BluePill</code> automatically migrates your configuration and credentials seamlessly.
-- <strong>GUI Server Setup (<code>Ctrl+,</code>):</strong> Press <code>Ctrl+,</code> or click <strong><code>⚙ Server</code></strong> in the top bar at any time to configure:
+- <strong>GUI Settings &amp; Server Setup (<code>Ctrl+,</code>):</strong> Press <code>Ctrl+,</code> or click <strong><code>⚙ Settings</code></strong> in the top bar at any time to configure:
   - <strong>Primary Server URL:</strong> <code>https://bluepill.example.com</code> (BluePill Relay or BlueBubbles Server) or <code>ssh://user@mac-host</code> (Direct SSH mode)
   - <strong>Failover Server URL (Optional):</strong> <code>https://backup-relay.example.com</code>
   - <strong>API Password / Key:</strong> Your relay password/token</p>
 <p>Example <code>~/.config/bluepill/config.json</code>:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span>
-<span class="w">  </span><span class="nt">"authMethod"</span><span class="p">:</span><span class="w"> </span><span class="s2">"tls-apikey"</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"password"</span><span class="p">:</span><span class="w"> </span><span class="s2">"your-api-password"</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"secondaryServerUrl"</span><span class="p">:</span><span class="w"> </span><span class="s2">"https://backup-relay.example.com"</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"serverUrl"</span><span class="p">:</span><span class="w"> </span><span class="s2">"https://bluepill.example.com"</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"tlsVerified"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
-<span class="p">}</span>
-</code></pre></div>
-
+<pre><code class="language-json">{
+  &quot;authMethod&quot;: &quot;tls-apikey&quot;,
+  &quot;password&quot;: &quot;your-api-password&quot;,
+  &quot;secondaryServerUrl&quot;: &quot;https://backup-relay.example.com&quot;,
+  &quot;serverUrl&quot;: &quot;https://bluepill.example.com&quot;,
+  &quot;tlsVerified&quot;: true
+}
+</code></pre>
 <h3 id="environment-variables">Environment Variables</h3>
 <table>
 <thead>
@@ -507,26 +512,59 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </tbody>
 </table>
 <hr />
-<h2 id="2-headless-cli-commands-bluepill-imsg">2. Headless CLI Commands (<code>bluepill</code> &amp; <code>imsg</code>)</h2>
-<p>Both <code>bluepill</code> and the backward-compatible <code>imsg</code> symlink support headless CLI operations:</p>
-<div class="codehilite"><pre><span></span><code><span class="c1"># Check relay connection health, macOS version, and Private API status</span>
-bluepill<span class="w"> </span>status<span class="w"> </span>--json
-
-<span class="c1"># Fetch recent messages across all conversations as JSON</span>
-bluepill<span class="w"> </span>recent<span class="w"> </span>--limit<span class="w"> </span><span class="m">15</span><span class="w"> </span>--json
-
-<span class="c1"># Send an iMessage, RCS, or SMS from the terminal or scripts</span>
-bluepill<span class="w"> </span>send<span class="w"> </span><span class="s2">"+14155550142"</span><span class="w"> </span><span class="s2">"Deployment finished!"</span><span class="w"> </span>--json
-
-<span class="c1"># Open the Built-In BluePill Web UI in your default browser</span>
-bluepill<span class="w"> </span>--webui
-
-<span class="c1"># Launch the GUI with synthetic demo conversations (no server required)</span>
-bluepill<span class="w"> </span>--demo
-</code></pre></div>
-
 <hr />
-<h2 id="3-keyboard-shortcuts">3. Keyboard Shortcuts</h2>
+<h2 id="2-desktop-state-preferences-configbluepillstatejson">2. Desktop State &amp; Preferences (<code>~/.config/bluepill/state.json</code>)</h2>
+<p><code>BluePill</code> stores runtime client preferences, notification presets, and module visibility toggles in <code>~/.config/bluepill/state.json</code>. These settings can be configured via the <strong><code>⚙ Settings</code> (<code>Ctrl+,</code>)</strong> modal in the UI or modified directly when the client is closed:</p>
+<h3 id="notification-audio-preferences">Notification &amp; Audio Preferences</h3>
+<ul>
+<li><strong><code>notificationsEnabled</code> (boolean, default: <code>true</code>):</strong> Enable or disable system desktop notifications for incoming messages.</li>
+<li><strong><code>notificationSoundEnabled</code> (boolean, default: <code>true</code>):</strong> Enable or disable the audio ding alert for incoming messages.</li>
+<li><strong><code>notificationMuteWhenActive</code> (boolean, default: <code>true</code>):</strong> Mutes audio and desktop notifications if the incoming message belongs to the conversation currently focused and active in the window.</li>
+<li><strong><code>notificationSoundPreset</code> (string, default: <code>"crystal_ding"</code>):</strong> Selects from 6 built-in synthesized <code>.wav</code> audio presets:</li>
+<li><code>"classic_chime"</code> — Traditional two-tone chime</li>
+<li><code>"crystal_ding"</code> — Crisp high-frequency crystal bell</li>
+<li><code>"tritone_marimba"</code> — Warm three-tone acoustic marimba</li>
+<li><code>"soft_pop"</code> — Subtle rounded tactile pop</li>
+<li><code>"glass_ping"</code> — High-clarity resonance ping</li>
+<li><code>"system_tone"</code> — Standard desktop alert tone</li>
+<li><strong>Startup Deduplication Baseline:</strong> On launch, BluePill records baseline sync state (<code>m_initialSyncComplete</code>, <code>m_startupTimestamp</code>, <code>m_startupHighestRowId</code>) and maintains a persistent cache of <code>notifiedMessageGuids</code> to eliminate spurious startup or historical sound alerts.</li>
+</ul>
+<h3 id="icloud-hub-module-toggles">iCloud Hub Module Toggles</h3>
+<ul>
+<li><strong><code>notesEnabled</code> (boolean, default: <code>true</code>):</strong> Toggle the Apple Notes tab and REST client.</li>
+<li><strong><code>calendarEnabled</code> (boolean, default: <code>true</code>):</strong> Toggle the Apple Calendar tab and REST client.</li>
+<li><strong><code>photosEnabled</code> (boolean, default: <code>true</code>):</strong> Toggle the macOS Photos.app gallery tab and REST client.</li>
+</ul>
+<p>Example <code>~/.config/bluepill/state.json</code>:</p>
+<pre><code class="language-json">{
+  &quot;calendarEnabled&quot;: true,
+  &quot;notesEnabled&quot;: true,
+  &quot;notificationMuteWhenActive&quot;: true,
+  &quot;notificationSoundEnabled&quot;: true,
+  &quot;notificationSoundPreset&quot;: &quot;crystal_ding&quot;,
+  &quot;notificationsEnabled&quot;: true,
+  &quot;photosEnabled&quot;: true
+}
+</code></pre>
+<h2 id="3-headless-cli-commands-bluepill-imsg">3. Headless CLI Commands (<code>bluepill</code> &amp; <code>imsg</code>)</h2>
+<p>Both <code>bluepill</code> and the backward-compatible <code>imsg</code> symlink support headless CLI operations:</p>
+<pre><code class="language-bash"># Check relay connection health, macOS version, and Private API status
+bluepill status --json
+
+# Fetch recent messages across all conversations as JSON
+bluepill recent --limit 15 --json
+
+# Send an iMessage, RCS, or SMS from the terminal or scripts
+bluepill send &quot;+14155550142&quot; &quot;Deployment finished!&quot; --json
+
+# Open the Built-In BluePill Web UI in your default browser
+bluepill --webui
+
+# Launch the GUI with synthetic demo conversations (no server required)
+bluepill --demo
+</code></pre>
+<hr />
+<h2 id="4-keyboard-shortcuts">4. Keyboard Shortcuts</h2>
 <table>
 <thead>
 <tr>
@@ -541,7 +579,7 @@ bluepill<span class="w"> </span>--demo
 </tr>
 <tr>
 <td style="text-align: left;"><code>Ctrl+,</code></td>
-<td style="text-align: left;">Open <strong>Server Configuration</strong> modal</td>
+<td style="text-align: left;">Open <strong>⚙ Settings</strong> modal</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>Ctrl+K</code> / <code>F1</code></td>
