@@ -37,8 +37,8 @@ jobs:
 
       - name: Checkout gh-pages Branch
         run: |
-          git fetch origin gh-pages
-          git worktree add /tmp/gh-pages origin/gh-pages
+          git fetch origin gh-pages:gh-pages
+          git worktree add /tmp/gh-pages gh-pages
 
       - name: Synchronize Documentation & Convert to HTML
         run: |
@@ -52,7 +52,7 @@ jobs:
           git add -A
           if ! git diff-index --quiet HEAD; then
             git commit -m "docs: auto-sync documentation and assets from main [skip ci]"
-            git push origin gh-pages
+            git push origin HEAD:refs/heads/gh-pages
           else
             echo "No documentation changes detected on gh-pages."
           fi
