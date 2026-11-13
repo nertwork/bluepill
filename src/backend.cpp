@@ -143,7 +143,9 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
     m_startupTimestamp = QDateTime::currentMSecsSinceEpoch();
     if (QClipboard *cb = QGuiApplication::clipboard()) {
         connect(cb, &QClipboard::dataChanged, this, [this]() {
-            ++m_clipboardCopySeq;
+            if (m_clipboardCopySeq) {
+                ++(*m_clipboardCopySeq);
+            }
         });
     }
     if (autoStart) {
@@ -1164,10 +1166,11 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
         QFile::setPermissions(cfgPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     }
 
-    const bool endpointReplaced = !m_serverUrl.isEmpty() && !normPrimary.isEmpty() &&
-                                  normPrimary != m_serverUrl && normPrimary != m_secondaryServerUrl &&
-                                  (normSecondary.isEmpty() || (normSecondary != m_serverUrl && normSecondary != m_secondaryServerUrl));
+    const bool endpointReplaced = !m_lastConfiguredBaseUrl.isEmpty() && !normPrimary.isEmpty() &&
+                                  m_lastConfiguredBaseUrl != normPrimary;
     if (endpointReplaced) {
+        const int discardedCount = m_pendingIcloudNoteSaves.size() + m_pendingIcloudNoteDeletes.size() +
+                                   m_pendingIcloudEventSaves.size() + m_pendingIcloudEventDeletes.size();
         ++m_icloudNotesGeneration;
         ++m_icloudNotesSnapshotEpoch;
         ++m_icloudEventsGeneration;
@@ -1180,11 +1183,22 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
         for (QNetworkReply *reply : eventReplies) {
             if (reply) reply->abort();
         }
+        m_pendingIcloudNoteSaves.clear();
+        m_pendingIcloudNoteDeletes.clear();
+        m_pendingIcloudEventSaves.clear();
+        m_pendingIcloudEventDeletes.clear();
+        m_icloudMutationRetryCounts.clear();
+        m_icloudMutationNextRetryMs.clear();
+        m_icloudMutationPausedKeys.clear();
         m_icloudMutationRetryTimer.stop();
         m_icloudMutationRetryScheduled = false;
         m_icloudMutationRetryArmedDeadlineMs = 0;
         saveAppState();
+        if (discardedCount > 0) {
+            emit toastMessage(QStringLiteral("Server endpoint changed; discarded %1 unsynced iCloud Hub change(s).").arg(discardedCount));
+        }
     }
+    m_lastConfiguredBaseUrl = normPrimary;
 
     m_serverUrl = normPrimary;
     m_secondaryServerUrl = normSecondary;
@@ -1324,6 +1338,7 @@ void Backend::loadCredentials() {
         m_candidateUrls.append(m_secondaryServerUrl);
     }
     m_candidateUrlIndex = 0;
+    m_lastConfiguredBaseUrl = m_serverUrl;
     emit configChanged();
 }
 
@@ -6335,7 +6350,7 @@ bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString 
         return false;
     }
 
-    const uint64_t copySeq = ++m_clipboardCopySeq;
+    ++(*m_clipboardCopySeq);
     m_lastCopiedImagePath = localPath;
     m_lastCopiedImageTimeMs = QDateTime::currentMSecsSinceEpoch();
 
@@ -6355,11 +6370,14 @@ bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString 
         cb->setMimeData(mime, QClipboard::Clipboard);
     }
 
+    const uint64_t copySeq = m_clipboardCopySeq->load();
+
     // Offload PNG encoding and Wayland wl-copy piping to background worker thread so GUI never freezes
     if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
         QFileInfo::exists(QStringLiteral("/usr/bin/wl-copy"))) {
-        QThreadPool::globalInstance()->start([this, localPath, copySeq]() {
-            if (m_clipboardCopySeq.load() != copySeq) return;
+        auto seqPtr = m_clipboardCopySeq;
+        QThreadPool::globalInstance()->start([localPath, copySeq, seqPtr]() {
+            if (seqPtr->load() != copySeq) return;
             QByteArray pngBytes;
             if (localPath.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive)) {
                 QFile rawPng(localPath);
@@ -6393,6 +6411,7 @@ bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString 
                     }
                 }
             }
+            if (seqPtr->load() != copySeq) return;
             if (!pngBytes.isEmpty()) {
                 QProcess proc;
                 proc.start(QStringLiteral("/usr/bin/wl-copy"), QStringList{QStringLiteral("--type"), QStringLiteral("image/png")});
@@ -9635,11 +9654,6 @@ void Backend::deleteIcloudNote(const QString &id) {
     }
     const quint64 gen = ++m_icloudNotesGeneration;
 
-    const QVariantList backupNotes = m_icloudNotes;
-    const QVariantMap backupPendSave = pendSave;
-    const bool hadPendSave = m_pendingIcloudNoteSaves.contains(id);
-    const bool hadPendDelete = m_pendingIcloudNoteDeletes.contains(id);
-
     for (int i = 0; i < m_icloudNotes.size(); ++i) {
         if (m_icloudNotes.at(i).toMap().value(QStringLiteral("id")).toString() == id) {
             m_icloudNotes.removeAt(i);
@@ -9647,14 +9661,7 @@ void Backend::deleteIcloudNote(const QString &id) {
         }
     }
     emit icloudNotesChanged();
-    if (!m_stateFilePath.isEmpty() && !saveAppState()) {
-        m_icloudNotes = backupNotes;
-        if (hadPendSave) m_pendingIcloudNoteSaves.insert(id, backupPendSave);
-        if (!hadPendDelete) m_pendingIcloudNoteDeletes.remove(id);
-        emit icloudNotesChanged();
-        recordIcloudMutationFailure(mutKey);
-        return;
-    }
+    saveAppState();
     if (neverSentLocalCreate) return;
 
     // Queue behind any already in-flight HTTP request for this noteId instead of dispatching concurrently
@@ -9972,11 +9979,6 @@ void Backend::deleteIcloudEvent(const QString &id) {
     }
     const quint64 gen = ++m_icloudEventsGeneration;
 
-    const QVariantList backupEvents = m_icloudEvents;
-    const QVariantMap backupPendSave = pendSave;
-    const bool hadPendSave = m_pendingIcloudEventSaves.contains(id);
-    const bool hadPendDelete = m_pendingIcloudEventDeletes.contains(id);
-
     for (int i = 0; i < m_icloudEvents.size(); ++i) {
         if (m_icloudEvents.at(i).toMap().value(QStringLiteral("id")).toString() == id) {
             m_icloudEvents.removeAt(i);
@@ -9984,14 +9986,7 @@ void Backend::deleteIcloudEvent(const QString &id) {
         }
     }
     emit icloudEventsChanged();
-    if (!m_stateFilePath.isEmpty() && !saveAppState()) {
-        m_icloudEvents = backupEvents;
-        if (hadPendSave) m_pendingIcloudEventSaves.insert(id, backupPendSave);
-        if (!hadPendDelete) m_pendingIcloudEventDeletes.remove(id);
-        emit icloudEventsChanged();
-        recordIcloudMutationFailure(mutKey);
-        return;
-    }
+    saveAppState();
     if (neverSentLocalCreate) return;
 
     // Queue behind any already in-flight HTTP request for this evtId instead of dispatching concurrently

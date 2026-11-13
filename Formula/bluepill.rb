@@ -35,9 +35,11 @@ class Bluepill < Formula
         bluepill-server preflight
 
       All three iCloud Hub modules (Notes, Calendar, Photos) are enabled by default.
-      You can optionally enable or disable individual modules via CLI or in the BluePill UI:
+      Module configuration is saved to ~/.config/bluepill/server.json. You can toggle
+      modules via CLI and apply changes to the running relay by restarting the service:
         bluepill-server --enable-notes --enable-calendar --enable-photos preflight --no-fix
         bluepill-server --disable-photos preflight --no-fix
+        brew services restart bluepill
     EOS
   end
 
@@ -55,7 +57,7 @@ class Bluepill < Formula
     if help_out.include?("preflight")
       assert_match "\"status\":", shell_output("#{bin}/bluepill-server preflight --no-fix")
     else
-      system "#{bin}/bluepill-server", "--selftest"
+      system bin/"bluepill-server", "--selftest"
     end
   end
 end

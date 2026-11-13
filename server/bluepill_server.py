@@ -466,6 +466,8 @@ class BluePillEngine:
         self.message_effects: Dict[str, str] = {}
         self._recent_effects: Dict[Tuple[str, str], Tuple[float, str]] = {}
         self._scheduled_lock = threading.Lock()
+        self._cancelled_scheduled_ids: Set[str] = set()
+        self._inflight_scheduled_ids: Set[str] = set()
         self._sent_history: List[Dict[str, Any]] = []
         self._load_deleted_state()
         self._load_chat_state()
@@ -2826,14 +2828,18 @@ class BluePillEngine:
     def cancel_scheduled_message(self, schedule_id: str) -> Dict[str, Any]:
         sid = (schedule_id or "").strip()
         removed = False
+        was_inflight = False
         with self._scheduled_lock:
+            self._cancelled_scheduled_ids.add(sid)
             before = len(self.scheduled_messages)
             self.scheduled_messages = [x for x in self.scheduled_messages if x.get("id") != sid]
             removed = len(self.scheduled_messages) < before
+            was_inflight = sid in self._inflight_scheduled_ids
             self._save_scheduled_messages()
-        self.logger.info("[cancel_scheduled_message] id=%s removed=%s", sid, removed)
-        self.broadcast_socketio("scheduled-message-cancelled", {"id": sid, "cancelled": removed})
-        return {"id": sid, "cancelled": True, "removed": removed}
+        cancelled = removed or was_inflight
+        self.logger.info("[cancel_scheduled_message] id=%s removed=%s was_inflight=%s", sid, removed, was_inflight)
+        self.broadcast_socketio("scheduled-message-cancelled", {"id": sid, "cancelled": cancelled, "removed": removed})
+        return {"id": sid, "cancelled": cancelled, "removed": removed}
 
     def dispatch_due_scheduled_messages(self) -> List[Dict[str, Any]]:
         now_ms = int(time.time() * 1000)
@@ -2847,11 +2853,20 @@ class BluePillEngine:
                     remaining.append(item)
             if due:
                 self.scheduled_messages = remaining
+                for item in due:
+                    iid = item.get("id")
+                    if iid:
+                        self._inflight_scheduled_ids.add(iid)
                 self._save_scheduled_messages()
         dispatched: List[Dict[str, Any]] = []
         failed_due: List[Dict[str, Any]] = []
         try:
             for item in due:
+                item_id = item.get("id", "")
+                with self._scheduled_lock:
+                    if item_id and item_id in self._cancelled_scheduled_ids:
+                        self._cancelled_scheduled_ids.discard(item_id)
+                        continue
                 try:
                     sent_msg = self.send_text(
                         {
@@ -2865,20 +2880,31 @@ class BluePillEngine:
                     item["sentMessageGuid"] = sent_msg.get("guid", "")
                     dispatched.append(item)
                     self.broadcast_socketio("scheduled-message-sent", item)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     self.logger.error("Scheduled message send failed for %s: %s", item.get("id"), exc)
                     item_failed = dict(item)
                     item_failed["lastError"] = str(exc)
                     failed_due.append(item_failed)
         finally:
-            if failed_due:
-                with self._scheduled_lock:
+            with self._scheduled_lock:
+                for item in due:
+                    iid = item.get("id")
+                    if iid:
+                        self._inflight_scheduled_ids.discard(iid)
+                if failed_due:
                     existing_ids = {x.get("id") for x in self.scheduled_messages}
                     for f_item in failed_due:
-                        if f_item.get("id") not in existing_ids:
+                        fid = f_item.get("id")
+                        if fid in self._cancelled_scheduled_ids:
+                            self._cancelled_scheduled_ids.discard(fid)
+                            continue
+                        if fid not in existing_ids:
                             self.scheduled_messages.append(f_item)
-                            existing_ids.add(f_item.get("id"))
-                    self._save_scheduled_messages()
+                            existing_ids.add(fid)
+                    try:
+                        self._save_scheduled_messages()
+                    except (OSError, ValueError, RuntimeError) as exc:
+                        self.logger.error("Failed to save scheduled messages after dispatch failure: %s", exc)
         return dispatched
 
     def manage_participant(self, chat_guid: str, address: str, action: str = "add") -> Dict[str, Any]:
@@ -4452,10 +4478,7 @@ class BluePillEngine:
             if recreating:
                 del_map.pop(nid, None)
                 del_revs.pop(nid, None)
-                try:
-                    self._write_deleted_map(deleted_path, del_map, del_revs)
-                except OSError as exc:
-                    self.logger.debug("[notes] deleted_notes update skipped: %s", exc)
+                self._write_deleted_map(deleted_path, del_map, del_revs)
             return self.query_icloud_notes()
 
     def delete_icloud_note(self, note_id: str, raise_on_missing: bool = False) -> List[Dict[str, Any]]:
@@ -4504,8 +4527,8 @@ class BluePillEngine:
                         del_revs[clean_id] = prev_del_rev
                     try:
                         self._write_deleted_map(deleted_path, del_map, del_revs)
-                    except Exception:
-                        pass
+                    except Exception as rb_exc:
+                        self.logger.warning("Failed to rollback deleted_notes map for %s: %s", clean_id, rb_exc)
                     raise
 
             return self.query_icloud_notes()
@@ -4804,10 +4827,7 @@ class BluePillEngine:
             if recreating:
                 del_map.pop(eid, None)
                 del_revs.pop(eid, None)
-                try:
-                    self._write_deleted_map(deleted_path, del_map, del_revs)
-                except OSError as exc:
-                    self.logger.debug("[calendar] deleted_events update skipped: %s", exc)
+                self._write_deleted_map(deleted_path, del_map, del_revs)
             return self.query_icloud_events(include_event_id=eid)
 
     def delete_icloud_event(self, event_id: str, raise_on_missing: bool = False) -> List[Dict[str, Any]]:
@@ -4856,8 +4876,8 @@ class BluePillEngine:
                         del_revs[clean_id] = prev_del_rev
                     try:
                         self._write_deleted_map(deleted_path, del_map, del_revs)
-                    except Exception:
-                        pass
+                    except Exception as rb_exc:
+                        self.logger.warning("Failed to rollback deleted_events map for %s: %s", clean_id, rb_exc)
                     raise
 
             return self.query_icloud_events()
@@ -5373,6 +5393,8 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const input = document.getElementById('msgInput');
       const text = input.value.trim();
       if (!text || !activeChatGuid) return;
+      const submittedChat = activeChatGuid;
+      const submittedText = text;
       const effSel = document.getElementById('effectSelect');
       const effectId = effSel ? effSel.value : '';
       if (effectId) playWebEffect(effectId);
@@ -5380,16 +5402,24 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         const resp = await fetch(apiUrl('/api/v1/message/text'), {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({chatGuid: activeChatGuid, message: text, tempGuid: 'web-' + Date.now(), effectId: effectId})
+          body: JSON.stringify({chatGuid: submittedChat, message: submittedText, tempGuid: 'web-' + Date.now(), effectId: effectId})
         });
         const j = await resp.json().catch(() => ({}));
         if (!resp.ok || (j.status && j.status !== 200)) {
           alert(j.error || j.message || ('Send failed (HTTP ' + resp.status + ')'));
           return;
         }
-        input.value = '';
-        if (effSel) effSel.value = '';
-        await selectChat(activeChatGuid, document.getElementById('chatHeaderTitle').textContent);
+        if (activeChatGuid === submittedChat && input.value.trim() === submittedText) {
+          input.value = '';
+          if (effSel) effSel.value = '';
+        }
+        try {
+          if (activeChatGuid === submittedChat) {
+            await selectChat(submittedChat, document.getElementById('chatHeaderTitle').textContent);
+          }
+        } catch (refreshErr) {
+          console.warn('Refresh failed after send:', refreshErr);
+        }
       } catch (err) {
         alert('Send failed: ' + err);
       }
@@ -5846,7 +5876,9 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     function closeCalendarModal() {
       document.getElementById('calendarModal').style.display = 'none';
     }
+    let loadEventsSeq = 0;
     async function loadEvents() {
+      const mySeq = ++loadEventsSeq;
       try {
         let all = [];
         let off = 0;
@@ -5855,12 +5887,16 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         while (pageCount < 20) {
           pageCount++;
           const resp = await fetch(apiUrl('/api/v1/icloud/events?offset=' + off + '&limit=' + lim));
-          const j = await resp.json();
+          const j = await resp.json().catch(() => ({}));
+          if (!resp.ok || (j.status && j.status !== 200)) {
+            throw new Error(j.error || ('HTTP ' + resp.status));
+          }
           const batch = j.data || [];
           all = all.concat(batch);
           if (!j.hasMore || batch.length < lim) break;
           off += batch.length;
         }
+        if (mySeq !== loadEventsSeq) return;
         allEvents = all;
         renderEventsList();
       } catch (err) { console.error('Error loading events:', err); }

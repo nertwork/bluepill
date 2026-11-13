@@ -476,6 +476,7 @@ private:
 
     QString m_serverUrl;
     QString m_secondaryServerUrl;
+    QString m_lastConfiguredBaseUrl;
     QStringList m_candidateUrls;
     int m_candidateUrlIndex = 0;
     int m_consecutiveFailures = 0;
@@ -589,7 +590,7 @@ private:
     int m_activeSendCount = 0;
     QString m_lastCopiedImagePath;
     qint64 m_lastCopiedImageTimeMs = 0;
-    std::atomic<uint64_t> m_clipboardCopySeq{0};
+    std::shared_ptr<std::atomic<uint64_t>> m_clipboardCopySeq = std::make_shared<std::atomic<uint64_t>>(0);
     QString m_pendingClipboardCopyGuid;
     QString m_lastOpenedUrl;
     qint64 m_lastOpenedUrlTimeMs = 0;

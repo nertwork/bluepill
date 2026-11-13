@@ -19,7 +19,7 @@ ApplicationWindow {
     property string replyTargetSender: ""
     property string replyTargetText: ""
     property var chatDrafts: ({})
-    property string lastDraftChatGuid: backend.selectedChatGuid
+    property string lastDraftChatGuid: ""
     property string hoveredActionMessageGuid: ""
     property string pinnedActionMessageGuid: ""
     readonly property string activeActionMessageGuid: pinnedActionMessageGuid !== "" ? pinnedActionMessageGuid : hoveredActionMessageGuid
@@ -6060,17 +6060,15 @@ ApplicationWindow {
         }
 
         function popOutCurrentNote() {
-            if (noteDetailWindow.visible) {
-                var detailClean = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
-                                   noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
-                                   noteDetailFolderInput.text === noteDetailWindow.loadedFolder);
-                if (!detailClean) {
-                    root.showToast("⚠️ " + i18n.tr("Pop-out window has unsaved edits"))
-                    noteDetailWindow.show()
-                    noteDetailWindow.raise()
-                    noteDetailWindow.requestActivate()
-                    return
-                }
+            var detailClean = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
+                               noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
+                               noteDetailFolderInput.text === noteDetailWindow.loadedFolder);
+            if (!detailClean && noteDetailWindow.noteId !== "") {
+                root.showToast("⚠️ " + i18n.tr("Pop-out window has unsaved edits"))
+                noteDetailWindow.show()
+                noteDetailWindow.raise()
+                noteDetailWindow.requestActivate()
+                return
             }
             noteDetailWindow.noteId = icloudNotesPopup.selectedNoteId
             noteDetailWindow.noteSyncSource = icloudNotesPopup.selectedNoteSyncSource
