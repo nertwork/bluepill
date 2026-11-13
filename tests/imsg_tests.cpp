@@ -4554,20 +4554,23 @@ private slots:
 
             auto *statusDot = win->findChild<QQuickItem *>(QStringLiteral("topConnectionStatusDot"));
             auto *serverBtnText = win->findChild<QQuickItem *>(QStringLiteral("serverTopBtnText"));
+            auto *homeSettingsText = win->findChild<QQuickItem *>(QStringLiteral("homeServerLbl"));
             auto *settingsTitle = win->findChild<QQuickItem *>(QStringLiteral("settingsModalTitle"));
             auto *cfgBadge = win->findChild<QQuickItem *>(QStringLiteral("cfgStatusBadge"));
             auto *previewBtn = win->findChild<QQuickItem *>(QStringLiteral("previewSoundBtn"));
             auto *presetGrid = win->findChild<QQuickItem *>(QStringLiteral("soundPresetGrid"));
             QVERIFY(statusDot != nullptr);
             QVERIFY(serverBtnText != nullptr);
+            QVERIFY(homeSettingsText != nullptr);
             QVERIFY(settingsTitle != nullptr);
             QVERIFY(cfgBadge != nullptr);
             QVERIFY(previewBtn != nullptr);
             QVERIFY(presetGrid != nullptr);
 
-            // Top button and modal title say "BluePill Settings"
-            QCOMPARE(serverBtnText->property("text").toString(), QStringLiteral("BluePill Settings"));
-            QVERIFY(settingsTitle->property("text").toString().contains(QStringLiteral("BluePill Settings")));
+            // Top button, Home dashboard button, and modal title all say "Settings"
+            QCOMPARE(serverBtnText->property("text").toString(), QStringLiteral("Settings"));
+            QCOMPARE(homeSettingsText->property("text").toString(), QStringLiteral("⚙ Settings"));
+            QCOMPARE(settingsTitle->property("text").toString(), QStringLiteral("⚙ Settings"));
 
             // Initially disconnected -> top-left dot is red (theme.red) and badge says Disconnected
             QCOMPARE(b2.connected(), false);

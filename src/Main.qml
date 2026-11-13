@@ -1206,7 +1206,7 @@ ApplicationWindow {
                     }
                 }
 
-                // BluePill Settings Button (Ctrl+,)
+                // Settings Button (Ctrl+,)
                 Rectangle {
                     id: topServerConfigBtn
                     objectName: "topServerConfigBtn"
@@ -1218,7 +1218,7 @@ ApplicationWindow {
                     border.color: (root.showServerConfigModal || backend.needsSetup) ? theme.accent : theme.muted
 
                     ToolTip.visible: serverTopMouse.containsMouse
-                    ToolTip.text: i18n.tr("BluePill Settings (Ctrl+,)")
+                    ToolTip.text: i18n.tr("Settings (Ctrl+,)")
                     ToolTip.delay: 400
 
                     RowLayout {
@@ -1234,7 +1234,7 @@ ApplicationWindow {
                             id: serverTopBtnText
                             objectName: "serverTopBtnText"
                             visible: root.width >= 900
-                            text: root.width < 1080 ? i18n.tr("Settings") : i18n.tr("BluePill Settings")
+                            text: i18n.tr("Settings")
                             font.pixelSize: theme.fontSize - 2
                             font.bold: true
                             color: root.showServerConfigModal ? theme.darkerBackground : theme.foreground
@@ -2293,8 +2293,9 @@ ApplicationWindow {
                                                 border.color: backend.needsSetup ? theme.accent : theme.muted
                                                 Text {
                                                     id: homeServerLbl
+                                                    objectName: "homeServerLbl"
                                                     anchors.centerIn: parent
-                                                    text: "⚙ " + i18n.tr("Server")
+                                                    text: "⚙ " + i18n.tr("Settings")
                                                     font.pixelSize: theme.fontSize - 2
                                                     font.bold: backend.needsSetup
                                                     color: backend.needsSetup ? theme.accent : theme.foreground
@@ -7957,7 +7958,7 @@ ApplicationWindow {
                             id: settingsModalTitle
                             objectName: "settingsModalTitle"
                             Layout.fillWidth: true
-                            text: "⚙ " + i18n.tr("BluePill Settings")
+                            text: "⚙ " + i18n.tr("Settings")
                             font.pixelSize: theme.fontSize + 2
                             font.bold: true
                             color: theme.brightForeground
