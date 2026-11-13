@@ -3383,6 +3383,17 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("objectName: \"eventsPaginationBar\"")));
         QVERIFY(qml.contains(QStringLiteral("objectName: \"photosPaginationBar\"")));
         QVERIFY(qml.contains(QStringLiteral("objectName: \"photoViewerCard\"")));
+        // Verify Full Screen toggles, page-size selectors, and dark-styled side note reader pane
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"notesFullScreenBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"calendarFullScreenBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photosFullScreenBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photoViewerFullScreenBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"noteDetailFullScreenBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"notesPageSizeSelector\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"eventsPageSizeSelector\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photosPageSizeSelector\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"noteSideDetailPane\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"notePopOutBtn\"")));
         // Verify high-contrast dark green RCS/SMS sent bubble palette (#1B6E38 background, #268C48 border, #CBEFD8 metadata)
         QVERIFY(qml.contains(QStringLiteral("readonly property bool isGreenService:")));
         QVERIFY(qml.contains(QStringLiteral("#1B6E38")));
@@ -3473,6 +3484,8 @@ private slots:
         int noteBCount = 0;
         int noteWsReplayCount = 0;
         int noteRealConflictCount = 0;
+        int noteDeletedConflictCount = 0;
+        bool noteDeletedAllowRecreateSeen = false;
         int restartNoteCount = 0;
         bool lostAckCreatedOnServer = false;
         int unwritableNotePostCount = 0;
@@ -3565,6 +3578,18 @@ private slots:
                         noteRealConflictCount++;
                         sendHttpJson(sock, 409, "Conflict",
                                      R"({"status":409,"error":"revision_conflict","data":[{"id":"note_real_conflict","title":"Conflict Note","body":"Different Server Body","folder":"Notes","revision":6}]})");
+                        return;
+                    }
+                    if (reqId == QStringLiteral("note_deleted_conflict")) {
+                        noteDeletedConflictCount++;
+                        if (bodyObj.value(QStringLiteral("allowRecreate")).toBool()) {
+                            noteDeletedAllowRecreateSeen = true;
+                            sendHttpJson(sock, 200, "OK",
+                                         R"({"status":200,"data":[{"id":"note_deleted_conflict","title":"Recreated Deleted Note","body":"Restored Draft","folder":"Notes","revision":7}]})");
+                        } else {
+                            sendHttpJson(sock, 409, "Conflict",
+                                         R"({"status":409,"error":"revision_conflict","data":[]})");
+                        }
                         return;
                     }
                     sendHttpJson(sock, 200, "OK", R"({"status":200,"data":[]})");
@@ -3738,6 +3763,21 @@ private slots:
         QVERIFY(foundCopyDraft);
         QVERIFY(foundReloadedServer);
 
+        // Verify server-deleted note 409 conflict: regular save with baseRevision 0 remains paused unless allowRecreate=true is passed
+        const QString delConflictKey = QStringLiteral("note_save:note_deleted_conflict");
+        liveBackend.saveIcloudNote(QStringLiteral("note_deleted_conflict"), QStringLiteral("Deleted On Server"), QStringLiteral("Draft Body"), QStringLiteral("Notes"), 1);
+        QTRY_COMPARE_WITH_TIMEOUT(noteDeletedConflictCount, 1, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(liveBackend.isIcloudMutationPausedForTest(delConflictKey), 1500);
+        liveBackend.saveIcloudNote(QStringLiteral("note_deleted_conflict"), QStringLiteral("Deleted On Server"), QStringLiteral("Restored Draft"), QStringLiteral("Notes"), 0, false);
+        QTest::qWait(300);
+        QCOMPARE(noteDeletedConflictCount, 1);
+        QVERIFY(liveBackend.isIcloudMutationPausedForTest(delConflictKey));
+        liveBackend.saveIcloudNote(QStringLiteral("note_deleted_conflict"), QStringLiteral("Recreated Deleted Note"), QStringLiteral("Restored Draft"), QStringLiteral("Notes"), 0, true);
+        QTRY_COMPARE_WITH_TIMEOUT(noteDeletedConflictCount, 2, 1500);
+        QVERIFY(noteDeletedAllowRecreateSeen);
+        QTRY_VERIFY_WITH_TIMEOUT(!liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_deleted_conflict")), 1500);
+        QVERIFY(!liveBackend.isIcloudMutationPausedForTest(delConflictKey));
+
         for (const char *k : credVars) {
             const QByteArray key(k);
             if (savedEnv.contains(key)) qputenv(k, savedEnv.value(key)); else qunsetenv(k);
@@ -3895,6 +3935,10 @@ private slots:
                         respObj.insert(QStringLiteral("status"), 200);
                         respObj.insert(QStringLiteral("data"), QJsonArray());
                         sendJson(sock, 200, "OK", QJsonDocument(respObj).toJson(QJsonDocument::Compact));
+                        return;
+                    }
+                    if (!headers.startsWith("post ")) {
+                        sendJson(sock, 200, "OK", "{}");
                         return;
                     }
                     capturedEvtId = bodyObj.value(QStringLiteral("id")).toString();
@@ -4124,19 +4168,54 @@ private slots:
         QTcpServer photosServer;
         QVERIFY(photosServer.listen(QHostAddress::LocalHost, 0));
         QList<QString> requestedQueries;
+        int totalPhotosOnServer = 150;
+        bool syncShouldFail = false;
+        int syncPollCount = 0;
         QObject::connect(&photosServer, &QTcpServer::newConnection, &photosServer, [&]() {
             while (QTcpSocket *sock = photosServer.nextPendingConnection()) {
                 QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
                     const QByteArray req = sock->readAll();
                     const int firstLineEnd = req.indexOf("\r\n");
                     const QString reqLine = QString::fromUtf8(firstLineEnd > 0 ? req.left(firstLineEnd) : req);
-                    if (reqLine.contains(QStringLiteral("/api/v1/icloud/photos"))) {
+                    if (reqLine.contains(QStringLiteral("/api/v1/icloud/photos/sync"))) {
+                        QJsonObject dataObj;
+                        dataObj.insert(QStringLiteral("jobId"), QStringLiteral("job_sync_test"));
+                        if (reqLine.startsWith(QStringLiteral("POST "))) {
+                            syncPollCount = 0;
+                            dataObj.insert(QStringLiteral("state"), QStringLiteral("running"));
+                            dataObj.insert(QStringLiteral("status"), QStringLiteral("running"));
+                        } else {
+                            syncPollCount++;
+                            if (syncShouldFail) {
+                                dataObj.insert(QStringLiteral("state"), QStringLiteral("failed"));
+                                dataObj.insert(QStringLiteral("status"), QStringLiteral("error"));
+                                dataObj.insert(QStringLiteral("synced"), 0);
+                                dataObj.insert(QStringLiteral("failed"), 1);
+                                dataObj.insert(QStringLiteral("error"), QStringLiteral("Simulated sync error"));
+                            } else {
+                                totalPhotosOnServer = 152;
+                                dataObj.insert(QStringLiteral("state"), QStringLiteral("completed"));
+                                dataObj.insert(QStringLiteral("status"), QStringLiteral("ok"));
+                                dataObj.insert(QStringLiteral("synced"), 2);
+                                dataObj.insert(QStringLiteral("failed"), 0);
+                            }
+                        }
+                        QJsonObject resp;
+                        resp.insert(QStringLiteral("status"), 200);
+                        resp.insert(QStringLiteral("data"), dataObj);
+                        const QByteArray body = QJsonDocument(resp).toJson(QJsonDocument::Compact);
+                        const QByteArray raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                               + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+                        sock->write(raw);
+                        sock->flush();
+                        sock->disconnectFromHost();
+                    } else if (reqLine.contains(QStringLiteral("/api/v1/icloud/photos"))) {
                         requestedQueries.append(reqLine);
                         const QUrl reqUrl(QStringLiteral("http://localhost") + reqLine.section(QLatin1Char(' '), 1, 1));
                         const QUrlQuery q(reqUrl);
                         const int limit = q.queryItemValue(QStringLiteral("limit")).toInt() > 0 ? q.queryItemValue(QStringLiteral("limit")).toInt() : 60;
                         const int offset = q.queryItemValue(QStringLiteral("offset")).toInt();
-                        const int total = 150;
+                        const int total = totalPhotosOnServer;
                         QJsonArray items;
                         const int count = qMax(0, qMin(limit, total - offset));
                         for (int i = 0; i < count; ++i) {
@@ -4212,6 +4291,26 @@ private slots:
         pagedBackend.prevIcloudPhotosPage();
         QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosPage(), 0, 1500);
         QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().size(), 60, 1500);
+
+        // Change page size -> 24 per page (150 total => 7 pages)
+        pagedBackend.setIcloudPhotosPageSize(24);
+        QCOMPARE(pagedBackend.icloudPhotosPageSize(), 24);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().size(), 24, 1500);
+        QCOMPARE(pagedBackend.icloudPhotosPageCount(), 7);
+        QCOMPARE(pagedBackend.icloudPhotosPage(), 0);
+
+        // Observe async syncIcloudPhotos() job polling through running -> completed (refreshes collection to 152) and running -> failed
+        pagedBackend.syncIcloudPhotos();
+        QVERIFY(pagedBackend.icloudPhotosSyncing());
+        QTRY_VERIFY_WITH_TIMEOUT(!pagedBackend.icloudPhotosSyncing(), 2500);
+        QVERIFY(syncPollCount >= 1);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosTotal(), 152, 1500);
+
+        syncShouldFail = true;
+        pagedBackend.syncIcloudPhotos();
+        QVERIFY(pagedBackend.icloudPhotosSyncing());
+        QTRY_VERIFY_WITH_TIMEOUT(!pagedBackend.icloudPhotosSyncing(), 2500);
+        QVERIFY(syncPollCount >= 1);
 
         if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
         if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);

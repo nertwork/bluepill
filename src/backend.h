@@ -281,7 +281,7 @@ public:
     Q_INVOKABLE static QString canonicalizeAddress(const QString &raw);
     Q_INVOKABLE static QString formatHandleForDisplay(const QString &raw);
     Q_INVOKABLE void fetchIcloudNotes();
-    Q_INVOKABLE QString saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder = QStringLiteral("Notes"), qint64 baseRevision = -1);
+    Q_INVOKABLE QString saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder = QStringLiteral("Notes"), qint64 baseRevision = -1, bool allowRecreate = false);
     Q_INVOKABLE bool reloadConflictedIcloudNoteServerVersion(const QString &id);
     Q_INVOKABLE bool isIcloudNoteDurablyPersisted(const QString &id) const;
     Q_INVOKABLE void deleteIcloudNote(const QString &id);

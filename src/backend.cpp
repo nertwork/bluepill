@@ -9208,7 +9208,7 @@ void Backend::fetchIcloudNotes() {
     });
 }
 
-QString Backend::saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder, qint64 baseRevision) {
+QString Backend::saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder, qint64 baseRevision, bool allowRecreate) {
     QString actualId = id.trimmed();
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     const quint64 gen = ++m_icloudNotesGeneration;
@@ -9243,7 +9243,7 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
     const bool prevHasConflict = prevPendNote.value(QStringLiteral("hasServerConflict")).toBool();
     if (!id.trimmed().isEmpty() &&
         ((conflictSrvRev > 0 && baseRev < conflictSrvRev) ||
-         (prevHasConflict && conflictSrvRev <= 0 && baseRevision != 0))) {
+         (prevHasConflict && conflictSrvRev <= 0 && !allowRecreate))) {
         QVariantMap updatedPend = prevPendNote;
         updatedPend.insert(QStringLiteral("title"), title);
         updatedPend.insert(QStringLiteral("body"), body);
@@ -9294,6 +9294,9 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
     if (baseRev > 0) {
         noteMap.insert(QStringLiteral("baseRevision"), baseRev);
         noteMap.insert(QStringLiteral("revision"), baseRev);
+    }
+    if (allowRecreate) {
+        noteMap.insert(QStringLiteral("allowRecreate"), true);
     }
 
     const QString mutKey = QStringLiteral("note_save:") + actualId;
@@ -9362,6 +9365,9 @@ QString Backend::saveIcloudNote(const QString &id, const QString &title, const Q
         payload.insert(QStringLiteral("updatedAtMs"), now);
         if (baseRev > 0) {
             payload.insert(QStringLiteral("baseRevision"), baseRev);
+        }
+        if (allowRecreate) {
+            payload.insert(QStringLiteral("allowRecreate"), true);
         }
 
         QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/icloud/notes")), QJsonDocument(payload).toJson(QJsonDocument::Compact));

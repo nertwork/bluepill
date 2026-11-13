@@ -5328,18 +5328,33 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
   <!-- Notes Modal -->
   <div id="notesModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
-    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:680px;max-width:84vw;height:460px;max-height:76vh;display:flex;flex-direction:column;overflow:hidden;">
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);">
+    <div id="notesModalCard" style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:780px;max-width:88vw;height:520px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);gap:10px;">
         <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📝 iCloud (Read-Only) & Local Hub Notes</span>
-        <button onclick="closeNotesModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <label style="font-size:12px;color:var(--muted);">Per page:</label>
+          <select id="notesPageSizeSelect" onchange="changeNotesPageSize(this.value)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
+            <option value="10">10</option>
+            <option value="20" selected>20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+          <button id="notesFullScreenBtn" onclick="toggleModalFullScreen('notesModalCard', 'notesFullScreenBtn', '780px', '88vw', '520px', '80vh')" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;">⛶ Full Screen</button>
+          <button onclick="closeNotesModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
+        </div>
       </div>
       <div style="display:flex;flex:1;overflow:hidden;">
-        <div style="width:250px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:rgba(255,255,255,0.02);">
+        <div style="width:270px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:rgba(255,255,255,0.02);">
           <div style="padding:10px;border-bottom:1px solid var(--border);display:flex;gap:6px;">
             <input id="notesSearchInput" oninput="filterNotes()" placeholder="Search notes..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px;" />
             <button onclick="newNote()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 10px;font-weight:600;font-size:12px;cursor:pointer;">+ New</button>
           </div>
           <div id="notesList" style="flex:1;overflow-y:scroll;padding:6px;"></div>
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-top:1px solid var(--border);font-size:11px;">
+            <button id="notesPrevBtn" onclick="changeNotesPage(-1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 8px;cursor:pointer;">‹ Prev</button>
+            <span id="notesPageMeta" style="color:var(--muted);">Page 1</span>
+            <button id="notesNextBtn" onclick="changeNotesPage(1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 8px;cursor:pointer;">Next ›</button>
+          </div>
         </div>
         <div style="flex:1;display:flex;flex-direction:column;padding:14px;gap:10px;">
           <div id="noteConflictBanner" style="display:none;background:#3d2c12;border:1px solid #d29922;border-radius:6px;padding:8px 10px;font-size:12px;color:#f0f6fc;align-items:center;justify-content:space-between;gap:8px;">
@@ -5367,13 +5382,23 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
   <!-- Calendar Modal -->
   <div id="calendarModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
-    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:660px;max-width:84vw;height:450px;max-height:76vh;display:flex;flex-direction:column;overflow:hidden;">
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);">
+    <div id="calendarModalCard" style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:740px;max-width:88vw;height:500px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);gap:10px;">
         <div style="display:flex;align-items:center;gap:12px;">
           <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📅 iCloud (Read-Only) & Local Hub Calendar</span>
           <button onclick="downloadCalendarIcs()" style="background:#212832;color:var(--accent2);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">📥 Download .ics</button>
         </div>
-        <button onclick="closeCalendarModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <label style="font-size:12px;color:var(--muted);">Per page:</label>
+          <select id="eventsPageSizeSelect" onchange="changeEventsPageSize(this.value)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
+            <option value="15">15</option>
+            <option value="25" selected>25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+          <button id="calendarFullScreenBtn" onclick="toggleModalFullScreen('calendarModalCard', 'calendarFullScreenBtn', '740px', '88vw', '500px', '80vh')" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;">⛶ Full Screen</button>
+          <button onclick="closeCalendarModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
+        </div>
       </div>
       <div style="padding:12px 18px;border-bottom:1px solid var(--border);background:rgba(255,255,255,0.02);display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
         <input id="evtTitleInput" placeholder="Event title..." style="flex:2;min-width:180px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px;" />
@@ -5382,16 +5407,32 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         <button onclick="saveNewEvent()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-weight:600;font-size:12px;cursor:pointer;">+ Add Event</button>
       </div>
       <div id="eventsList" style="flex:1;overflow-y:scroll;padding:12px 18px;display:flex;flex-direction:column;gap:8px;"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 16px;border-top:1px solid var(--border);background:rgba(255,255,255,0.02);font-size:12px;">
+        <span id="eventsPageMeta" style="color:var(--muted);">Page 1</span>
+        <div style="display:flex;gap:6px;">
+          <button id="eventsPrevBtn" onclick="changeEventsPage(-1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">‹ Prev</button>
+          <button id="eventsNextBtn" onclick="changeEventsPage(1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">Next ›</button>
+        </div>
+      </div>
     </div>
   </div>
 
   <!-- Photos Modal -->
   <div id="photosModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
-    <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:700px;max-width:84vw;height:480px;max-height:76vh;display:flex;flex-direction:column;overflow:hidden;">
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);">
+    <div id="photosModalCard" style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:820px;max-width:88vw;height:540px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);gap:10px;">
         <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">☁️ iCloud Photos & Attachment Unpurge</span>
         <div style="display:flex;align-items:center;gap:8px;">
+          <label style="font-size:12px;color:var(--muted);">Per page:</label>
+          <select id="photosPageSizeSelect" onchange="changePhotosPageSize(this.value)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
+            <option value="24">24</option>
+            <option value="48" selected>48</option>
+            <option value="60">60</option>
+            <option value="120">120</option>
+            <option value="240">240</option>
+          </select>
           <button id="syncPhotosBtn" onclick="syncAllPhotos()" style="background:#1f6feb;color:#fff;border:none;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">⬇ Sync All Photos</button>
+          <button id="photosFullScreenBtn" onclick="toggleModalFullScreen('photosModalCard', 'photosFullScreenBtn', '820px', '88vw', '540px', '80vh')" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;">⛶ Full Screen</button>
           <button onclick="closePhotosModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
         </div>
       </div>
@@ -5409,6 +5450,8 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
   <script>
     let allNotes = [];
+    let notesPage = 0;
+    let notesPageSize = 20;
     let selectedNoteId = null;
     let selectedNoteRevision = null;
     let noteSelectionToken = 0;
@@ -5422,6 +5465,30 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     const deletedNoteSeqById = {};
     const pendingDeleteById = {};
     let allEvents = [];
+    let eventsPage = 0;
+    let eventsPageSize = 25;
+
+    function toggleModalFullScreen(cardId, btnId, compactW, compactMaxW, compactH, compactMaxH) {
+      const card = document.getElementById(cardId);
+      const btn = document.getElementById(btnId);
+      if (!card) return;
+      const isFs = card.dataset.fullscreen === '1';
+      if (isFs) {
+        card.dataset.fullscreen = '0';
+        card.style.width = compactW;
+        card.style.maxWidth = compactMaxW;
+        card.style.height = compactH;
+        card.style.maxHeight = compactMaxH;
+        if (btn) btn.textContent = '⛶ Full Screen';
+      } else {
+        card.dataset.fullscreen = '1';
+        card.style.width = '98vw';
+        card.style.maxWidth = '98vw';
+        card.style.height = '96vh';
+        card.style.maxHeight = '96vh';
+        if (btn) btn.textContent = '🗗 Compact';
+      }
+    }
 
     function mergeServerNotesSnapshot(snapshot) {
       if (!Array.isArray(snapshot)) return;
@@ -5465,12 +5532,22 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const list = document.getElementById('notesList');
       list.innerHTML = '';
       const filtered = allNotes.filter(n => (n.title || '').toLowerCase().includes(q) || (n.body || '').toLowerCase().includes(q));
-      for (const n of filtered) {
+      const pageCount = Math.max(1, Math.ceil(filtered.length / Math.max(1, notesPageSize)));
+      notesPage = Math.min(Math.max(0, notesPage), pageCount - 1);
+      const startIdx = notesPage * notesPageSize;
+      const paged = filtered.slice(startIdx, startIdx + notesPageSize);
+      const metaEl = document.getElementById('notesPageMeta');
+      if (metaEl) metaEl.textContent = 'Page ' + (notesPage + 1) + ' / ' + pageCount + ' (' + filtered.length + ')';
+      const prevBtn = document.getElementById('notesPrevBtn');
+      if (prevBtn) prevBtn.disabled = (notesPage <= 0);
+      const nextBtn = document.getElementById('notesNextBtn');
+      if (nextBtn) nextBtn.disabled = ((notesPage + 1) >= pageCount);
+      for (const n of paged) {
         const item = document.createElement('div');
         item.style.cssText = 'padding:8px 10px;margin-bottom:4px;border-radius:6px;cursor:pointer;background:' + (n.id === selectedNoteId ? '#212832' : 'transparent') + ';border:1px solid ' + (n.id === selectedNoteId ? 'var(--accent)' : 'transparent') + ';';
         const titleEl = document.createElement('div');
         titleEl.style.cssText = 'font-weight:600;font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-        titleEl.textContent = n.title || 'Untitled';
+        titleEl.textContent = (n.syncSource === 'apple_notes_ro' ? '🍏 ' : '📝 ') + (n.title || 'Untitled');
         const previewEl = document.createElement('div');
         previewEl.style.cssText = 'font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
         previewEl.textContent = (n.body || '').slice(0, 40);
@@ -5480,7 +5557,9 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         list.appendChild(item);
       }
     }
-    function filterNotes() { renderNotesList(); }
+    function filterNotes() { notesPage = 0; renderNotesList(); }
+    function changeNotesPage(delta) { notesPage = Math.max(0, notesPage + delta); renderNotesList(); }
+    function changeNotesPageSize(val) { notesPageSize = Math.max(5, Number(val) || 20); notesPage = 0; renderNotesList(); }
     function selectNote(id) {
       noteSelectionToken += 1;
       noteDraftToken = 0;
@@ -5706,7 +5785,17 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     function renderEventsList() {
       const list = document.getElementById('eventsList');
       list.innerHTML = '';
-      for (const ev of allEvents) {
+      const pageCount = Math.max(1, Math.ceil(allEvents.length / Math.max(1, eventsPageSize)));
+      eventsPage = Math.min(Math.max(0, eventsPage), pageCount - 1);
+      const startIdx = eventsPage * eventsPageSize;
+      const paged = allEvents.slice(startIdx, startIdx + eventsPageSize);
+      const metaEl = document.getElementById('eventsPageMeta');
+      if (metaEl) metaEl.textContent = 'Page ' + (eventsPage + 1) + ' of ' + pageCount + ' (' + allEvents.length + ' events)';
+      const prevBtn = document.getElementById('eventsPrevBtn');
+      if (prevBtn) prevBtn.disabled = (eventsPage <= 0);
+      const nextBtn = document.getElementById('eventsNextBtn');
+      if (nextBtn) nextBtn.disabled = ((eventsPage + 1) >= pageCount);
+      for (const ev of paged) {
         const item = document.createElement('div');
         item.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;';
         const d = ev.startMs ? new Date(ev.startMs).toLocaleString() : 'Anytime';
@@ -5787,9 +5876,18 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     function downloadCalendarIcs() {
       window.open(apiUrl('/api/v1/icloud/calendar.ics'), '_blank');
     }
+    function changeEventsPage(delta) {
+      eventsPage = Math.max(0, eventsPage + delta);
+      renderEventsList();
+    }
+    function changeEventsPageSize(val) {
+      eventsPageSize = Math.max(5, Number(val) || 25);
+      eventsPage = 0;
+      renderEventsList();
+    }
 
     let photosPage = 0;
-    const photosPageSize = 48;
+    let photosPageSize = 48;
     let photosTotal = 0;
     let photosHasMore = false;
     function openPhotosModal() {
@@ -5798,6 +5896,10 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
     function closePhotosModal() {
       document.getElementById('photosModal').style.display = 'none';
+    }
+    function changePhotosPageSize(val) {
+      photosPageSize = Math.max(12, Math.min(240, Number(val) || 48));
+      loadPhotos(0);
     }
     function changePhotosPage(delta) {
       const next = Math.max(0, photosPage + delta);
