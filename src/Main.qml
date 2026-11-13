@@ -986,17 +986,24 @@ ApplicationWindow {
                     spacing: 8
                     Rectangle {
                         id: homeBrandBtn
+                        objectName: "homeBrandBtn"
                         height: 30
                         radius: 7
                         implicitWidth: homeBrandRow.implicitWidth + 16
-                        color: backend.selectedChatGuid.length === 0
-                                   ? theme.selection
-                                   : (homeBrandMouse.containsMouse ? theme.lighterBackground : "transparent")
-                        border.width: (backend.selectedChatGuid.length === 0 || homeBrandMouse.containsMouse) ? 1 : 0
-                        border.color: backend.selectedChatGuid.length === 0 ? theme.accent : theme.muted
+                        color: !backend.connected
+                                   ? Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.14)
+                                   : (backend.selectedChatGuid.length === 0
+                                          ? theme.selection
+                                          : (homeBrandMouse.containsMouse ? theme.lighterBackground : "transparent"))
+                        border.width: (!backend.connected || backend.selectedChatGuid.length === 0 || homeBrandMouse.containsMouse) ? 1 : 0
+                        border.color: !backend.connected
+                                          ? theme.red
+                                          : (backend.selectedChatGuid.length === 0 ? theme.accent : theme.muted)
 
                         ToolTip.visible: homeBrandMouse.containsMouse
-                        ToolTip.text: i18n.tr("BluePill Home Dashboard (Ctrl+H)")
+                        ToolTip.text: backend.connected
+                                          ? i18n.tr("BluePill Home Dashboard — Connected (Ctrl+H)")
+                                          : i18n.tr("BluePill Home Dashboard — Disconnected (Ctrl+H)")
                         ToolTip.delay: 350
 
                         RowLayout {
@@ -1004,10 +1011,14 @@ ApplicationWindow {
                             anchors.centerIn: parent
                             spacing: 7
                             Rectangle {
+                                id: topConnectionStatusDot
+                                objectName: "topConnectionStatusDot"
                                 width: 10
                                 height: 10
                                 radius: 5
                                 color: backend.connected ? theme.green : theme.red
+                                border.width: 1
+                                border.color: backend.connected ? Qt.lighter(theme.green, 1.3) : Qt.lighter(theme.red, 1.3)
                             }
                             Image {
                                 width: 20
@@ -1021,7 +1032,9 @@ ApplicationWindow {
                                 text: "BluePill"
                                 font.pixelSize: theme.fontSize + 2
                                 font.bold: true
-                                color: backend.selectedChatGuid.length === 0 ? theme.accent : theme.brightForeground
+                                color: !backend.connected
+                                           ? theme.red
+                                           : (backend.selectedChatGuid.length === 0 ? theme.accent : theme.brightForeground)
                             }
                             Text {
                                 visible: backend.selectedChatGuid.length > 0
@@ -1051,16 +1064,20 @@ ApplicationWindow {
                         visible: root.width >= 900
                         height: 22
                         radius: 6
-                        color: theme.lighterBackground
+                        color: backend.connected ? theme.lighterBackground : Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.16)
+                        border.width: backend.connected ? 0 : 1
+                        border.color: backend.connected ? "transparent" : theme.red
                         implicitWidth: statusLabel.implicitWidth + 16
                         Text {
                             id: statusLabel
+                            objectName: "statusLabel"
                             anchors.centerIn: parent
                             text: root.width < 1160
-                                      ? (backend.connected ? i18n.tr("Connected") : i18n.tr("Offline"))
+                                      ? (backend.connected ? i18n.tr("Connected") : i18n.tr("Disconnected"))
                                       : backend.serverStatus
                             font.pixelSize: theme.fontSize - 3
-                            color: theme.foreground
+                            font.bold: !backend.connected
+                            color: backend.connected ? theme.foreground : theme.red
                         }
                     }
                     // History Sync Window Setting Pill
@@ -1189,7 +1206,7 @@ ApplicationWindow {
                     }
                 }
 
-                // Server Configuration Button (Ctrl+,)
+                // BluePill Settings Button (Ctrl+,)
                 Rectangle {
                     id: topServerConfigBtn
                     objectName: "topServerConfigBtn"
@@ -1201,7 +1218,7 @@ ApplicationWindow {
                     border.color: (root.showServerConfigModal || backend.needsSetup) ? theme.accent : theme.muted
 
                     ToolTip.visible: serverTopMouse.containsMouse
-                    ToolTip.text: i18n.tr("BlueBubbles Server Configuration (Ctrl+,)")
+                    ToolTip.text: i18n.tr("BluePill Settings (Ctrl+,)")
                     ToolTip.delay: 400
 
                     RowLayout {
@@ -1214,8 +1231,10 @@ ApplicationWindow {
                             color: root.showServerConfigModal ? theme.darkerBackground : theme.foreground
                         }
                         Text {
+                            id: serverTopBtnText
+                            objectName: "serverTopBtnText"
                             visible: root.width >= 900
-                            text: i18n.tr("Server")
+                            text: root.width < 1080 ? i18n.tr("Settings") : i18n.tr("BluePill Settings")
                             font.pixelSize: theme.fontSize - 2
                             font.bold: true
                             color: root.showServerConfigModal ? theme.darkerBackground : theme.foreground
@@ -7903,7 +7922,7 @@ ApplicationWindow {
         Rectangle {
             id: serverConfigCard
             objectName: "serverConfigCard"
-            width: Math.min(540, root.width - 40)
+            width: Math.min(580, root.width - 40)
             height: Math.min(root.height - 32, serverConfigCol.implicitHeight + 44)
             anchors.centerIn: parent
             radius: 12
@@ -7914,43 +7933,56 @@ ApplicationWindow {
 
             MouseArea { anchors.fill: parent }
 
-            ColumnLayout {
-                id: serverConfigCol
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
+            Flickable {
+                id: serverConfigFlickable
+                anchors.fill: parent
                 anchors.margins: 22
-                spacing: 12
+                contentWidth: width
+                contentHeight: serverConfigCol.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ScrollBar {
+                    policy: serverConfigFlickable.contentHeight > serverConfigFlickable.height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                }
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 10
-                    Text {
+                ColumnLayout {
+                    id: serverConfigCol
+                    width: serverConfigFlickable.width
+                    spacing: 12
+
+                    RowLayout {
                         Layout.fillWidth: true
-                        text: "⚙ " + i18n.tr("BluePill & BlueBubbles Server Configuration")
-                        font.pixelSize: theme.fontSize + 2
-                        font.bold: true
-                        color: theme.brightForeground
-                        elide: Text.ElideRight
-                    }
-                    Rectangle {
-                        visible: backend.hasPasswordConfigured && backend.serverUrl.length > 0
-                        height: 22
-                        radius: 6
-                        implicitWidth: cfgStatusBadge.implicitWidth + 14
-                        color: backend.connected ? Qt.rgba(48/255, 209/255, 88/255, 0.16) : theme.lighterBackground
-                        border.width: 1
-                        border.color: backend.connected ? theme.green : theme.muted
+                        spacing: 10
                         Text {
-                            id: cfgStatusBadge
-                            anchors.centerIn: parent
-                            text: backend.connected ? i18n.tr("Connected") : i18n.tr("Configured")
-                            font.pixelSize: theme.fontSize - 3
+                            id: settingsModalTitle
+                            objectName: "settingsModalTitle"
+                            Layout.fillWidth: true
+                            text: "⚙ " + i18n.tr("BluePill Settings")
+                            font.pixelSize: theme.fontSize + 2
                             font.bold: true
-                            color: backend.connected ? theme.green : theme.foreground
+                            color: theme.brightForeground
+                            elide: Text.ElideRight
+                        }
+                        Rectangle {
+                            height: 22
+                            radius: 6
+                            implicitWidth: cfgStatusBadge.implicitWidth + 14
+                            color: backend.connected
+                                       ? Qt.rgba(48/255, 209/255, 88/255, 0.16)
+                                       : Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.16)
+                            border.width: 1
+                            border.color: backend.connected ? theme.green : theme.red
+                            Text {
+                                id: cfgStatusBadge
+                                objectName: "cfgStatusBadge"
+                                anchors.centerIn: parent
+                                text: backend.connected ? i18n.tr("Connected") : i18n.tr("Disconnected")
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: true
+                                color: backend.connected ? theme.green : theme.red
+                            }
                         }
                     }
-                }
 
                 Text {
                     Layout.fillWidth: true
@@ -8233,6 +8265,238 @@ ApplicationWindow {
                     }
                 }
 
+                // Customizable Notifications & Audio Alert Settings
+                ColumnLayout {
+                    id: notificationsSettingsCol
+                    objectName: "notificationsSettingsCol"
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text {
+                            Layout.fillWidth: true
+                            text: "🔔 " + i18n.tr("Notifications & Audio Alerts")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.foreground
+                            elide: Text.ElideRight
+                        }
+                        Rectangle {
+                            id: previewSoundBtn
+                            objectName: "previewSoundBtn"
+                            height: 26
+                            radius: 6
+                            implicitWidth: previewSoundLbl.implicitWidth + 16
+                            color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
+                            border.width: 1
+                            border.color: theme.accent
+                            Text {
+                                id: previewSoundLbl
+                                anchors.centerIn: parent
+                                text: "🔊 " + i18n.tr("Preview Ding")
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: true
+                                color: theme.accent
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.previewNotificationSound(backend.notificationSoundPreset)
+                            }
+                        }
+                        Rectangle {
+                            id: testNotificationBtn
+                            objectName: "testNotificationBtn"
+                            height: 26
+                            radius: 6
+                            implicitWidth: testNotifLbl.implicitWidth + 16
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.muted
+                            Text {
+                                id: testNotifLbl
+                                anchors.centerIn: parent
+                                text: "🔔 " + i18n.tr("Test Alert")
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: true
+                                color: theme.foreground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.sendTestNotification()
+                            }
+                        }
+                    }
+
+                    // Notification Behavior Toggles (2x2 Grid)
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        rowSpacing: 6
+                        columnSpacing: 8
+
+                        Rectangle {
+                            id: toggleMasterNotificationsBtn
+                            objectName: "toggleMasterNotificationsBtn"
+                            Layout.fillWidth: true
+                            height: 32
+                            radius: 6
+                            color: backend.notificationsEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.notificationsEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.notificationsEnabled ? "✓ 🔔 " : "○ 🔕 ") + i18n.tr("Enable Alerts")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.notificationsEnabled
+                                color: backend.notificationsEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.notificationsEnabled = !backend.notificationsEnabled
+                            }
+                        }
+
+                        Rectangle {
+                            id: toggleBannerNotificationsBtn
+                            objectName: "toggleBannerNotificationsBtn"
+                            Layout.fillWidth: true
+                            height: 32
+                            radius: 6
+                            color: backend.notificationBannerEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.notificationBannerEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.notificationBannerEnabled ? "✓ 💬 " : "○ 💬 ") + i18n.tr("Desktop Banner")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.notificationBannerEnabled
+                                color: backend.notificationBannerEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.notificationBannerEnabled = !backend.notificationBannerEnabled
+                            }
+                        }
+
+                        Rectangle {
+                            id: toggleAudioDingBtn
+                            objectName: "toggleAudioDingBtn"
+                            Layout.fillWidth: true
+                            height: 32
+                            radius: 6
+                            color: backend.notificationSoundEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.notificationSoundEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.notificationSoundEnabled ? "✓ 🔊 " : "○ 🔇 ") + i18n.tr("Audio Ding")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.notificationSoundEnabled
+                                color: backend.notificationSoundEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.notificationSoundEnabled = !backend.notificationSoundEnabled
+                            }
+                        }
+
+                        Rectangle {
+                            id: toggleMuteActiveChatBtn
+                            objectName: "toggleMuteActiveChatBtn"
+                            Layout.fillWidth: true
+                            height: 32
+                            radius: 6
+                            color: backend.notificationMuteWhenActive ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.notificationMuteWhenActive ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.notificationMuteWhenActive ? "✓ 👀 " : "○ 👀 ") + i18n.tr("Mute Focused Chat")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.notificationMuteWhenActive
+                                color: backend.notificationMuteWhenActive ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.notificationMuteWhenActive = !backend.notificationMuteWhenActive
+                            }
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: i18n.tr("Audio Ding Sound Preset (click any preset to select & preview):")
+                        font.pixelSize: theme.fontSize - 3
+                        color: theme.darkForeground
+                        elide: Text.ElideRight
+                    }
+
+                    // Audio Ding Presets (3x2 Grid with instant preview)
+                    GridLayout {
+                        id: soundPresetGrid
+                        objectName: "soundPresetGrid"
+                        Layout.fillWidth: true
+                        columns: 3
+                        rowSpacing: 6
+                        columnSpacing: 8
+
+                        Repeater {
+                            model: backend.notificationSoundPresets
+                            delegate: Rectangle {
+                                required property var modelData
+                                objectName: "soundPresetBtn_" + modelData.id
+                                Layout.fillWidth: true
+                                height: 34
+                                radius: 6
+                                readonly property bool isSelected: backend.notificationSoundPreset === modelData.id
+                                color: isSelected ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.24) : theme.lighterBackground
+                                border.width: 1
+                                border.color: isSelected ? theme.accent : theme.muted
+
+                                RowLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 4
+                                    Text {
+                                        text: isSelected ? "🔊" : "♪"
+                                        font.pixelSize: theme.fontSize - 2
+                                        color: isSelected ? theme.accent : theme.darkForeground
+                                    }
+                                    Text {
+                                        text: modelData.label
+                                        font.pixelSize: theme.fontSize - 3
+                                        font.bold: isSelected
+                                        color: isSelected ? theme.brightForeground : theme.foreground
+                                        elide: Text.ElideRight
+                                    }
+                                }
+
+                                ToolTip.visible: presetMouse.containsMouse
+                                ToolTip.text: modelData.desc + " — " + i18n.tr("Click to select & preview")
+                                ToolTip.delay: 300
+
+                                MouseArea {
+                                    id: presetMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        backend.notificationSoundPreset = modelData.id
+                                        backend.previewNotificationSound(modelData.id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 10
@@ -8282,6 +8546,7 @@ ApplicationWindow {
                             }
                         }
                     }
+                }
                 }
             }
         }

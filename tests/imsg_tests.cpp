@@ -4394,6 +4394,200 @@ private slots:
         QCOMPARE(backend.pasteClipboardImageToTempFile(), QString());
     }
 
+    void testBluePillNotificationsSoundPresetsAndDisconnectedStatus() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString statePath = tempDir.filePath(QStringLiteral("state_notif.json"));
+
+        const QString chatGuid = QStringLiteral("iMessage;-;+15550198877");
+        QJsonObject chatObj;
+        chatObj.insert(QStringLiteral("guid"), chatGuid);
+        chatObj.insert(QStringLiteral("chatIdentifier"), QStringLiteral("+15550198877"));
+        chatObj.insert(QStringLiteral("style"), 45);
+
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+
+        {
+            Backend b(false);
+            b.setStateFilePath(statePath);
+            b.resetNotificationCountersForTest();
+
+            // 1. Verify default notification customization properties & 6 built-in presets
+            QVERIFY(b.notificationsEnabled());
+            QVERIFY(b.notificationBannerEnabled());
+            QVERIFY(b.notificationSoundEnabled());
+            QVERIFY(b.notificationMuteWhenActive());
+            QCOMPARE(b.notificationSoundPreset(), QStringLiteral("chime"));
+            QCOMPARE(b.notificationSoundPresets().size(), 6);
+
+            // Verify all 6 presets produce valid audio files and can be previewed
+            const QStringList presetIds = {
+                QStringLiteral("chime"),
+                QStringLiteral("crystal"),
+                QStringLiteral("marimba"),
+                QStringLiteral("pop"),
+                QStringLiteral("glass"),
+                QStringLiteral("system")
+            };
+            for (const QString &pid : presetIds) {
+                const QString soundFile = Backend::ensureNotificationSoundFile(pid);
+                QVERIFY2(!soundFile.isEmpty() && QFileInfo::exists(soundFile),
+                         qPrintable(QStringLiteral("Missing sound file for preset %1").arg(pid)));
+                QVERIFY(QFileInfo(soundFile).size() > 512);
+                b.previewNotificationSound(pid);
+                QCOMPARE(b.lastSoundPresetPlayedForTest(), pid);
+            }
+            QCOMPARE(b.soundPlayCountForTest(), 6);
+            b.resetNotificationCountersForTest();
+
+            // 2. Initial load establishes startup baseline (ROWID 500) without notifying
+            QJsonObject initialMsg;
+            initialMsg.insert(QStringLiteral("guid"), QStringLiteral("msg-initial-500"));
+            initialMsg.insert(QStringLiteral("text"), QStringLiteral("Initial baseline message"));
+            initialMsg.insert(QStringLiteral("isFromMe"), false);
+            initialMsg.insert(QStringLiteral("isRead"), false);
+            initialMsg.insert(QStringLiteral("originalROWID"), 500);
+            initialMsg.insert(QStringLiteral("dateCreated"), nowMs - 120000LL);
+            initialMsg.insert(QStringLiteral("chats"), QJsonArray{chatObj});
+            b.ingestMessagesForTest(QJsonArray{initialMsg}, true);
+            QCOMPARE(b.notificationCountForTest(), 0);
+
+            // 3. Pre-startup message (within 1 hour lookback window, or ROWID <= 500) must NEVER trigger a spurious ding
+            QJsonObject preStartupMsg;
+            preStartupMsg.insert(QStringLiteral("guid"), QStringLiteral("msg-pre-startup-499"));
+            preStartupMsg.insert(QStringLiteral("text"), QStringLiteral("Old unread message from 10 minutes ago"));
+            preStartupMsg.insert(QStringLiteral("isFromMe"), false);
+            preStartupMsg.insert(QStringLiteral("isRead"), false);
+            preStartupMsg.insert(QStringLiteral("originalROWID"), 499);
+            preStartupMsg.insert(QStringLiteral("dateCreated"), nowMs - 600000LL);
+            preStartupMsg.insert(QStringLiteral("chats"), QJsonArray{chatObj});
+            b.ingestMessagesForTest(QJsonArray{preStartupMsg}, false);
+            b.reconcileUnreadMessagesForTest(QJsonArray{preStartupMsg});
+            QCOMPARE(b.notificationCountForTest(), 0);
+            QCOMPARE(b.soundPlayCountForTest(), 0);
+
+            // 4. While chatGuid is actively focused (windowActive && selectedChatGuid == chatGuid) and
+            // notificationMuteWhenActive is true, incoming message in active chat is muted
+            QCOMPARE(b.selectedChatGuid(), chatGuid);
+            QVERIFY(b.windowActive());
+            QVERIFY(b.notificationMuteWhenActive());
+            b.setNotificationSoundPreset(QStringLiteral("crystal"));
+            QJsonObject activeChatMsg;
+            activeChatMsg.insert(QStringLiteral("guid"), QStringLiteral("msg-active-muted-501"));
+            activeChatMsg.insert(QStringLiteral("text"), QStringLiteral("Message while actively viewing chat"));
+            activeChatMsg.insert(QStringLiteral("isFromMe"), false);
+            activeChatMsg.insert(QStringLiteral("isRead"), false);
+            activeChatMsg.insert(QStringLiteral("originalROWID"), 501);
+            activeChatMsg.insert(QStringLiteral("dateCreated"), QDateTime::currentMSecsSinceEpoch() + 500LL);
+            activeChatMsg.insert(QStringLiteral("chats"), QJsonArray{chatObj});
+            b.ingestMessagesForTest(QJsonArray{activeChatMsg}, false);
+            QCOMPARE(b.notificationCountForTest(), 0);
+
+            // 5. When on Home dashboard (clearSelectedChat) or window inactive, genuinely new incoming message
+            // (dateCreated >= startupTimestamp, ROWID > 500) triggers notification once
+            b.clearSelectedChat();
+            QJsonObject liveMsg;
+            liveMsg.insert(QStringLiteral("guid"), QStringLiteral("msg-live-502"));
+            liveMsg.insert(QStringLiteral("text"), QStringLiteral("Brand new live message!"));
+            liveMsg.insert(QStringLiteral("isFromMe"), false);
+            liveMsg.insert(QStringLiteral("isRead"), false);
+            liveMsg.insert(QStringLiteral("originalROWID"), 502);
+            liveMsg.insert(QStringLiteral("dateCreated"), QDateTime::currentMSecsSinceEpoch() + 1000LL);
+            liveMsg.insert(QStringLiteral("chats"), QJsonArray{chatObj});
+            b.ingestMessagesForTest(QJsonArray{liveMsg}, false);
+            if (!b.omarchyDnd()) {
+                QCOMPARE(b.notificationCountForTest(), 1);
+                QCOMPARE(b.soundPlayCountForTest(), 1);
+                QCOMPARE(b.lastSoundPresetPlayedForTest(), QStringLiteral("crystal"));
+            }
+
+            // Re-ingesting or reconciling the same message must NEVER ding a second time
+            b.ingestMessagesForTest(QJsonArray{liveMsg}, false);
+            b.reconcileUnreadMessagesForTest(QJsonArray{liveMsg});
+            if (!b.omarchyDnd()) {
+                QCOMPARE(b.notificationCountForTest(), 1);
+                QCOMPARE(b.soundPlayCountForTest(), 1);
+            }
+
+            // Customize settings and verify persistence
+            b.setNotificationBannerEnabled(false);
+            b.setNotificationSoundEnabled(false);
+            b.setNotificationMuteWhenActive(false);
+            b.setNotificationSoundPreset(QStringLiteral("marimba"));
+        }
+
+        // Reload from state.json -> settings and notifiedMessageGuids persist
+        {
+            Backend b2(false);
+            b2.setStateFilePath(statePath);
+            QCOMPARE(b2.notificationBannerEnabled(), false);
+            QCOMPARE(b2.notificationSoundEnabled(), false);
+            QCOMPARE(b2.notificationMuteWhenActive(), false);
+            QCOMPARE(b2.notificationSoundPreset(), QStringLiteral("marimba"));
+
+            // Re-ingesting msg-live-502 after restart must still NOT re-notify
+            QJsonObject liveMsg;
+            liveMsg.insert(QStringLiteral("guid"), QStringLiteral("msg-live-502"));
+            liveMsg.insert(QStringLiteral("text"), QStringLiteral("Brand new live message!"));
+            liveMsg.insert(QStringLiteral("isFromMe"), false);
+            liveMsg.insert(QStringLiteral("isRead"), false);
+            liveMsg.insert(QStringLiteral("originalROWID"), 502);
+            liveMsg.insert(QStringLiteral("dateCreated"), QDateTime::currentMSecsSinceEpoch() + 1500LL);
+            liveMsg.insert(QStringLiteral("chats"), QJsonArray{chatObj});
+            b2.ingestMessagesForTest(QJsonArray{liveMsg}, false);
+            QCOMPARE(b2.notificationCountForTest(), 0);
+
+            // 5. Verify QML top-left disconnected red indicator, "BluePill Settings" button/modal, and preset buttons
+            Theme theme;
+            Translator i18n;
+            QQmlApplicationEngine engine;
+            engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b2);
+            engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+            engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+            engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+            QVERIFY(!engine.rootObjects().isEmpty());
+
+            QQuickWindow *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+            QVERIFY(win != nullptr);
+            win->setWidth(1280);
+            win->setHeight(800);
+
+            auto *statusDot = win->findChild<QQuickItem *>(QStringLiteral("topConnectionStatusDot"));
+            auto *serverBtnText = win->findChild<QQuickItem *>(QStringLiteral("serverTopBtnText"));
+            auto *settingsTitle = win->findChild<QQuickItem *>(QStringLiteral("settingsModalTitle"));
+            auto *cfgBadge = win->findChild<QQuickItem *>(QStringLiteral("cfgStatusBadge"));
+            auto *previewBtn = win->findChild<QQuickItem *>(QStringLiteral("previewSoundBtn"));
+            auto *presetGrid = win->findChild<QQuickItem *>(QStringLiteral("soundPresetGrid"));
+            QVERIFY(statusDot != nullptr);
+            QVERIFY(serverBtnText != nullptr);
+            QVERIFY(settingsTitle != nullptr);
+            QVERIFY(cfgBadge != nullptr);
+            QVERIFY(previewBtn != nullptr);
+            QVERIFY(presetGrid != nullptr);
+
+            // Top button and modal title say "BluePill Settings"
+            QCOMPARE(serverBtnText->property("text").toString(), QStringLiteral("BluePill Settings"));
+            QVERIFY(settingsTitle->property("text").toString().contains(QStringLiteral("BluePill Settings")));
+
+            // Initially disconnected -> top-left dot is red (theme.red) and badge says Disconnected
+            QCOMPARE(b2.connected(), false);
+            QCOMPARE(statusDot->property("color").value<QColor>(), theme.red());
+            QCOMPARE(cfgBadge->property("text").toString(), QStringLiteral("Disconnected"));
+
+            // Network success -> connected -> top-left dot turns green (theme.green)
+            b2.simulateNetworkSuccessForTest();
+            QCOMPARE(b2.connected(), true);
+            QCOMPARE(statusDot->property("color").value<QColor>(), theme.green());
+            QCOMPARE(cfgBadge->property("text").toString(), QStringLiteral("Connected"));
+
+            // Network failure -> immediately turns red (theme.red) on first failure
+            b2.simulateNetworkFailureForTest();
+            QCOMPARE(b2.connected(), false);
+            QCOMPARE(statusDot->property("color").value<QColor>(), theme.red());
+            QCOMPARE(cfgBadge->property("text").toString(), QStringLiteral("Disconnected"));
+        }
+    }
+
 };
 
 QTEST_MAIN(ImsgTests)

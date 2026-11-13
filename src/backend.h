@@ -85,6 +85,11 @@ class Backend : public QObject {
     Q_PROPERTY(bool selectedChatHasContact READ selectedChatHasContact NOTIFY selectedChatChanged)
     Q_PROPERTY(int selectedChatUnreadCount READ selectedChatUnreadCount NOTIFY selectedChatChanged)
     Q_PROPERTY(bool notificationsEnabled READ notificationsEnabled WRITE setNotificationsEnabled NOTIFY notificationsChanged)
+    Q_PROPERTY(bool notificationBannerEnabled READ notificationBannerEnabled WRITE setNotificationBannerEnabled NOTIFY notificationsChanged)
+    Q_PROPERTY(bool notificationSoundEnabled READ notificationSoundEnabled WRITE setNotificationSoundEnabled NOTIFY notificationsChanged)
+    Q_PROPERTY(bool notificationMuteWhenActive READ notificationMuteWhenActive WRITE setNotificationMuteWhenActive NOTIFY notificationsChanged)
+    Q_PROPERTY(QString notificationSoundPreset READ notificationSoundPreset WRITE setNotificationSoundPreset NOTIFY notificationsChanged)
+    Q_PROPERTY(QVariantList notificationSoundPresets READ notificationSoundPresets CONSTANT)
     Q_PROPERTY(bool omarchyDnd READ omarchyDnd NOTIFY omarchyDndChanged)
     Q_PROPERTY(QVariantList chats READ chats NOTIFY chatsChanged)
     Q_PROPERTY(QVariantList pinnedChats READ pinnedChats NOTIFY chatsChanged)
@@ -149,6 +154,11 @@ public:
     bool selectedChatHasContact() const;
     int selectedChatUnreadCount() const;
     bool notificationsEnabled() const { return m_notificationsEnabled; }
+    bool notificationBannerEnabled() const { return m_notificationBannerEnabled; }
+    bool notificationSoundEnabled() const { return m_notificationSoundEnabled; }
+    bool notificationMuteWhenActive() const { return m_notificationMuteWhenActive; }
+    QString notificationSoundPreset() const { return m_notificationSoundPreset; }
+    QVariantList notificationSoundPresets() const;
     bool omarchyDnd() const;
     bool areOmarchyNotificationsEnabled() const;
     QVariantList chats() const;
@@ -202,6 +212,13 @@ public:
 
     void setWindowActive(bool active);
     void setNotificationsEnabled(bool enabled);
+    void setNotificationBannerEnabled(bool enabled);
+    void setNotificationSoundEnabled(bool enabled);
+    void setNotificationMuteWhenActive(bool enabled);
+    void setNotificationSoundPreset(const QString &preset);
+    Q_INVOKABLE void previewNotificationSound(const QString &preset = QString());
+    Q_INVOKABLE void sendTestNotification();
+    static QString ensureNotificationSoundFile(const QString &preset);
     void setStateFilePath(const QString &path);
     void setConfigFilePath(const QString &path);
     QString configFilePath() const;
@@ -319,6 +336,16 @@ public:
     QStringList candidateUrls() const { return m_candidateUrls; }
     int consecutiveFailures() const { return m_consecutiveFailures; }
     void attemptReconnect();
+    void simulateNetworkFailureForTest() { handleNetworkFailure(QStringLiteral("test")); }
+    void simulateNetworkSuccessForTest() { handleNetworkSuccess(); }
+    int notificationCountForTest() const { return m_notificationCountForTest; }
+    int soundPlayCountForTest() const { return m_soundPlayCountForTest; }
+    QString lastSoundPresetPlayedForTest() const { return m_lastSoundPresetPlayed; }
+    void resetNotificationCountersForTest() {
+        m_notificationCountForTest = 0;
+        m_soundPlayCountForTest = 0;
+        m_lastSoundPresetPlayed.clear();
+    }
 
     // Pure testable helpers
     static QString normalizeHandle(const QString &raw);
@@ -445,8 +472,9 @@ private:
     void processIncomingMessages(const QJsonArray &messagesArray, bool isInitialLoad);
     void rebuildChatPresentation(ChatEntry &entry) const;
     void sortChats();
+    bool shouldNotifyForIncomingMessage(const QJsonObject &m, const QString &chatGuid, qint64 dateCreated, qint64 rowId) const;
     void notifyIncomingMessage(const QString &chatGuid, const QString &sender, const QString &preview);
-    void playNotificationSound();
+    void playNotificationSound(const QString &presetOverride = QString(), bool forcePreview = false);
     void handleNetworkFailure(const QString &context);
     void handleNetworkSuccess();
     void applyRemoteIcloudNotes(const QJsonArray &data, const QString &acknowledgedNoteId = QString(), quint64 acknowledgedMutationSeq = 0);
@@ -490,6 +518,13 @@ private:
     bool m_windowActive = true;
     QPointer<QObject> m_rootWindow;
     bool m_notificationsEnabled = true;
+    bool m_notificationBannerEnabled = true;
+    bool m_notificationSoundEnabled = true;
+    bool m_notificationMuteWhenActive = true;
+    QString m_notificationSoundPreset = QStringLiteral("chime");
+    int m_notificationCountForTest = 0;
+    int m_soundPlayCountForTest = 0;
+    QString m_lastSoundPresetPlayed;
     QString m_serverStatus = QStringLiteral("Connecting...");
     QString m_lastKnownServerStatus = QStringLiteral("Connected · Private API");
     int m_historySyncDays = 60;
@@ -525,6 +560,7 @@ private:
     QHash<QString, int> m_attachmentRetryCount;
     QList<QPair<QString, QString>> m_attachmentDownloadQueue;
     QSet<QString> m_seenMessageGuids;
+    QSet<QString> m_notifiedMessageGuids;
     QSet<QString> m_deletedMessageGuids;
     QHash<QString, qint64> m_deletedChatTimestamps;
     QHash<QString, QVariantMap> m_linkPreviewCache;
@@ -538,8 +574,11 @@ private:
     QVariantList m_messages;
     QHash<QString, QVariantList> m_demoChatMessages;
     qint64 m_lastMessageTimestamp = 0;
+    qint64 m_lastNotifiedTimestamp = 0;
     qint64 m_highestMessageRowId = 0;
+    qint64 m_startupHighestRowId = 0;
     qint64 m_startupTimestamp = 0;
+    bool m_initialSyncComplete = false;
     qint64 m_lastContactsFetchMs = 0;
     QString m_playingAudioGuid;
     bool m_audioPlaying = false;

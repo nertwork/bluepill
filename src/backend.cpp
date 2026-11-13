@@ -15,6 +15,8 @@
 #include <QImage>
 #include <QImageReader>
 #include <QImageWriter>
+#include <cmath>
+#include <cstdint>
 
 static QString cleanIcloudNoteBody(const QString &title, const QString &body) {
     QString cleanTitle = title;
@@ -174,10 +176,9 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
 
     if (autoStart) {
         loadMessagesCache();
-        if (!m_chats.isEmpty()) {
-            m_connected = true;
-            m_serverStatus = m_lastKnownServerStatus;
-        }
+        m_connected = false;
+        m_serverStatus = QStringLiteral("Connecting...");
+        m_startupHighestRowId = qMax(m_startupHighestRowId, m_highestMessageRowId);
     }
 
     m_saveCacheTimer.setSingleShot(true);
@@ -277,7 +278,8 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
         m_relativeTimeTimer.start();
         m_contactsRefreshTimer.start();
     } else if (autoStart) {
-        m_serverStatus = QStringLiteral("Missing BlueBubbles credentials");
+        m_connected = false;
+        m_serverStatus = QStringLiteral("Disconnected · Missing BlueBubbles credentials");
         emit statusChanged();
     }
 }
@@ -298,6 +300,10 @@ void Backend::setStateFilePath(const QString &path) {
     if (path.trimmed().isEmpty()) return;
     m_stateFilePath = path.trimmed();
     m_notificationsEnabled = true;
+    m_notificationBannerEnabled = true;
+    m_notificationSoundEnabled = true;
+    m_notificationMuteWhenActive = true;
+    m_notificationSoundPreset = QStringLiteral("chime");
     m_icloudNotesEnabled = true;
     m_icloudCalendarEnabled = true;
     m_icloudPhotosEnabled = true;
@@ -310,6 +316,9 @@ void Backend::setStateFilePath(const QString &path) {
     m_chats.clear();
     m_chatMessagesCache.clear();
     m_seenMessageGuids.clear();
+    m_notifiedMessageGuids.clear();
+    m_lastNotifiedTimestamp = 0;
+    m_startupHighestRowId = 0;
     m_deletedMessageGuids.clear();
     m_deletedChatTimestamps.clear();
     m_selectedChatGuid.clear();
@@ -327,6 +336,32 @@ void Backend::loadAppState() {
     const QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
     if (obj.contains(QStringLiteral("notificationsEnabled"))) {
         m_notificationsEnabled = obj.value(QStringLiteral("notificationsEnabled")).toBool(true);
+    }
+    if (obj.contains(QStringLiteral("notificationBannerEnabled"))) {
+        m_notificationBannerEnabled = obj.value(QStringLiteral("notificationBannerEnabled")).toBool(true);
+    }
+    if (obj.contains(QStringLiteral("notificationSoundEnabled"))) {
+        m_notificationSoundEnabled = obj.value(QStringLiteral("notificationSoundEnabled")).toBool(true);
+    }
+    if (obj.contains(QStringLiteral("notificationMuteWhenActive"))) {
+        m_notificationMuteWhenActive = obj.value(QStringLiteral("notificationMuteWhenActive")).toBool(true);
+    }
+    if (obj.contains(QStringLiteral("notificationSoundPreset"))) {
+        const QString preset = obj.value(QStringLiteral("notificationSoundPreset")).toString().trimmed().toLower();
+        if (!preset.isEmpty()) {
+            m_notificationSoundPreset = preset;
+        }
+    }
+    if (obj.contains(QStringLiteral("lastNotifiedTimestamp"))) {
+        m_lastNotifiedTimestamp = obj.value(QStringLiteral("lastNotifiedTimestamp")).toVariant().toLongLong();
+    }
+    const QJsonArray notifiedArr = obj.value(QStringLiteral("notifiedMessageGuids")).toArray();
+    for (const QJsonValue &v : notifiedArr) {
+        const QString g = v.toString().trimmed();
+        if (!g.isEmpty()) {
+            m_notifiedMessageGuids.insert(g);
+            m_seenMessageGuids.insert(g);
+        }
     }
     if (obj.contains(QStringLiteral("icloudNotesEnabled"))) {
         m_icloudNotesEnabled = obj.value(QStringLiteral("icloudNotesEnabled")).toBool(true);
@@ -552,6 +587,19 @@ bool Backend::saveAppState() const {
 
     QJsonObject root;
     root.insert(QStringLiteral("notificationsEnabled"), m_notificationsEnabled);
+    root.insert(QStringLiteral("notificationBannerEnabled"), m_notificationBannerEnabled);
+    root.insert(QStringLiteral("notificationSoundEnabled"), m_notificationSoundEnabled);
+    root.insert(QStringLiteral("notificationMuteWhenActive"), m_notificationMuteWhenActive);
+    root.insert(QStringLiteral("notificationSoundPreset"), m_notificationSoundPreset);
+    root.insert(QStringLiteral("lastNotifiedTimestamp"), m_lastNotifiedTimestamp);
+    QJsonArray notifiedOut;
+    QStringList sortedNotified = m_notifiedMessageGuids.values();
+    sortedNotified.sort();
+    const int startNotifiedIdx = qMax(0, int(sortedNotified.size()) - 500);
+    for (int i = startNotifiedIdx; i < sortedNotified.size(); ++i) {
+        notifiedOut.append(sortedNotified.at(i));
+    }
+    root.insert(QStringLiteral("notifiedMessageGuids"), notifiedOut);
     root.insert(QStringLiteral("icloudNotesEnabled"), m_icloudNotesEnabled);
     root.insert(QStringLiteral("icloudCalendarEnabled"), m_icloudCalendarEnabled);
     root.insert(QStringLiteral("icloudPhotosEnabled"), m_icloudPhotosEnabled);
@@ -975,8 +1023,66 @@ void Backend::setNotificationsEnabled(bool enabled) {
     saveAppState();
     emit notificationsChanged();
     emit toastMessage(m_notificationsEnabled
-                          ? QStringLiteral("🔔 Desktop notifications enabled")
-                          : QStringLiteral("🔕 Desktop notifications muted"));
+                          ? QStringLiteral("🔔 Notifications enabled")
+                          : QStringLiteral("🔕 Notifications muted"));
+}
+
+void Backend::setNotificationBannerEnabled(bool enabled) {
+    if (m_notificationBannerEnabled == enabled) return;
+    m_notificationBannerEnabled = enabled;
+    saveAppState();
+    emit notificationsChanged();
+    emit toastMessage(m_notificationBannerEnabled
+                          ? QStringLiteral("💬 Desktop banner alerts enabled")
+                          : QStringLiteral("💬 Desktop banner alerts hidden"));
+}
+
+void Backend::setNotificationSoundEnabled(bool enabled) {
+    if (m_notificationSoundEnabled == enabled) return;
+    m_notificationSoundEnabled = enabled;
+    saveAppState();
+    emit notificationsChanged();
+    emit toastMessage(m_notificationSoundEnabled
+                          ? QStringLiteral("🔊 Audio notification ding enabled")
+                          : QStringLiteral("🔇 Audio notification ding muted"));
+}
+
+void Backend::setNotificationMuteWhenActive(bool enabled) {
+    if (m_notificationMuteWhenActive == enabled) return;
+    m_notificationMuteWhenActive = enabled;
+    saveAppState();
+    emit notificationsChanged();
+}
+
+void Backend::setNotificationSoundPreset(const QString &preset) {
+    QString norm = preset.trimmed().toLower();
+    static const QStringList validPresets = {
+        QStringLiteral("chime"),
+        QStringLiteral("crystal"),
+        QStringLiteral("marimba"),
+        QStringLiteral("pop"),
+        QStringLiteral("glass"),
+        QStringLiteral("system")
+    };
+    if (!validPresets.contains(norm)) {
+        norm = QStringLiteral("chime");
+    }
+    if (m_notificationSoundPreset == norm) return;
+    m_notificationSoundPreset = norm;
+    ensureNotificationSoundFile(m_notificationSoundPreset);
+    saveAppState();
+    emit notificationsChanged();
+}
+
+QVariantList Backend::notificationSoundPresets() const {
+    return QVariantList{
+        QVariantMap{{QStringLiteral("id"), QStringLiteral("chime")}, {QStringLiteral("label"), QStringLiteral("Classic Chime")}, {QStringLiteral("desc"), QStringLiteral("Warm two-tone iMessage chime")}},
+        QVariantMap{{QStringLiteral("id"), QStringLiteral("crystal")}, {QStringLiteral("label"), QStringLiteral("Crystal Ding")}, {QStringLiteral("desc"), QStringLiteral("Bright resonant bell ding")}},
+        QVariantMap{{QStringLiteral("id"), QStringLiteral("marimba")}, {QStringLiteral("label"), QStringLiteral("Tri-Tone Marimba")}, {QStringLiteral("desc"), QStringLiteral("Ascending 3-note chord")}},
+        QVariantMap{{QStringLiteral("id"), QStringLiteral("pop")}, {QStringLiteral("label"), QStringLiteral("Soft Pop")}, {QStringLiteral("desc"), QStringLiteral("Subtle gentle bubble pop")}},
+        QVariantMap{{QStringLiteral("id"), QStringLiteral("glass")}, {QStringLiteral("label"), QStringLiteral("Glass Ping")}, {QStringLiteral("desc"), QStringLiteral("Clean minimal glass ping")}},
+        QVariantMap{{QStringLiteral("id"), QStringLiteral("system")}, {QStringLiteral("label"), QStringLiteral("System Tone")}, {QStringLiteral("desc"), QStringLiteral("Freedesktop message alert")}}
+    };
 }
 
 void Backend::toggleNotifications() {
@@ -1916,7 +2022,10 @@ void Backend::handleNetworkFailure(const QString &context) {
     Q_UNUSED(context);
     m_consecutiveFailures++;
 
-    // Only clear connection cache & rotate endpoint after 4 consecutive failures
+    const bool wasConnected = m_connected;
+    m_connected = false;
+
+    // Clear connection cache & rotate endpoint after 4 consecutive failures
     if (m_consecutiveFailures >= 4) {
         stopSocketIoClient();
         m_nam.clearConnectionCache();
@@ -1927,8 +2036,13 @@ void Backend::handleNetworkFailure(const QString &context) {
             m_candidateUrlIndex = (m_candidateUrlIndex + 1) % m_candidateUrls.size();
             m_serverUrl = m_candidateUrls[m_candidateUrlIndex];
         }
-        m_connected = false;
-        m_serverStatus = QStringLiteral("Reconnecting (%1)...").arg(m_serverUrl);
+    }
+
+    const QString nextStatus = m_serverUrl.isEmpty()
+                                   ? QStringLiteral("Disconnected")
+                                   : QStringLiteral("Disconnected · Reconnecting (%1)...").arg(m_serverUrl);
+    if (wasConnected || m_serverStatus != nextStatus) {
+        m_serverStatus = nextStatus;
         emit statusChanged();
     }
 
@@ -1952,7 +2066,8 @@ void Backend::handleNetworkSuccess() {
     bool statusUpdated = false;
     if (m_serverStatus.isEmpty() ||
         m_serverStatus.startsWith(QStringLiteral("Connecting")) ||
-        m_serverStatus.startsWith(QStringLiteral("Reconnecting"))) {
+        m_serverStatus.startsWith(QStringLiteral("Reconnecting")) ||
+        m_serverStatus.startsWith(QStringLiteral("Disconnected"))) {
         m_serverStatus = m_lastKnownServerStatus.isEmpty()
                              ? QStringLiteral("Connected · Private API")
                              : m_lastKnownServerStatus;
@@ -2537,6 +2652,8 @@ void Backend::fetchRecentMessages(int offset, int syncGen) {
         const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
         processIncomingMessages(arr, true);
         if (offset == 0) {
+            m_initialSyncComplete = true;
+            m_startupHighestRowId = qMax(m_startupHighestRowId, m_highestMessageRowId);
             saveMessagesCache();
         }
 
@@ -2659,6 +2776,10 @@ void Backend::reconcileServerUnreadMessages(const QJsonArray &unreadMessages) {
         }
 
         const bool alreadySeen = m_seenMessageGuids.contains(msgGuid);
+        m_seenMessageGuids.insert(msgGuid);
+        if (m_autoStart && !m_initialSyncComplete) {
+            m_notifiedMessageGuids.insert(msgGuid);
+        }
 
         for (const QJsonValue &cv : chatsArr) {
             const QJsonObject cObj = cv.toObject();
@@ -2713,17 +2834,18 @@ void Backend::reconcileServerUnreadMessages(const QJsonArray &unreadMessages) {
             }
 
             if (!alreadySeen) {
-                m_seenMessageGuids.insert(msgGuid);
                 if (dateCreated >= (nowMs - 3600000LL)) {
                     prefetchMessageAttachments(m, false);
-                    if (m_notificationsEnabled && !m_mutedChats.contains(cg) &&
-                        isMessageUnread(m, m_readWatermarks.value(cg, 0), m_unreadOverrides.value(cg, 0))) {
-                        QString preview = extractMessageText(m);
-                        if (!preview.isEmpty()) {
-                            const QString senderAddr = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("address")).toString();
-                            const QString senderName = senderAddr.isEmpty() ? m_chats[chatIdx].title : resolveContactName(senderAddr);
-                            notifyIncomingMessage(cg, senderName, preview);
-                        }
+                }
+                if (!wasCached && shouldNotifyForIncomingMessage(m, cg, dateCreated, rowId)) {
+                    QString preview = extractMessageText(m);
+                    if (!preview.isEmpty()) {
+                        m_notifiedMessageGuids.insert(msgGuid);
+                        m_lastNotifiedTimestamp = qMax(m_lastNotifiedTimestamp, dateCreated);
+                        stateChanged = true;
+                        const QString senderAddr = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("address")).toString();
+                        const QString senderName = senderAddr.isEmpty() ? m_chats[chatIdx].title : resolveContactName(senderAddr);
+                        notifyIncomingMessage(cg, senderName, preview);
                     }
                 }
             }
@@ -3032,6 +3154,12 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
         const bool alreadySeen = m_seenMessageGuids.contains(msgGuid);
         if (!msgGuid.isEmpty()) {
             m_seenMessageGuids.insert(msgGuid);
+            if (isInitialLoad || (m_autoStart && !m_initialSyncComplete)) {
+                m_notifiedMessageGuids.insert(msgGuid);
+            }
+        }
+        if (isInitialLoad && rowId > 0 && rowId < 100000000LL && !msgGuid.startsWith(QStringLiteral("temp-")) && !msgGuid.startsWith(QStringLiteral("bp-"))) {
+            m_startupHighestRowId = qMax(m_startupHighestRowId, rowId);
         }
         for (const QJsonValue &cv : chatsArr) {
             const QString cg = cv.toObject().value(QStringLiteral("guid")).toString();
@@ -3179,13 +3307,13 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
         // Notification for brand new incoming message
         if (!isInitialLoad && !alreadySeen) {
             newIncomingMessages.append(m);
-            const bool isFromMe = m.value(QStringLiteral("isFromMe")).toBool() || m.value(QStringLiteral("is_from_me")).toBool() || (m.value(QStringLiteral("is_from_me")).toInt(0) == 1);
-            if (!isFromMe && !msgIsRead && isMessageUnread(m, m_readWatermarks.value(chatGuid, 0), m_unreadOverrides.value(chatGuid, 0)) && dateCreated >= m_startupTimestamp - 3600000LL) {
-                if (m_notificationsEnabled && !m_mutedChats.contains(chatGuid)) {
-                    const QString senderAddr = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("address")).toString();
-                    const QString senderName = senderAddr.isEmpty() ? m_chats[existingIdx].title : resolveContactName(senderAddr);
-                    notifyIncomingMessage(chatGuid, senderName, preview);
-                }
+            if (!msgIsRead && shouldNotifyForIncomingMessage(m, chatGuid, dateCreated, rowId)) {
+                m_notifiedMessageGuids.insert(msgGuid);
+                m_lastNotifiedTimestamp = qMax(m_lastNotifiedTimestamp, dateCreated);
+                saveAppState();
+                const QString senderAddr = m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("address")).toString();
+                const QString senderName = senderAddr.isEmpty() ? m_chats[existingIdx].title : resolveContactName(senderAddr);
+                notifyIncomingMessage(chatGuid, senderName, preview);
             }
         }
     }
@@ -7151,28 +7279,215 @@ void Backend::openAttachment(const QString &guid, const QString &transferName) {
     downloadAttachment(guid, transferName, true);
 }
 
-void Backend::notifyIncomingMessage(const QString &chatGuid, const QString &sender, const QString &preview) {
-    if (!areOmarchyNotificationsEnabled() || m_mutedChats.contains(chatGuid)) return;
-    QProcess::startDetached(QStringLiteral("notify-send"),
-                            {QStringLiteral("-a"), QStringLiteral("imsg"),
-                             QStringLiteral("-i"), QStringLiteral("messaging-im"),
-                             QStringLiteral("-u"), QStringLiteral("normal"),
-                             sender, preview});
-    playNotificationSound();
+bool Backend::shouldNotifyForIncomingMessage(const QJsonObject &m, const QString &chatGuid, qint64 dateCreated, qint64 rowId) const {
+    if (!areOmarchyNotificationsEnabled()) return false;
+    if (chatGuid.isEmpty() || m_mutedChats.contains(chatGuid)) return false;
+    if (m_autoStart && !m_initialSyncComplete) return false;
+
+    const QString msgGuid = m.value(QStringLiteral("guid")).toString().trimmed();
+    if (msgGuid.isEmpty() || msgGuid.startsWith(QStringLiteral("temp-")) || msgGuid.startsWith(QStringLiteral("bp-"))) {
+        return false;
+    }
+    if (m_notifiedMessageGuids.contains(msgGuid) || m_deletedMessageGuids.contains(msgGuid)) {
+        return false;
+    }
+    if (isMessageDeletedOrRetracted(m)) {
+        return false;
+    }
+    const bool isFromMe = m.value(QStringLiteral("isFromMe")).toBool()
+                          || m.value(QStringLiteral("is_from_me")).toBool()
+                          || (m.value(QStringLiteral("is_from_me")).toInt(0) == 1);
+    if (isFromMe) {
+        return false;
+    }
+    if (!isMessageUnread(m, m_readWatermarks.value(chatGuid, 0), m_unreadOverrides.value(chatGuid, 0))) {
+        return false;
+    }
+    // Never notify for messages created before BluePill started or older than our last notified message
+    if (dateCreated < m_startupTimestamp) {
+        return false;
+    }
+    if (m_startupHighestRowId > 0 && rowId > 0 && rowId <= m_startupHighestRowId) {
+        return false;
+    }
+    return true;
 }
 
-void Backend::playNotificationSound() {
-    if (!areOmarchyNotificationsEnabled()) return;
-    QString soundPath;
-    if (QFileInfo::exists(QStringLiteral("/usr/share/imsg/imessage-notify.wav"))) {
-        soundPath = QStringLiteral("/usr/share/imsg/imessage-notify.wav");
-    } else {
+QString Backend::ensureNotificationSoundFile(const QString &preset) {
+    QString norm = preset.trimmed().toLower();
+    if (norm.isEmpty()) norm = QStringLiteral("chime");
+
+    if (norm == QStringLiteral("chime")) {
+        if (QFileInfo::exists(QStringLiteral("/usr/share/imsg/imessage-notify.wav"))) {
+            return QStringLiteral("/usr/share/imsg/imessage-notify.wav");
+        }
         const QString localPath = QCoreApplication::applicationDirPath() + QStringLiteral("/../resources/imessage-notify.wav");
         if (QFileInfo::exists(localPath)) {
-            soundPath = localPath;
-        } else if (QFileInfo::exists(QStringLiteral("/usr/share/sounds/freedesktop/stereo/message-new-instant.oga"))) {
-            soundPath = QStringLiteral("/usr/share/sounds/freedesktop/stereo/message-new-instant.oga");
+            return localPath;
         }
+    } else if (norm == QStringLiteral("system")) {
+        if (QFileInfo::exists(QStringLiteral("/usr/share/sounds/freedesktop/stereo/message-new-instant.oga"))) {
+            return QStringLiteral("/usr/share/sounds/freedesktop/stereo/message-new-instant.oga");
+        }
+    }
+
+    const QString soundsDir = QDir::homePath() + QStringLiteral("/.cache/bluepill/sounds");
+    QDir().mkpath(soundsDir);
+    const QString wavPath = soundsDir + QStringLiteral("/notify-%1.wav").arg(norm);
+    if (QFileInfo::exists(wavPath) && QFileInfo(wavPath).size() > 1024) {
+        return wavPath;
+    }
+
+    constexpr int sampleRate = 44100;
+    int durationMs = 420;
+    if (norm == QStringLiteral("marimba")) durationMs = 460;
+    else if (norm == QStringLiteral("pop")) durationMs = 180;
+    else if (norm == QStringLiteral("glass")) durationMs = 340;
+
+    const int numSamples = (sampleRate * durationMs) / 1000;
+    QByteArray pcm(numSamples * int(sizeof(int16_t)), 0);
+    auto *samples = reinterpret_cast<int16_t *>(pcm.data());
+    constexpr double twoPi = 6.28318530717958647692;
+
+    for (int i = 0; i < numSamples; ++i) {
+        const double t = double(i) / double(sampleRate);
+        double env = 0.0;
+        double sig = 0.0;
+
+        if (norm == QStringLiteral("crystal")) {
+            env = std::min(1.0, t / 0.004) * std::exp(-t * 7.5);
+            sig = 0.65 * std::sin(twoPi * 1318.51 * t)
+                + 0.25 * std::sin(twoPi * 2637.02 * t)
+                + 0.10 * std::sin(twoPi * 3639.0 * t);
+        } else if (norm == QStringLiteral("marimba")) {
+            double freq = 987.77; // B5
+            double localT = t;
+            if (t >= 0.19) {
+                freq = 1661.22; // G#6
+                localT = t - 0.19;
+            } else if (t >= 0.095) {
+                freq = 1318.51; // E6
+                localT = t - 0.095;
+            }
+            env = std::min(1.0, localT / 0.003) * std::exp(-localT * 12.0);
+            sig = 0.78 * std::sin(twoPi * freq * localT)
+                + 0.22 * std::sin(twoPi * (freq * 4.0) * localT) * std::exp(-localT * 28.0);
+        } else if (norm == QStringLiteral("pop")) {
+            if (t < 0.095) {
+                const double sweepPhase = twoPi * (360.0 * t + 3800.0 * t * t);
+                env = std::sin((t / 0.095) * 3.14159265358979323846);
+                sig = 0.85 * std::sin(sweepPhase);
+            }
+        } else if (norm == QStringLiteral("glass")) {
+            env = std::min(1.0, t / 0.002) * std::exp(-t * 10.5);
+            sig = 0.72 * std::sin(twoPi * 1760.0 * t)
+                + 0.28 * std::sin(twoPi * 2637.02 * t);
+        } else {
+            // Default two-tone chime (C6 -> G6)
+            const double freq = (t < 0.11) ? 1046.50 : 1567.98;
+            const double localT = (t < 0.11) ? t : (t - 0.11);
+            env = std::min(1.0, localT / 0.004) * std::exp(-localT * 8.5);
+            sig = 0.75 * std::sin(twoPi * freq * localT)
+                + 0.25 * std::sin(twoPi * (freq * 2.0) * localT);
+        }
+
+        const double clamped = std::max(-1.0, std::min(1.0, sig * env * 0.55));
+        samples[i] = static_cast<int16_t>(clamped * 32767.0);
+    }
+
+    QByteArray wav;
+    wav.reserve(44 + pcm.size());
+    auto appendU32 = [&wav](uint32_t v) {
+        char b[4] = {
+            static_cast<char>(v & 0xFF),
+            static_cast<char>((v >> 8) & 0xFF),
+            static_cast<char>((v >> 16) & 0xFF),
+            static_cast<char>((v >> 24) & 0xFF)
+        };
+        wav.append(b, 4);
+    };
+    auto appendU16 = [&wav](uint16_t v) {
+        char b[2] = {
+            static_cast<char>(v & 0xFF),
+            static_cast<char>((v >> 8) & 0xFF)
+        };
+        wav.append(b, 2);
+    };
+
+    const uint32_t dataSize = static_cast<uint32_t>(pcm.size());
+    wav.append("RIFF", 4);
+    appendU32(36 + dataSize);
+    wav.append("WAVEfmt ", 8);
+    appendU32(16); // PCM chunk size
+    appendU16(1);  // AudioFormat = 1 (PCM)
+    appendU16(1);  // NumChannels = 1 (Mono)
+    appendU32(sampleRate);
+    appendU32(sampleRate * 2);
+    appendU16(2);  // BlockAlign
+    appendU16(16); // BitsPerSample
+    wav.append("data", 4);
+    appendU32(dataSize);
+    wav.append(pcm);
+
+    QFile out(wavPath);
+    if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        out.write(wav);
+        out.close();
+    }
+    return wavPath;
+}
+
+void Backend::previewNotificationSound(const QString &preset) {
+    const QString chosen = preset.trimmed().isEmpty() ? m_notificationSoundPreset : preset.trimmed().toLower();
+    playNotificationSound(chosen, true);
+}
+
+void Backend::sendTestNotification() {
+    m_notificationCountForTest++;
+    const bool isOffscreen = (QGuiApplication::platformName() == QStringLiteral("offscreen"));
+    if (!isOffscreen && !m_demoMode && m_notificationBannerEnabled) {
+        QProcess::startDetached(QStringLiteral("notify-send"),
+                                {QStringLiteral("-a"), QStringLiteral("BluePill"),
+                                 QStringLiteral("-i"), QStringLiteral("messaging-im"),
+                                 QStringLiteral("-u"), QStringLiteral("normal"),
+                                 QStringLiteral("BluePill Test Notification"),
+                                 QStringLiteral("Audio preset: %1").arg(m_notificationSoundPreset)});
+    }
+    playNotificationSound(m_notificationSoundPreset, true);
+    emit toastMessage(QStringLiteral("🔔 Sent test notification (%1)").arg(m_notificationSoundPreset));
+}
+
+void Backend::notifyIncomingMessage(const QString &chatGuid, const QString &sender, const QString &preview) {
+    if (!areOmarchyNotificationsEnabled() || m_mutedChats.contains(chatGuid)) return;
+    if (m_notificationMuteWhenActive && m_windowActive && !m_selectedChatGuid.isEmpty() && chatGuid == m_selectedChatGuid) {
+        return;
+    }
+    m_notificationCountForTest++;
+    const bool isOffscreen = (QGuiApplication::platformName() == QStringLiteral("offscreen"));
+    if (!isOffscreen && !m_demoMode && m_notificationBannerEnabled) {
+        QProcess::startDetached(QStringLiteral("notify-send"),
+                                {QStringLiteral("-a"), QStringLiteral("BluePill"),
+                                 QStringLiteral("-i"), QStringLiteral("messaging-im"),
+                                 QStringLiteral("-u"), QStringLiteral("normal"),
+                                 sender, preview});
+    }
+    if (m_notificationSoundEnabled) {
+        playNotificationSound();
+    }
+}
+
+void Backend::playNotificationSound(const QString &presetOverride, bool forcePreview) {
+    if (!forcePreview && (!areOmarchyNotificationsEnabled() || !m_notificationSoundEnabled)) return;
+    const QString chosenPreset = presetOverride.trimmed().isEmpty()
+                                     ? m_notificationSoundPreset
+                                     : presetOverride.trimmed().toLower();
+    const QString soundPath = ensureNotificationSoundFile(chosenPreset);
+    m_soundPlayCountForTest++;
+    m_lastSoundPresetPlayed = chosenPreset;
+
+    const bool isOffscreen = (QGuiApplication::platformName() == QStringLiteral("offscreen"));
+    if (isOffscreen || m_demoMode) {
+        return;
     }
 
     if (!soundPath.isEmpty()) {
