@@ -19,7 +19,7 @@ ApplicationWindow {
     property string replyTargetSender: ""
     property string replyTargetText: ""
     property var chatDrafts: ({})
-    property string lastDraftChatGuid: ""
+    property string lastDraftChatGuid: backend.selectedChatGuid
     property string hoveredActionMessageGuid: ""
     property string pinnedActionMessageGuid: ""
     readonly property string activeActionMessageGuid: pinnedActionMessageGuid !== "" ? pinnedActionMessageGuid : hoveredActionMessageGuid
@@ -262,7 +262,10 @@ ApplicationWindow {
     property real photoViewerPanX: 0
     property real photoViewerPanY: 0
 
-    function cleanNoteDisplayBody(title, body) {
+    function cleanNoteDisplayBody(title, body, syncSource) {
+        if (syncSource === "local_hub") {
+            return String(body || "").trim()
+        }
         var t = String(title || "").replace(/\ufffc/g, "").replace(/\r/g, "").trim()
         var b = String(body || "").replace(/\ufffc/g, "").replace(/\r/g, "").trim()
         if (!b) return ""
@@ -521,7 +524,16 @@ ApplicationWindow {
         }
     }
 
-    Component.onCompleted: backend.registerWindow(root)
+    Component.onCompleted: {
+        backend.registerWindow(root)
+        if (backend.selectedChatGuid && backend.selectedChatGuid.length > 0) {
+            root.lastDraftChatGuid = backend.selectedChatGuid
+            var savedDraft = (root.chatDrafts && root.chatDrafts[backend.selectedChatGuid] !== undefined) ? root.chatDrafts[backend.selectedChatGuid] : ""
+            if (savedDraft.length > 0 && composerInput.text !== savedDraft) {
+                composerInput.text = savedDraft
+            }
+        }
+    }
     onActiveChanged: backend.windowActive = root.active
 
     Connections {
@@ -4999,17 +5011,6 @@ ApplicationWindow {
 
                                 readOnly: root.showPhotoViewer
                                 onTextChanged: {
-                                    if (composerInput.text.indexOf("📷 Photo") !== -1 || /^📷 \d+ Photos$/.test(composerInput.text.trim())) {
-                                        var cleaned = composerInput.text.replace(/📷 \d+ Photos/g, "").replace(/📷 Photo/g, "").trim()
-                                        var pastedImg = backend.pasteClipboardImageToTempFile()
-                                        if (pastedImg && pastedImg.length > 0 && backend.selectedChatGuid.length > 0) {
-                                            composerInput.text = ""
-                                            backend.sendAttachment(backend.selectedChatGuid, pastedImg, cleaned)
-                                            return
-                                        } else {
-                                            composerInput.text = cleaned
-                                        }
-                                    }
                                     root.updateEmojiAutocomplete()
                                 }
                                 onCursorPositionChanged: root.updateEmojiAutocomplete()
@@ -5274,7 +5275,7 @@ ApplicationWindow {
                         Rectangle {
                             id: icloudPhotosBtn
                             objectName: "icloudPhotosBtn"
-                            visible: root.width >= 760
+                            visible: backend.icloudPhotosEnabled && root.width >= 760
                             Layout.preferredWidth: 38
                             Layout.preferredHeight: 38
                             Layout.alignment: Qt.AlignVCenter
@@ -5422,7 +5423,7 @@ ApplicationWindow {
                                           noteFolderInput.text === icloudNotesPopup.loadedFolder)
                         var nextPopupTitle = n.title || ""
                         var nextPopupFolder = n.folder || "Notes"
-                        var nextPopupBody = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "")
+                        var nextPopupBody = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "", n.syncSource || "local_hub")
                         var popupFieldsChanged = (nextPopupTitle !== icloudNotesPopup.loadedTitle ||
                                                   nextPopupFolder !== icloudNotesPopup.loadedFolder ||
                                                   nextPopupBody !== icloudNotesPopup.loadedBody)
@@ -5452,7 +5453,7 @@ ApplicationWindow {
                                            noteDetailFolderInput.text === noteDetailWindow.loadedFolder)
                         var nextDetailTitle = n.title || ""
                         var nextDetailFolder = n.folder || "Notes"
-                        var nextDetailBody = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "")
+                        var nextDetailBody = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "", n.syncSource || "local_hub")
                         var detailFieldsChanged = (nextDetailTitle !== noteDetailWindow.loadedTitle ||
                                                    nextDetailFolder !== noteDetailWindow.loadedFolder ||
                                                    nextDetailBody !== noteDetailWindow.loadedBody)
@@ -6010,7 +6011,7 @@ ApplicationWindow {
             icloudNotesPopup.pendingDetailConflictPrompt = false
             noteTitleInput.text = n.title || ""
             noteFolderInput.text = n.folder || "Notes"
-            noteBodyInput.text = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "")
+            noteBodyInput.text = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "", n.syncSource || "local_hub")
             icloudNotesPopup.loadedTitle = noteTitleInput.text
             icloudNotesPopup.loadedFolder = noteFolderInput.text
             icloudNotesPopup.loadedBody = noteBodyInput.text
@@ -6047,7 +6048,7 @@ ApplicationWindow {
                 noteDetailWindow.targetChatTitle = backend.selectedChatTitle
                 noteDetailTitleInput.text = n.title || ""
                 noteDetailFolderInput.text = n.folder || "Notes"
-                noteDetailBodyInput.text = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "")
+                noteDetailBodyInput.text = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "", n.syncSource || "local_hub")
                 noteDetailWindow.loadedTitle = noteDetailTitleInput.text
                 noteDetailWindow.loadedFolder = noteDetailFolderInput.text
                 noteDetailWindow.loadedBody = noteDetailBodyInput.text
@@ -6059,6 +6060,18 @@ ApplicationWindow {
         }
 
         function popOutCurrentNote() {
+            if (noteDetailWindow.visible) {
+                var detailClean = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
+                                   noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
+                                   noteDetailFolderInput.text === noteDetailWindow.loadedFolder);
+                if (!detailClean) {
+                    root.showToast("⚠️ " + i18n.tr("Pop-out window has unsaved edits"))
+                    noteDetailWindow.show()
+                    noteDetailWindow.raise()
+                    noteDetailWindow.requestActivate()
+                    return
+                }
+            }
             noteDetailWindow.noteId = icloudNotesPopup.selectedNoteId
             noteDetailWindow.noteSyncSource = icloudNotesPopup.selectedNoteSyncSource
             noteDetailWindow.noteRevision = icloudNotesPopup.selectedNoteRevision
@@ -6275,7 +6288,7 @@ ApplicationWindow {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
                                     text: {
-                                        var cleaned = root.cleanNoteDisplayBody(modelData.title, modelData.body || modelData.snippet || "").replace(/\r?\n+/g, " · ")
+                                        var cleaned = root.cleanNoteDisplayBody(modelData.title, modelData.body || modelData.snippet || "", modelData.syncSource || "local_hub").replace(/\r?\n+/g, " · ")
                                         return cleaned.length > 0 ? cleaned : i18n.tr("No additional text")
                                     }
                                     font.pixelSize: theme.fontSize - 2
@@ -7098,6 +7111,8 @@ ApplicationWindow {
                     font.pixelSize: theme.fontSize + 2
                     font.bold: true
                     color: theme.brightForeground
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
                 }
                 Text {
                     visible: backend.icloudPhotosTotal > 0 || backend.icloudPhotos.length > 0
@@ -7105,7 +7120,6 @@ ApplicationWindow {
                     font.pixelSize: theme.fontSize - 1
                     color: theme.darkForeground
                 }
-                Item { Layout.fillWidth: true }
                 Text {
                     text: i18n.tr("Per page:")
                     font.pixelSize: theme.fontSize - 2

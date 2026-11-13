@@ -481,14 +481,14 @@ private slots:
         QVERIFY(formatted.contains(QStringLiteral("&amp; enjoy &lt;cool&gt;!")));
 
         const QString youngLaSms = QStringLiteral(
-            "YoungLA: YOUR BLACK FRIDAY FIRST LOOK IS HERE!!!\n\n"
-            "Get an exclusive sneak peek at our new One Piece, Gold's and Batman 2.0 Compression Collections! youngla.attn.tv/a1mj-cMJ6fZX \n\n"
+            "Promo: YOUR HOLIDAY FIRST LOOK IS HERE!!!\n\n"
+            "Get an exclusive sneak peek at our new Winter and Expedition 2.0 Compression Collections! promo.example.com/a1mj-cMJ6fZX \n\n"
             "30% OFF SITEWIDE starts 11/24, plus your chance to WIN $1,000,000 CASH!\n\n"
-            "No purchase necessary. Exclusions apply. Terms: youngla.attn.tv/a7qcUWK503Mo");
-        QCOMPARE(Backend::extractFirstUrl(youngLaSms), QStringLiteral("https://youngla.attn.tv/a1mj-cMJ6fZX"));
+            "No purchase necessary. Exclusions apply. Terms: shop.example.net/a7qcUWK503Mo");
+        QCOMPARE(Backend::extractFirstUrl(youngLaSms), QStringLiteral("https://promo.example.com/a1mj-cMJ6fZX"));
         const QString formattedSms = Backend::formatMessageTextWithLinks(youngLaSms);
-        QVERIFY(formattedSms.contains(QStringLiteral("<a href=\"https://youngla.attn.tv/a1mj-cMJ6fZX\" style=\"color: #64B5F6; text-decoration: underline;\">youngla.attn.tv/a1mj-cMJ6fZX</a>")));
-        QVERIFY(formattedSms.contains(QStringLiteral("<a href=\"https://youngla.attn.tv/a7qcUWK503Mo\" style=\"color: #64B5F6; text-decoration: underline;\">youngla.attn.tv/a7qcUWK503Mo</a>")));
+        QVERIFY(formattedSms.contains(QStringLiteral("<a href=\"https://promo.example.com/a1mj-cMJ6fZX\" style=\"color: #64B5F6; text-decoration: underline;\">promo.example.com/a1mj-cMJ6fZX</a>")));
+        QVERIFY(formattedSms.contains(QStringLiteral("<a href=\"https://shop.example.net/a7qcUWK503Mo\" style=\"color: #64B5F6; text-decoration: underline;\">shop.example.net/a7qcUWK503Mo</a>")));
         QVERIFY(!formattedSms.contains(QStringLiteral("href=\"https://2.0")));
         QVERIFY(!formattedSms.contains(QStringLiteral("href=\"https://11/24")));
         QVERIFY(formattedSms.contains(QStringLiteral("<br/><br/>")));
@@ -2297,7 +2297,7 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("function nextPhotoInViewer()")));
         QVERIFY(qml.contains(QStringLiteral("function zoomPhotoViewer(delta)")));
         QVERIFY(qml.contains(QStringLiteral("root.openPhotoViewer(resolvedList, index)")));
-        QVERIFY(qml.contains(QStringLiteral("Component.onCompleted: backend.registerWindow(root)")));
+        QVERIFY(qml.contains(QStringLiteral("backend.registerWindow(root)")));
         QVERIFY(qml.contains(QStringLiteral("function zoomInPhotoViewer()")));
         QVERIFY(qml.contains(QStringLiteral("function zoomOutPhotoViewer()")));
         QVERIFY(qml.contains(QStringLiteral("function resetZoomPhotoViewer()")));
@@ -3014,14 +3014,14 @@ private slots:
         tempMsg.insert(QStringLiteral("isFromMe"), true);
         tempMsg.insert(QStringLiteral("dateCreated"), 1794368786000LL);
         tempMsg.insert(QStringLiteral("chats"), QJsonArray{chatObj});
-        const QString chatGuidB = QStringLiteral("iMessage;-;+16268203709");
+        const QString chatGuidB = QStringLiteral("iMessage;-;+14155550142");
         QJsonObject chatObjB;
         chatObjB.insert(QStringLiteral("guid"), chatGuidB);
-        chatObjB.insert(QStringLiteral("chatIdentifier"), QStringLiteral("+16268203709"));
+        chatObjB.insert(QStringLiteral("chatIdentifier"), QStringLiteral("+14155550142"));
         chatObjB.insert(QStringLiteral("style"), 45);
         QJsonObject msgB;
-        msgB.insert(QStringLiteral("guid"), QStringLiteral("real-grayson-msg-1"));
-        msgB.insert(QStringLiteral("text"), QStringLiteral("Existing Grayson message"));
+        msgB.insert(QStringLiteral("guid"), QStringLiteral("real-alex-msg-1"));
+        msgB.insert(QStringLiteral("text"), QStringLiteral("Existing Alex Rivera message"));
         msgB.insert(QStringLiteral("isFromMe"), false);
         msgB.insert(QStringLiteral("dateCreated"), 1794368700000LL);
         msgB.insert(QStringLiteral("chats"), QJsonArray{chatObjB});
@@ -3034,7 +3034,7 @@ private slots:
         b.selectChat(chatGuidB);
         QCOMPARE(b.messages().size(), 1);
         QCOMPARE(b.messages().first().toMap().value(QStringLiteral("guid")).toString(),
-                 QStringLiteral("real-grayson-msg-1"));
+                 QStringLiteral("real-alex-msg-1"));
 
         // Switch back to chatGuid -> still has its 1 message
         b.selectChat(chatGuid);
@@ -3372,7 +3372,7 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("id: icloudNotesPopup")));
         QVERIFY(qml.contains(QStringLiteral("id: notePopupHeadlineText")));
         QVERIFY(qml.contains(QStringLiteral("id: noteDetailHeadlineText")));
-        QVERIFY(qml.contains(QStringLiteral("function cleanNoteDisplayBody(title, body)")));
+        QVERIFY(qml.contains(QStringLiteral("function cleanNoteDisplayBody(title, body, syncSource)")));
         QVERIFY(qml.contains(QStringLiteral("id: icloudCalendarPopup")));
         QVERIFY(qml.contains(QStringLiteral("id: icloudPhotosPopup")));
         // Verify compact non-fullscreen dimensions, interactive scrollbars, and pagination bars for Notes, Calendar, and Photos
@@ -4099,8 +4099,43 @@ private slots:
     }
 
     void testIcloudPhotosAndUnpurge() {
-        Backend backend(false);
+        struct EnvGuard {
+            const QList<QByteArray> vars{
+                "BLUEPILL_SERVER_URL", "BLUEBUBBLES_URL",
+                "BLUEPILL_PASSWORD", "BLUEBUBBLES_PASSWORD",
+                "BLUEPILL_SECONDARY_SERVER_URL", "BLUEBUBBLES_SECONDARY_URL",
+                "BLUEPILL_SECONDARY_PASSWORD", "BLUEBUBBLES_SECONDARY_PASSWORD",
+                "BLUEPILL_ENABLE_NOTES", "BLUEPILL_ENABLE_CALENDAR", "BLUEPILL_ENABLE_PHOTOS",
+                "BLUEPILL_PORT", "BLUEPILL_CONFIG_DIR"
+            };
+            QMap<QByteArray, QByteArray> saved;
+            QSet<QByteArray> wasSet;
+            EnvGuard() {
+                for (const auto &v : vars) {
+                    if (qEnvironmentVariableIsSet(v.constData())) {
+                        saved[v] = qgetenv(v.constData());
+                        wasSet.insert(v);
+                    }
+                    qunsetenv(v.constData());
+                }
+            }
+            ~EnvGuard() {
+                for (const auto &v : vars) {
+                    if (wasSet.contains(v)) {
+                        qputenv(v.constData(), saved[v]);
+                    } else {
+                        qunsetenv(v.constData());
+                    }
+                }
+            }
+        } envGuard;
+
         QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        qputenv("BLUEPILL_CONFIG_DIR", tempDir.path().toUtf8());
+
+        Backend backend(false);
+        backend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_photos.json")));
         backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_photos.json")));
 
         QVariantList samplePhotos;
@@ -4152,6 +4187,7 @@ private slots:
         QVERIFY(!backend.icloudPhotosEnabled());
 
         Backend reloadedBackend(false);
+        reloadedBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_photos.json")));
         reloadedBackend.setStateFilePath(tempDir.filePath(QStringLiteral("state_photos.json")));
         QVERIFY(!reloadedBackend.icloudNotesEnabled());
         QVERIFY(!reloadedBackend.icloudCalendarEnabled());

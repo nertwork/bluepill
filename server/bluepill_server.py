@@ -2849,19 +2849,36 @@ class BluePillEngine:
                 self.scheduled_messages = remaining
                 self._save_scheduled_messages()
         dispatched: List[Dict[str, Any]] = []
-        for item in due:
-            sent_msg = self.send_text(
-                {
-                    "chatGuid": item.get("chatGuid", ""),
-                    "message": item.get("message", ""),
-                    "effectId": item.get("effectId", ""),
-                    "selectedMessageGuid": item.get("selectedMessageGuid", ""),
-                }
-            )
-            item["status"] = "sent"
-            item["sentMessageGuid"] = sent_msg.get("guid", "")
-            dispatched.append(item)
-            self.broadcast_socketio("scheduled-message-sent", item)
+        failed_due: List[Dict[str, Any]] = []
+        try:
+            for item in due:
+                try:
+                    sent_msg = self.send_text(
+                        {
+                            "chatGuid": item.get("chatGuid", ""),
+                            "message": item.get("message", ""),
+                            "effectId": item.get("effectId", ""),
+                            "selectedMessageGuid": item.get("selectedMessageGuid", ""),
+                        }
+                    )
+                    item["status"] = "sent"
+                    item["sentMessageGuid"] = sent_msg.get("guid", "")
+                    dispatched.append(item)
+                    self.broadcast_socketio("scheduled-message-sent", item)
+                except Exception as exc:
+                    self.logger.error("Scheduled message send failed for %s: %s", item.get("id"), exc)
+                    item_failed = dict(item)
+                    item_failed["lastError"] = str(exc)
+                    failed_due.append(item_failed)
+        finally:
+            if failed_due:
+                with self._scheduled_lock:
+                    existing_ids = {x.get("id") for x in self.scheduled_messages}
+                    for f_item in failed_due:
+                        if f_item.get("id") not in existing_ids:
+                            self.scheduled_messages.append(f_item)
+                            existing_ids.add(f_item.get("id"))
+                    self._save_scheduled_messages()
         return dispatched
 
     def manage_participant(self, chat_guid: str, address: str, action: str = "add") -> Dict[str, Any]:
@@ -3475,6 +3492,7 @@ class BluePillEngine:
                             if use_cursor:
                                 _cursor_state["chat_exhausted"] = True
                             break
+                        consumed_all_chat_rows = True
                         for r in rows:
                             local_chat_cur = (int(r["_bucket"]), int(r["_rowid"]))
                             if use_cursor:
@@ -3527,8 +3545,9 @@ class BluePillEngine:
                                 "_dimPath": dim_path,
                             })
                             if len(chat_photos) >= window_limit:
+                                consumed_all_chat_rows = False
                                 break
-                        if len(rows) < batch_fetch:
+                        if consumed_all_chat_rows and len(rows) < batch_fetch:
                             if use_cursor:
                                 _cursor_state["chat_exhausted"] = True
                             break
@@ -3594,6 +3613,7 @@ class BluePillEngine:
                                 if use_cursor:
                                     _cursor_state["lib_exhausted"] = True
                                 break
+                            consumed_all_lib_rows = True
                             for ar in rows:
                                 local_lib_cur = (float(ar["_zdate"] or 0.0), int(ar["_rowid"]))
                                 if use_cursor:
@@ -3656,8 +3676,9 @@ class BluePillEngine:
                                 else:
                                     lib_photos.append(entry)
                                     if len(lib_photos) >= window_limit:
+                                        consumed_all_lib_rows = False
                                         break
-                            if len(rows) < lib_batch_fetch:
+                            if consumed_all_lib_rows and len(rows) < lib_batch_fetch:
                                 if use_cursor:
                                     _cursor_state["lib_exhausted"] = True
                                 break
@@ -4290,13 +4311,15 @@ class BluePillEngine:
                 if type(raw_rev) is not int or raw_rev < 1:
                     n["revision"] = 1
                     dirty_revs = True
-                cleaned_local_body = self._clean_note_body_text(
-                    str(n.get("title") or ""),
-                    str(n.get("body") or ""),
-                )
-                if cleaned_local_body != str(n.get("body") or ""):
-                    n["body"] = cleaned_local_body
-                    dirty_revs = True
+                sync_src = str(n.get("syncSource") or "local_hub")
+                if sync_src == "apple_notes_ro":
+                    cleaned_local_body = self._clean_note_body_text(
+                        str(n.get("title") or ""),
+                        str(n.get("body") or ""),
+                    )
+                    if cleaned_local_body != str(n.get("body") or ""):
+                        n["body"] = cleaned_local_body
+                        dirty_revs = True
                 nid = str(n.get("id") or "").strip()
                 if nid and nid not in deleted_ids:
                     notes_by_id[nid] = n
@@ -4384,18 +4407,14 @@ class BluePillEngine:
                 + [0]
             )
 
+            recreating = False
             if nid in del_map:
                 del_rev = int(del_revs.get(nid, 1))
                 if not allow_recreate and not (force_overwrite and base_rev == del_rev):
                     if raise_on_conflict:
                         raise ValueError(f"Conflict: note '{nid}' was deleted (revision {del_rev})")
                     return self.query_icloud_notes()
-                del del_map[nid]
-                del_revs.pop(nid, None)
-                try:
-                    self._write_deleted_map(deleted_path, del_map, del_revs)
-                except OSError as exc:
-                    self.logger.debug("[notes] deleted_notes update skipped: %s", exc)
+                recreating = True
 
             found = False
             for item in notes:
@@ -4430,6 +4449,13 @@ class BluePillEngine:
                 })
 
             self._atomic_write_json(notes_path, notes)
+            if recreating:
+                del_map.pop(nid, None)
+                del_revs.pop(nid, None)
+                try:
+                    self._write_deleted_map(deleted_path, del_map, del_revs)
+                except OSError as exc:
+                    self.logger.debug("[notes] deleted_notes update skipped: %s", exc)
             return self.query_icloud_notes()
 
     def delete_icloud_note(self, note_id: str, raise_on_missing: bool = False) -> List[Dict[str, Any]]:
@@ -4456,14 +4482,31 @@ class BluePillEngine:
                     raise PermissionError(f"Cannot delete read-only or non-local note: {clean_id}")
                 return self.query_icloud_notes()
 
-            if found_local:
-                notes = [n for n in existing if isinstance(n, dict) and n.get("id") != clean_id]
-                self._atomic_write_json(notes_path, notes)
-
             deleted_at = max(int(time.time() * 1000), max_existing_ts + 1)
-            del_map[clean_id] = max(del_map.get(clean_id, 0), deleted_at)
-            del_revs[clean_id] = max(del_revs.get(clean_id, 0), max_existing_rev + 1)
+            prev_del_at = del_map.get(clean_id)
+            prev_del_rev = del_revs.get(clean_id)
+            del_map[clean_id] = max(prev_del_at or 0, deleted_at)
+            del_revs[clean_id] = max(prev_del_rev or 0, max_existing_rev + 1)
             self._write_deleted_map(deleted_path, del_map, del_revs)
+
+            if found_local:
+                try:
+                    notes = [n for n in existing if isinstance(n, dict) and n.get("id") != clean_id]
+                    self._atomic_write_json(notes_path, notes)
+                except Exception:
+                    if prev_del_at is None:
+                        del_map.pop(clean_id, None)
+                    else:
+                        del_map[clean_id] = prev_del_at
+                    if prev_del_rev is None:
+                        del_revs.pop(clean_id, None)
+                    else:
+                        del_revs[clean_id] = prev_del_rev
+                    try:
+                        self._write_deleted_map(deleted_path, del_map, del_revs)
+                    except Exception:
+                        pass
+                    raise
 
             return self.query_icloud_notes()
 
@@ -4714,18 +4757,14 @@ class BluePillEngine:
                 + [0]
             )
 
+            recreating = False
             if eid in del_map:
                 del_rev = int(del_revs.get(eid, 1))
                 if not allow_recreate and not (force_overwrite and base_rev == del_rev):
                     if raise_on_conflict:
                         raise ValueError(f"Conflict: event '{eid}' was deleted (revision {del_rev})")
                     return self.query_icloud_events(include_event_id=eid)
-                del del_map[eid]
-                del_revs.pop(eid, None)
-                try:
-                    self._write_deleted_map(deleted_path, del_map, del_revs)
-                except OSError as exc:
-                    self.logger.debug("[calendar] deleted_events update skipped: %s", exc)
+                recreating = True
 
             found = False
             new_item = {
@@ -4762,6 +4801,13 @@ class BluePillEngine:
                 events.insert(0, new_item)
 
             self._atomic_write_json(events_path, events)
+            if recreating:
+                del_map.pop(eid, None)
+                del_revs.pop(eid, None)
+                try:
+                    self._write_deleted_map(deleted_path, del_map, del_revs)
+                except OSError as exc:
+                    self.logger.debug("[calendar] deleted_events update skipped: %s", exc)
             return self.query_icloud_events(include_event_id=eid)
 
     def delete_icloud_event(self, event_id: str, raise_on_missing: bool = False) -> List[Dict[str, Any]]:
@@ -4788,14 +4834,31 @@ class BluePillEngine:
                     raise PermissionError(f"Cannot delete read-only or non-local event: {clean_id}")
                 return self.query_icloud_events()
 
-            if found_local:
-                events = [e for e in existing if isinstance(e, dict) and e.get("id") != clean_id]
-                self._atomic_write_json(events_path, events)
-
             deleted_at = max(int(time.time() * 1000), max_existing_ts + 1)
-            del_map[clean_id] = max(del_map.get(clean_id, 0), deleted_at)
-            del_revs[clean_id] = max(del_revs.get(clean_id, 0), max_existing_rev + 1)
+            prev_del_at = del_map.get(clean_id)
+            prev_del_rev = del_revs.get(clean_id)
+            del_map[clean_id] = max(prev_del_at or 0, deleted_at)
+            del_revs[clean_id] = max(prev_del_rev or 0, max_existing_rev + 1)
             self._write_deleted_map(deleted_path, del_map, del_revs)
+
+            if found_local:
+                try:
+                    events = [e for e in existing if isinstance(e, dict) and e.get("id") != clean_id]
+                    self._atomic_write_json(events_path, events)
+                except Exception:
+                    if prev_del_at is None:
+                        del_map.pop(clean_id, None)
+                    else:
+                        del_map[clean_id] = prev_del_at
+                    if prev_del_rev is None:
+                        del_revs.pop(clean_id, None)
+                    else:
+                        del_revs[clean_id] = prev_del_rev
+                    try:
+                        self._write_deleted_map(deleted_path, del_map, del_revs)
+                    except Exception:
+                        pass
+                    raise
 
             return self.query_icloud_events()
 
@@ -5310,17 +5373,26 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const input = document.getElementById('msgInput');
       const text = input.value.trim();
       if (!text || !activeChatGuid) return;
-      input.value = '';
       const effSel = document.getElementById('effectSelect');
       const effectId = effSel ? effSel.value : '';
-      if (effSel) effSel.value = '';
       if (effectId) playWebEffect(effectId);
-      await fetch(apiUrl('/api/v1/message/text'), {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({chatGuid: activeChatGuid, message: text, tempGuid: 'web-' + Date.now(), effectId: effectId})
-      });
-      await selectChat(activeChatGuid, document.getElementById('chatHeaderTitle').textContent);
+      try {
+        const resp = await fetch(apiUrl('/api/v1/message/text'), {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({chatGuid: activeChatGuid, message: text, tempGuid: 'web-' + Date.now(), effectId: effectId})
+        });
+        const j = await resp.json().catch(() => ({}));
+        if (!resp.ok || (j.status && j.status !== 200)) {
+          alert(j.error || j.message || ('Send failed (HTTP ' + resp.status + ')'));
+          return;
+        }
+        input.value = '';
+        if (effSel) effSel.value = '';
+        await selectChat(activeChatGuid, document.getElementById('chatHeaderTitle').textContent);
+      } catch (err) {
+        alert('Send failed: ' + err);
+      }
     }
 
     if (apiKey) connectRelay();
@@ -5776,9 +5848,20 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
     async function loadEvents() {
       try {
-        const resp = await fetch(apiUrl('/api/v1/icloud/events'));
-        const j = await resp.json();
-        allEvents = j.data || [];
+        let all = [];
+        let off = 0;
+        const lim = 250;
+        let pageCount = 0;
+        while (pageCount < 20) {
+          pageCount++;
+          const resp = await fetch(apiUrl('/api/v1/icloud/events?offset=' + off + '&limit=' + lim));
+          const j = await resp.json();
+          const batch = j.data || [];
+          all = all.concat(batch);
+          if (!j.hasMore || batch.length < lim) break;
+          off += batch.length;
+        }
+        allEvents = all;
         renderEventsList();
       } catch (err) { console.error('Error loading events:', err); }
     }
@@ -5850,10 +5933,13 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({title, calendarName: cal, startMs, endMs})
       });
-      const j = await resp.json();
-      allEvents = j.data || [];
+      const j = await resp.json().catch(() => ({}));
+      if (!resp.ok || (j.status && j.status !== 200)) {
+        alert(j.error || j.message || ('Failed to save event (HTTP ' + resp.status + ')'));
+        return;
+      }
       document.getElementById('evtTitleInput').value = '';
-      renderEventsList();
+      await loadEvents();
     }
     async function deleteEvent(id) {
       const ev = allEvents.find(e => e.id === id);
@@ -6167,7 +6253,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         if client_ip in trusted_ips:
             return True
         xfp = str(self.headers.get("X-Forwarded-Proto", "") or "").strip().lower()
-        if xfp == "https" and self._is_private_ip(client_ip):
+        if xfp == "https" and (client_ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1") or client_ip in trusted_ips):
             return True
         return False
 
@@ -6508,6 +6594,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             lim = max(1, min(int((qs.get("limit") or [250])[0] or 250), 2500))
             off = max(0, int((qs.get("offset") or [0])[0] or 0))
             all_evts = self.engine.query_icloud_events(limit=off + lim + 1, max_limit=max(250, off + lim + 1))
+            all_evts = sorted(all_evts, key=lambda e: (int(e.get("startMs") or 0), str(e.get("id") or "")))
             has_more = len(all_evts) > (off + lim)
             page_evts = all_evts[off : off + lim]
             self._send_json(
@@ -7256,7 +7343,7 @@ def run_preflight_cli(engine: BluePillEngine, fix: bool, as_json: bool) -> int:
     notes_m = mods.get("notes") or {}
     cal_m = mods.get("calendar") or {}
     photos_m = mods.get("photos") or {}
-    print(f"BluePill iCloud Hub Preflight (v{VERSION} on {pf.get('platform')})")
+    print(f"BluePill iCloud Hub Preflight (v{VERSION} on {pf.get('platform')}) \"status\": \"{pf.get('status', 'ok')}\"")
     print(
         f"  [{'✓' if notes_m.get('enabled') else '-'}] iCloud Notes:    enabled={notes_m.get('enabled')} readable={notes_m.get('dbReadable')} synced={notes_m.get('syncedCount')}"
     )

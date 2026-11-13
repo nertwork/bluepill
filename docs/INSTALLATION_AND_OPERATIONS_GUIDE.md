@@ -739,8 +739,8 @@ bluepill-server preflight
 # Inspect preflight status as JSON without modifying launchd daemons
 bluepill-server preflight --no-fix --json
 
-# Optionally enable or disable individual iCloud Hub modules on the relay
-bluepill-server --enable-notes --enable-calendar --enable-photos
-bluepill-server --disable-photos
+# Optionally enable or disable individual iCloud Hub modules on the relay (append preflight --no-fix for one-shot execution)
+bluepill-server --enable-notes --enable-calendar --enable-photos preflight --no-fix
+bluepill-server --disable-photos preflight --no-fix
 ```
 On the Linux desktop client (`bluepill`), all three modules are enabled by default and can be toggled interactively in **⚙ Server Configuration -> iCloud Hub Modules (Optional)** or via environment variables (`BLUEPILL_ENABLE_NOTES=0/1`, `BLUEPILL_ENABLE_CALENDAR=0/1`, `BLUEPILL_ENABLE_PHOTOS=0/1`).

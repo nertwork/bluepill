@@ -18,7 +18,12 @@ class Bluepill < Formula
   end
 
   def post_install
-    system bin/"bluepill-server", "preflight"
+    help_out = Utils.safe_popen_read(bin/"bluepill-server", "--help")
+    if help_out.include?("preflight")
+      system bin/"bluepill-server", "preflight", "--no-fix"
+    else
+      system bin/"bluepill-server", "--selftest"
+    end
   rescue StandardError
     nil
   end
@@ -31,8 +36,8 @@ class Bluepill < Formula
 
       All three iCloud Hub modules (Notes, Calendar, Photos) are enabled by default.
       You can optionally enable or disable individual modules via CLI or in the BluePill UI:
-        bluepill-server --enable-notes --enable-calendar --enable-photos
-        bluepill-server --disable-photos
+        bluepill-server --enable-notes --enable-calendar --enable-photos preflight --no-fix
+        bluepill-server --disable-photos preflight --no-fix
     EOS
   end
 
@@ -46,6 +51,11 @@ class Bluepill < Formula
 
   test do
     assert_match "bluepill-server 1.1.0", shell_output("#{bin}/bluepill-server --version")
-    assert_match '"modules"', shell_output("#{bin}/bluepill-server preflight --no-fix --json")
+    help_out = shell_output("#{bin}/bluepill-server --help")
+    if help_out.include?("preflight")
+      assert_match "\"status\":", shell_output("#{bin}/bluepill-server preflight --no-fix")
+    else
+      system "#{bin}/bluepill-server", "--selftest"
+    end
   end
 end

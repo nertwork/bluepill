@@ -141,6 +141,11 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 
 Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart(autoStart) {
     m_startupTimestamp = QDateTime::currentMSecsSinceEpoch();
+    if (QClipboard *cb = QGuiApplication::clipboard()) {
+        connect(cb, &QClipboard::dataChanged, this, [this]() {
+            ++m_clipboardCopySeq;
+        });
+    }
     if (autoStart) {
         m_stateFilePath = QDir::homePath() + QStringLiteral("/.config/imsg/state.json");
         loadAppState();
@@ -401,7 +406,10 @@ void Backend::loadAppState() {
             const QString id = m.value(QStringLiteral("id")).toString();
             const QString title = m.value(QStringLiteral("title")).toString();
             const QString body = m.value(QStringLiteral("body")).toString();
-            m.insert(QStringLiteral("body"), cleanIcloudNoteBody(title, body));
+            const QString syncSource = m.value(QStringLiteral("syncSource")).toString();
+            if (syncSource == QStringLiteral("apple_notes_ro")) {
+                m.insert(QStringLiteral("body"), cleanIcloudNoteBody(title, body));
+            }
             m_icloudNotesGeneration = qMax(
                 m_icloudNotesGeneration,
                 qMax(m.value(QStringLiteral("clientMutationSeq")).toULongLong(),
@@ -1160,20 +1168,12 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
                                   normPrimary != m_serverUrl && normPrimary != m_secondaryServerUrl &&
                                   (normSecondary.isEmpty() || (normSecondary != m_serverUrl && normSecondary != m_secondaryServerUrl));
     if (endpointReplaced) {
-        const int discardedCount = m_pendingIcloudNoteSaves.size() + m_pendingIcloudNoteDeletes.size() +
-                                   m_pendingIcloudEventSaves.size() + m_pendingIcloudEventDeletes.size();
-        m_icloudMutationRetryTimer.stop();
-        m_icloudMutationRetryScheduled = false;
-        m_icloudMutationRetryArmedDeadlineMs = 0;
+        ++m_icloudNotesGeneration;
+        ++m_icloudNotesSnapshotEpoch;
+        ++m_icloudEventsGeneration;
+        ++m_icloudEventsSnapshotEpoch;
         const auto noteReplies = std::exchange(m_inFlightIcloudNoteReplies, {});
         const auto eventReplies = std::exchange(m_inFlightIcloudEventReplies, {});
-        m_pendingIcloudNoteSaves.clear();
-        m_pendingIcloudNoteDeletes.clear();
-        m_pendingIcloudEventSaves.clear();
-        m_pendingIcloudEventDeletes.clear();
-        m_icloudMutationRetryCounts.clear();
-        m_icloudMutationNextRetryMs.clear();
-        m_icloudMutationPausedKeys.clear();
         for (QNetworkReply *reply : noteReplies) {
             if (reply) reply->abort();
         }
@@ -1184,9 +1184,6 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
         m_icloudMutationRetryScheduled = false;
         m_icloudMutationRetryArmedDeadlineMs = 0;
         saveAppState();
-        if (discardedCount > 0) {
-            emit toastMessage(QStringLiteral("Server endpoint changed; discarded %1 unsynced iCloud Hub change(s).").arg(discardedCount));
-        }
     }
 
     m_serverUrl = normPrimary;
@@ -6338,6 +6335,7 @@ bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString 
         return false;
     }
 
+    const uint64_t copySeq = ++m_clipboardCopySeq;
     m_lastCopiedImagePath = localPath;
     m_lastCopiedImageTimeMs = QDateTime::currentMSecsSinceEpoch();
 
@@ -6360,7 +6358,8 @@ bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString 
     // Offload PNG encoding and Wayland wl-copy piping to background worker thread so GUI never freezes
     if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
         QFileInfo::exists(QStringLiteral("/usr/bin/wl-copy"))) {
-        QThreadPool::globalInstance()->start([localPath]() {
+        QThreadPool::globalInstance()->start([this, localPath, copySeq]() {
+            if (m_clipboardCopySeq.load() != copySeq) return;
             QByteArray pngBytes;
             if (localPath.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive)) {
                 QFile rawPng(localPath);
@@ -6385,6 +6384,7 @@ bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString 
                     QImageWriter writer(clipPngPath, QByteArrayLiteral("png"));
                     writer.setCompression(1); // Fast zlib level 1 (~6x faster than default)
                     if (writer.write(img)) {
+                        QFile::setPermissions(clipPngPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
                         QFile pngFile(clipPngPath);
                         if (pngFile.open(QIODevice::ReadOnly)) {
                             pngBytes = pngFile.readAll();
@@ -6456,6 +6456,7 @@ QString Backend::pasteClipboardImageToTempFile() {
             QImageWriter writer(outPath, QByteArrayLiteral("png"));
             writer.setCompression(1);
             if (writer.write(img)) {
+                QFile::setPermissions(outPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
                 return outPath;
             }
         }
@@ -6495,6 +6496,7 @@ QString Backend::pasteClipboardImageToTempFile() {
                             if (outFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
                                 outFile.write(rawBytes);
                                 outFile.close();
+                                QFile::setPermissions(outPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
                                 return outPath;
                             }
                         }
@@ -8480,13 +8482,16 @@ void Backend::applyRemoteIcloudNotes(const QJsonArray &data, const QString &ackn
         if (id.isEmpty()) continue;
         if (m_pendingIcloudNoteDeletes.contains(id)) continue;
         if (seenIds.contains(id)) continue;
-        m.insert(
-            QStringLiteral("body"),
-            cleanIcloudNoteBody(
-                m.value(QStringLiteral("title")).toString(),
-                m.value(QStringLiteral("body")).toString()
-            )
-        );
+        const QString syncSource = m.value(QStringLiteral("syncSource")).toString();
+        if (syncSource == QStringLiteral("apple_notes_ro")) {
+            m.insert(
+                QStringLiteral("body"),
+                cleanIcloudNoteBody(
+                    m.value(QStringLiteral("title")).toString(),
+                    m.value(QStringLiteral("body")).toString()
+                )
+            );
+        }
         const qint64 remoteRev = m.value(QStringLiteral("revision")).toLongLong();
         if (remoteRev > 0 && !m.contains(QStringLiteral("baseRevision"))) {
             m.insert(QStringLiteral("baseRevision"), remoteRev);
@@ -9630,6 +9635,11 @@ void Backend::deleteIcloudNote(const QString &id) {
     }
     const quint64 gen = ++m_icloudNotesGeneration;
 
+    const QVariantList backupNotes = m_icloudNotes;
+    const QVariantMap backupPendSave = pendSave;
+    const bool hadPendSave = m_pendingIcloudNoteSaves.contains(id);
+    const bool hadPendDelete = m_pendingIcloudNoteDeletes.contains(id);
+
     for (int i = 0; i < m_icloudNotes.size(); ++i) {
         if (m_icloudNotes.at(i).toMap().value(QStringLiteral("id")).toString() == id) {
             m_icloudNotes.removeAt(i);
@@ -9637,7 +9647,14 @@ void Backend::deleteIcloudNote(const QString &id) {
         }
     }
     emit icloudNotesChanged();
-    saveAppState();
+    if (!m_stateFilePath.isEmpty() && !saveAppState()) {
+        m_icloudNotes = backupNotes;
+        if (hadPendSave) m_pendingIcloudNoteSaves.insert(id, backupPendSave);
+        if (!hadPendDelete) m_pendingIcloudNoteDeletes.remove(id);
+        emit icloudNotesChanged();
+        recordIcloudMutationFailure(mutKey);
+        return;
+    }
     if (neverSentLocalCreate) return;
 
     // Queue behind any already in-flight HTTP request for this noteId instead of dispatching concurrently
@@ -9955,6 +9972,11 @@ void Backend::deleteIcloudEvent(const QString &id) {
     }
     const quint64 gen = ++m_icloudEventsGeneration;
 
+    const QVariantList backupEvents = m_icloudEvents;
+    const QVariantMap backupPendSave = pendSave;
+    const bool hadPendSave = m_pendingIcloudEventSaves.contains(id);
+    const bool hadPendDelete = m_pendingIcloudEventDeletes.contains(id);
+
     for (int i = 0; i < m_icloudEvents.size(); ++i) {
         if (m_icloudEvents.at(i).toMap().value(QStringLiteral("id")).toString() == id) {
             m_icloudEvents.removeAt(i);
@@ -9962,7 +9984,14 @@ void Backend::deleteIcloudEvent(const QString &id) {
         }
     }
     emit icloudEventsChanged();
-    saveAppState();
+    if (!m_stateFilePath.isEmpty() && !saveAppState()) {
+        m_icloudEvents = backupEvents;
+        if (hadPendSave) m_pendingIcloudEventSaves.insert(id, backupPendSave);
+        if (!hadPendDelete) m_pendingIcloudEventDeletes.remove(id);
+        emit icloudEventsChanged();
+        recordIcloudMutationFailure(mutKey);
+        return;
+    }
     if (neverSentLocalCreate) return;
 
     // Queue behind any already in-flight HTTP request for this evtId instead of dispatching concurrently
@@ -10063,13 +10092,10 @@ void Backend::fetchIcloudPhotos(int page, bool append) {
     if (!m_icloudPhotosEnabled) return;
     if (!isSecureOrLocalIcloudEndpoint()) return;
     const int pageSize = std::max(12, m_icloudPhotosPageSize);
-    const int targetPage = (page >= 0) ? page : m_icloudPhotosPage;
-    if (!append) {
-        m_icloudPhotosPage = std::max(0, targetPage);
-    }
+    const int targetPage = (page >= 0) ? std::max(0, page) : m_icloudPhotosPage;
     const int offset = append
                            ? (m_icloudPhotosPage * pageSize + int(m_icloudPhotos.size()))
-                           : (m_icloudPhotosPage * pageSize);
+                           : (targetPage * pageSize);
     const quint64 reqSeq = ++m_icloudPhotosRequestSeq;
     if (!m_icloudPhotosLoading) {
         m_icloudPhotosLoading = true;
@@ -10079,7 +10105,7 @@ void Backend::fetchIcloudPhotos(int page, bool append) {
                              .arg(pageSize)
                              .arg(offset);
     QNetworkReply *reply = m_nam.get(makeRequest(path));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, reqSeq, append, offset, pageSize]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reqSeq, append, offset, pageSize, targetPage]() {
         reply->deleteLater();
         if (reqSeq != m_icloudPhotosRequestSeq) return;
         if (m_icloudPhotosLoading) {
@@ -10093,6 +10119,7 @@ void Backend::fetchIcloudPhotos(int page, bool append) {
                 const QJsonArray data = dataVal.toArray();
                 QSet<QString> seenGuids;
                 if (!append) {
+                    m_icloudPhotosPage = targetPage;
                     m_icloudPhotos.clear();
                 } else {
                     for (const QVariant &existing : m_icloudPhotos) {

@@ -1,3 +1,4 @@
+#include <atomic>
 #pragma once
 
 #include <QFileSystemWatcher>
@@ -588,6 +589,7 @@ private:
     int m_activeSendCount = 0;
     QString m_lastCopiedImagePath;
     qint64 m_lastCopiedImageTimeMs = 0;
+    std::atomic<uint64_t> m_clipboardCopySeq{0};
     QString m_pendingClipboardCopyGuid;
     QString m_lastOpenedUrl;
     qint64 m_lastOpenedUrlTimeMs = 0;

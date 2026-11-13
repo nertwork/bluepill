@@ -322,4 +322,4 @@ echo "=== Verification Completed ==="
 # 5. iCloud Hub Preflight & Optional Module Configuration
 timeout 10s bluepill-server preflight --json </dev/null
 # Optional module toggles (all enabled by default):
-# bluepill-server --enable-notes --enable-calendar --enable-photos
+# bluepill-server --enable-notes --enable-calendar --enable-photos preflight --no-fix
