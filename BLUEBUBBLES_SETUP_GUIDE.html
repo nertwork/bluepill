@@ -444,6 +444,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </ul>
 </div>
 
+
             </div>
         </aside>
 
@@ -471,17 +472,15 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><strong>Full Disk Access</strong> granted to your terminal / Python / <code>sshd-keygen-wrapper</code> under <strong>System Settings -&gt; Privacy &amp; Security -&gt; Full Disk Access</strong> so <code>bluepill-server</code> can read <code>~/Library/Messages/chat.db</code>.</li>
 </ul>
 <h3 id="2-install-via-homebrew">2. Install via Homebrew</h3>
-<div class="codehilite"><pre><span></span><code>brew<span class="w"> </span>tap<span class="w"> </span>nertwork/tap
-brew<span class="w"> </span>install<span class="w"> </span>nertwork/tap/bluepill
-bluepill-server<span class="w"> </span>init
-brew<span class="w"> </span>services<span class="w"> </span>start<span class="w"> </span>bluepill
-</code></pre></div>
-
+<pre><code class="language-bash">brew tap nertwork/tap
+brew install nertwork/tap/bluepill
+bluepill-server init
+brew services start bluepill
+</code></pre>
 <h3 id="3-verify-the-relay-built-in-web-ui">3. Verify the Relay &amp; Built-In Web UI</h3>
-<div class="codehilite"><pre><span></span><code>bluepill-server<span class="w"> </span>status
-curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"http://127.0.0.1:1235/api/v1/server/info"</span>
-</code></pre></div>
-
+<pre><code class="language-bash">bluepill-server status
+curl -s &quot;http://127.0.0.1:1235/api/v1/server/info&quot;
+</code></pre>
 <p>Open <strong><code>http://127.0.0.1:1235/web</code></strong> in any browser (or <code>https://your-relay.example.com/web</code> behind a TLS reverse proxy / Tailscale Serve) to use the built-in <strong>BluePill Web UI</strong> without installing any client software.</p>
 <hr />
 <h2 id="option-b-legacy-bluebubbles-server-bluebubblesapp">Option B: Legacy BlueBubbles Server (<code>BlueBubbles.app</code>)</h2>

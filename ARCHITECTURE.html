@@ -438,6 +438,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </ul>
 </div>
 
+
             </div>
         </aside>
 
@@ -453,42 +454,41 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
             </div>
 
             <h1 id="bluepill-architecture-internals">BluePill Architecture &amp; Internals</h1>
-<div class="codehilite"><pre><span></span><code><span class="n">flowchart</span><span class="w"> </span><span class="n">LR</span>
-<span class="w">    </span><span class="n">subgraph</span><span class="w"> </span><span class="n">Linux</span><span class="p">[</span><span class="s">"Linux Workstation (x86_64 / aarch64)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">GUI</span><span class="p">[</span><span class="s">"BluePill Qt6/QML Desktop Client</span>
-<span class="s">(/usr/bin/bluepill)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">CLI</span><span class="p">[</span><span class="s">"BluePill JSON CLI</span>
-<span class="s">(bluepill status/recent/send)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">CACHE</span><span class="p">[</span><span class="s">"Local State &amp; Media Cache</span>
-<span class="s">~/.config/bluepill/ + ~/.cache/imsg/"</span><span class="p">]</span>
-<span class="w">    </span><span class="kd">end</span>
+<pre><code class="language-mermaid">flowchart LR
+    subgraph Linux[&quot;Linux Workstation (x86_64 / aarch64)&quot;]
+        GUI[&quot;BluePill Qt6/QML Desktop Client
+(/usr/bin/bluepill)&quot;]
+        CLI[&quot;BluePill JSON CLI
+(bluepill status/recent/send)&quot;]
+        CACHE[&quot;Local State &amp; Media Cache
+~/.config/bluepill/ + ~/.cache/imsg/&quot;]
+    end
 
-<span class="w">    </span><span class="n">subgraph</span><span class="w"> </span><span class="n">Browser</span><span class="p">[</span><span class="s">"Any Device Browser"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">WEB</span><span class="p">[</span><span class="s">"BluePill Built-In Web UI</span>
-<span class="s">(GET /web)"</span><span class="p">]</span>
-<span class="w">    </span><span class="kd">end</span>
+    subgraph Browser[&quot;Any Device Browser&quot;]
+        WEB[&quot;BluePill Built-In Web UI
+(GET /web)&quot;]
+    end
 
-<span class="w">    </span><span class="n">subgraph</span><span class="w"> </span><span class="n">Mac</span><span class="p">[</span><span class="s">"macOS Relay Host (Apple Silicon / Intel / KVM VM)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">RELAY</span><span class="p">[</span><span class="s">"bluepill-server Daemon</span>
-<span class="s">(or Legacy BlueBubbles.app)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">CHATDB</span><span class="p">[(</span><span class="s">"~/Library/Messages/chat.db</span>
-<span class="s">(SQLite WAL)"</span><span class="p">)]</span>
-<span class="w">        </span><span class="n">ADDRDB</span><span class="p">[(</span><span class="s">"AddressBook-v22.abcddb</span>
-<span class="s">(macOS Contacts)"</span><span class="p">)]</span>
-<span class="w">        </span><span class="n">IMCORE</span><span class="p">[</span><span class="s">"Messages.app + IMCore Helper</span>
-<span class="s">(or Zero-SIP osascript)"</span><span class="p">]</span>
-<span class="w">    </span><span class="kd">end</span>
+    subgraph Mac[&quot;macOS Relay Host (Apple Silicon / Intel / KVM VM)&quot;]
+        RELAY[&quot;bluepill-server Daemon
+(or Legacy BlueBubbles.app)&quot;]
+        CHATDB[(&quot;~/Library/Messages/chat.db
+(SQLite WAL)&quot;)]
+        ADDRDB[(&quot;AddressBook-v22.abcddb
+(macOS Contacts)&quot;)]
+        IMCORE[&quot;Messages.app + IMCore Helper
+(or Zero-SIP osascript)&quot;]
+    end
 
-<span class="w">    </span><span class="n">GUI</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s">"HTTPS REST + Socket.IO v4 Push</span>
-<span class="s">or Direct SSH"</span><span class="o">|</span><span class="w"> </span><span class="n">RELAY</span>
-<span class="w">    </span><span class="n">CLI</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s">"HTTPS REST"</span><span class="o">|</span><span class="w"> </span><span class="n">RELAY</span>
-<span class="w">    </span><span class="n">WEB</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s">"HTTPS / EventSource / REST"</span><span class="o">|</span><span class="w"> </span><span class="n">RELAY</span>
-<span class="w">    </span><span class="n">GUI</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s">"0ms Startup"</span><span class="o">|</span><span class="w"> </span><span class="n">CACHE</span>
-<span class="w">    </span><span class="n">RELAY</span><span class="w"> </span><span class="o">--&gt;|</span><span class="s">"Read-Only WAL (&lt;2ms)"</span><span class="o">|</span><span class="w"> </span><span class="n">CHATDB</span>
-<span class="w">    </span><span class="n">RELAY</span><span class="w"> </span><span class="o">--&gt;|</span><span class="s">"Contact Resolution (&lt;5ms)"</span><span class="o">|</span><span class="w"> </span><span class="n">ADDRDB</span>
-<span class="w">    </span><span class="n">RELAY</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s">"TCP :45670 JSON / osascript"</span><span class="o">|</span><span class="w"> </span><span class="n">IMCORE</span>
-</code></pre></div>
-
+    GUI &lt;--&gt;|&quot;HTTPS REST + Socket.IO v4 Push
+or Direct SSH&quot;| RELAY
+    CLI &lt;--&gt;|&quot;HTTPS REST&quot;| RELAY
+    WEB &lt;--&gt;|&quot;HTTPS / EventSource / REST&quot;| RELAY
+    GUI &lt;--&gt;|&quot;0ms Startup&quot;| CACHE
+    RELAY --&gt;|&quot;Read-Only WAL (&lt;2ms)&quot;| CHATDB
+    RELAY --&gt;|&quot;Contact Resolution (&lt;5ms)&quot;| ADDRDB
+    RELAY &lt;--&gt;|&quot;TCP :45670 JSON / osascript&quot;| IMCORE
+</code></pre>
 <h2 id="1-linux-desktop-client-srcbackendhcpp-srcmainqml">1. Linux Desktop Client (<code>src/backend.{h,cpp}</code>, <code>src/Main.qml</code>)</h2>
 <ul>
 <li><strong>Zero-Latency Startup (<code>messages_cache.json</code>):</strong> Loads up to 500 cached messages per conversation from disk before the first network packet is sent.</li>
