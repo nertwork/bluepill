@@ -1,3 +1,4 @@
+#include <atomic>
 #pragma once
 
 #include <QFileSystemWatcher>
@@ -104,6 +105,21 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList voiceRecordingWaveform READ voiceRecordingWaveform NOTIFY voiceRecordingChanged)
     Q_PROPERTY(QVariantList scheduledMessages READ scheduledMessages NOTIFY scheduledMessagesChanged)
     Q_PROPERTY(QStringList selectedChatParticipants READ selectedChatParticipants NOTIFY selectedChatChanged)
+    Q_PROPERTY(QVariantList icloudNotes READ icloudNotes NOTIFY icloudNotesChanged)
+    Q_PROPERTY(QVariantList icloudEvents READ icloudEvents NOTIFY icloudEventsChanged)
+    Q_PROPERTY(QVariantList icloudCalendars READ icloudCalendars NOTIFY icloudEventsChanged)
+    Q_PROPERTY(QVariantList icloudPhotos READ icloudPhotos NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(int icloudPhotosTotal READ icloudPhotosTotal NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(int icloudPhotosPage READ icloudPhotosPage NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(int icloudPhotosPageSize READ icloudPhotosPageSize WRITE setIcloudPhotosPageSize NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(int icloudPhotosPageCount READ icloudPhotosPageCount NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(bool icloudPhotosHasMore READ icloudPhotosHasMore NOTIFY icloudPhotosChanged)
+    Q_PROPERTY(bool icloudPhotosLoading READ icloudPhotosLoading NOTIFY icloudPhotosLoadingChanged)
+    Q_PROPERTY(bool icloudPhotosSyncing READ icloudPhotosSyncing NOTIFY icloudPhotosSyncingChanged)
+    Q_PROPERTY(bool icloudNotesEnabled READ icloudNotesEnabled WRITE setIcloudNotesEnabled NOTIFY icloudHubModulesChanged)
+    Q_PROPERTY(bool icloudCalendarEnabled READ icloudCalendarEnabled WRITE setIcloudCalendarEnabled NOTIFY icloudHubModulesChanged)
+    Q_PROPERTY(bool icloudPhotosEnabled READ icloudPhotosEnabled WRITE setIcloudPhotosEnabled NOTIFY icloudHubModulesChanged)
+    Q_PROPERTY(bool sendingMessage READ sendingMessage NOTIFY sendingMessageChanged)
 
 
 public:
@@ -154,6 +170,34 @@ public:
     QVariantList voiceRecordingWaveform() const { return m_voiceRecordingWaveform; }
     QVariantList scheduledMessages() const { return m_scheduledMessages; }
     QStringList selectedChatParticipants() const;
+    QVariantList icloudNotes() const { return m_icloudNotes; }
+    QVariantList icloudEvents() const { return m_icloudEvents; }
+    QVariantList icloudCalendars() const { return m_icloudCalendars; }
+    QVariantList icloudPhotos() const { return m_icloudPhotos; }
+    int icloudPhotosTotal() const { return std::max(int(m_icloudPhotos.size()), m_icloudPhotosTotal); }
+    int icloudPhotosPage() const { return m_icloudPhotosPage; }
+    int icloudPhotosPageSize() const { return m_icloudPhotosPageSize; }
+    void setIcloudPhotosPageSize(int size);
+    int icloudPhotosPageCount() const {
+        const int ps = std::max(1, m_icloudPhotosPageSize);
+        const int tot = icloudPhotosTotal();
+        return std::max(1, (tot + ps - 1) / ps);
+    }
+    bool icloudPhotosHasMore() const { return m_icloudPhotosHasMore; }
+    bool icloudPhotosLoading() const { return m_icloudPhotosLoading; }
+    bool icloudPhotosSyncing() const { return m_icloudPhotosSyncInFlight; }
+    bool icloudNotesEnabled() const { return m_icloudNotesEnabled; }
+    bool icloudCalendarEnabled() const { return m_icloudCalendarEnabled; }
+    bool icloudPhotosEnabled() const { return m_icloudPhotosEnabled; }
+    void setIcloudNotesEnabled(bool enabled);
+    void setIcloudCalendarEnabled(bool enabled);
+    void setIcloudPhotosEnabled(bool enabled);
+    bool sendingMessage() const { return m_activeSendCount > 0; }
+    void setIcloudPhotosForTest(const QVariantList &list) {
+        m_icloudPhotos = list;
+        m_icloudPhotosTotal = list.size();
+        emit icloudPhotosChanged();
+    }
 
 
     void setWindowActive(bool active);
@@ -194,6 +238,7 @@ public:
     Q_INVOKABLE void deleteChat(const QString &chatGuid = QString());
     Q_INVOKABLE void startNewChat(const QString &address, const QString &text = QString());
     Q_INVOKABLE void openAttachment(const QString &guid, const QString &transferName);
+    Q_INVOKABLE void openUrl(const QString &url);
     Q_INVOKABLE void registerWindow(QObject *window);
     bool eventFilter(QObject *watched, QEvent *event) override;
     Q_INVOKABLE void loadDemoData();
@@ -211,6 +256,7 @@ public:
     // Clipboard & Verification/OTP code extraction
     Q_INVOKABLE void copyToClipboard(const QString &text, const QString &label = QString());
     Q_INVOKABLE void copyTextToClipboard(const QString &text) { copyToClipboard(text); }
+    Q_INVOKABLE bool copyImageToClipboard(const QString &localUrlOrPath, const QString &attachmentGuid = QString());
     Q_INVOKABLE static QString extractVerificationCode(const QString &text);
     Q_INVOKABLE static QString extractOtpCode(const QString &text) { return extractVerificationCode(text); }
     Q_INVOKABLE QString pasteClipboardImageToTempFile();
@@ -235,6 +281,38 @@ public:
     Q_INVOKABLE QVariantList searchContacts(const QString &query = QString(), int limit = 15) const;
     Q_INVOKABLE static QString canonicalizeAddress(const QString &raw);
     Q_INVOKABLE static QString formatHandleForDisplay(const QString &raw);
+    Q_INVOKABLE void fetchIcloudNotes();
+    Q_INVOKABLE QString saveIcloudNote(const QString &id, const QString &title, const QString &body, const QString &folder = QStringLiteral("Notes"), qint64 baseRevision = -1, bool allowRecreate = false);
+    Q_INVOKABLE bool reloadConflictedIcloudNoteServerVersion(const QString &id);
+    Q_INVOKABLE bool isIcloudNoteDurablyPersisted(const QString &id) const;
+    Q_INVOKABLE void deleteIcloudNote(const QString &id);
+    Q_INVOKABLE void fetchIcloudEvents();
+    Q_INVOKABLE QString saveIcloudEvent(const QString &title, qint64 startMs, qint64 endMs, const QString &calendarName = QStringLiteral("Home"), const QString &notes = QString());
+    Q_INVOKABLE void deleteIcloudEvent(const QString &id);
+    Q_INVOKABLE void fetchIcloudPhotos(int page = -1, bool append = false);
+    Q_INVOKABLE void nextIcloudPhotosPage();
+    Q_INVOKABLE void prevIcloudPhotosPage();
+    Q_INVOKABLE void loadMoreIcloudPhotos();
+    Q_INVOKABLE void downloadCloudAttachment(const QString &attachmentGuid);
+    Q_INVOKABLE void syncIcloudPhotos();
+    Q_INVOKABLE void shareIcloudPhotoToChat(const QString &chatGuid, const QString &attachmentGuid, const QString &fileName = QString());
+    Q_INVOKABLE QString attachmentDownloadUrl(const QString &guid) const;
+    bool isSecureOrLocalIcloudEndpoint() const;
+    void replayPendingIcloudMutations();
+    void reconcileRemoteIcloudNotesForTest(const QJsonArray &data, const QString &acknowledgedNoteId = QString(), quint64 acknowledgedMutationSeq = 0) { applyRemoteIcloudNotes(data, acknowledgedNoteId, acknowledgedMutationSeq); }
+    void reconcileRemoteIcloudEventsForTest(const QJsonArray &data, const QString &acknowledgedEventId = QString()) { applyRemoteIcloudEvents(data, acknowledgedEventId); }
+    quint64 icloudNotesGenerationForTest() const { return m_icloudNotesGeneration; }
+    quint64 icloudEventsGenerationForTest() const { return m_icloudEventsGeneration; }
+    void recordIcloudMutationFailureForTest(const QString &mutationKey) { recordIcloudMutationFailure(mutationKey); }
+    void clearIcloudMutationRetryStateForTest(const QString &mutationKey) { clearIcloudMutationRetryState(mutationKey); }
+    bool isIcloudMutationInBackoffForTest(const QString &mutationKey) const;
+    bool isIcloudMutationPausedForTest(const QString &mutationKey) const { return m_icloudMutationPausedKeys.contains(mutationKey); }
+    bool hasPendingIcloudNoteSaveForTest(const QString &noteId) const { return m_pendingIcloudNoteSaves.contains(noteId); }
+    bool hasPendingIcloudNoteDeleteForTest(const QString &noteId) const { return m_pendingIcloudNoteDeletes.contains(noteId); }
+    bool hasPendingIcloudEventSaveForTest(const QString &evtId) const { return m_pendingIcloudEventSaves.contains(evtId); }
+    bool hasPendingIcloudEventDeleteForTest(const QString &evtId) const { return m_pendingIcloudEventDeletes.contains(evtId); }
+    int icloudMutationRetryCountForTest(const QString &mutationKey) const { return m_icloudMutationRetryCounts.value(mutationKey, 0); }
+    void scheduleIcloudMutationRetryForTest(bool immediate) { scheduleIcloudMutationRetry(immediate); }
 
     // Network & Failover state
     QString currentServerUrl() const { return m_serverUrl; }
@@ -274,7 +352,7 @@ public:
     void loadCredentials();
     void loadConfig() { loadCredentials(); }
     void loadAppState();
-    void saveAppState() const;
+    bool saveAppState() const;
     QString messagesCacheFilePath() const;
     void loadMessagesCache();
     void saveMessagesCache() const;
@@ -300,6 +378,13 @@ public:
     int runCliSend(const QString &target, const QString &message, bool asJson);
 
 signals:
+    void icloudNotesChanged();
+    void icloudEventsChanged();
+    void icloudPhotosChanged();
+    void icloudPhotosLoadingChanged();
+    void icloudPhotosSyncingChanged();
+    void icloudHubModulesChanged();
+    void sendingMessageChanged();
     void statusChanged();
     void configChanged();
     void loadingChanged();
@@ -364,6 +449,12 @@ private:
     void playNotificationSound();
     void handleNetworkFailure(const QString &context);
     void handleNetworkSuccess();
+    void applyRemoteIcloudNotes(const QJsonArray &data, const QString &acknowledgedNoteId = QString(), quint64 acknowledgedMutationSeq = 0);
+    void applyRemoteIcloudEvents(const QJsonArray &data, const QString &acknowledgedEventId = QString());
+    void scheduleIcloudMutationRetry(bool immediate);
+    void recordIcloudMutationFailure(const QString &mutationKey);
+    void clearIcloudMutationRetryState(const QString &mutationKey);
+    void syncIcloudPhotosPage(int offset, int accumulatedSynced, const QString &jobId = QString());
 
     QNetworkAccessManager m_nam;
     QNetworkAccessManager m_sendNam;
@@ -385,6 +476,7 @@ private:
 
     QString m_serverUrl;
     QString m_secondaryServerUrl;
+    QString m_lastConfiguredBaseUrl;
     QStringList m_candidateUrls;
     int m_candidateUrlIndex = 0;
     int m_consecutiveFailures = 0;
@@ -465,5 +557,41 @@ private:
     QString m_currentVoiceRecordingPath;
 
     QVariantList m_scheduledMessages;
-
+    QVariantList m_icloudNotes;
+    QVariantList m_icloudEvents;
+    QVariantList m_icloudCalendars;
+    QVariantList m_icloudPhotos;
+    quint64 m_icloudNotesGeneration = 0;
+    quint64 m_icloudEventsGeneration = 0;
+    quint64 m_icloudNotesSnapshotEpoch = 0;
+    quint64 m_icloudEventsSnapshotEpoch = 0;
+    QHash<QString, QVariantMap> m_pendingIcloudNoteSaves;
+    QSet<QString> m_pendingIcloudNoteDeletes;
+    QHash<QString, QVariantMap> m_pendingIcloudEventSaves;
+    QSet<QString> m_pendingIcloudEventDeletes;
+    QHash<QString, QPointer<QNetworkReply>> m_inFlightIcloudNoteReplies;
+    QHash<QString, QPointer<QNetworkReply>> m_inFlightIcloudEventReplies;
+    QHash<QString, int> m_icloudMutationRetryCounts;
+    QHash<QString, qint64> m_icloudMutationNextRetryMs;
+    QSet<QString> m_icloudMutationPausedKeys;
+    QTimer m_icloudMutationRetryTimer;
+    qint64 m_icloudMutationRetryArmedDeadlineMs = 0;
+    bool m_icloudMutationRetryScheduled = false;
+    bool m_icloudPhotosSyncInFlight = false;
+    int m_icloudPhotosTotal = 0;
+    int m_icloudPhotosPage = 0;
+    int m_icloudPhotosPageSize = 60;
+    bool m_icloudPhotosHasMore = false;
+    bool m_icloudPhotosLoading = false;
+    quint64 m_icloudPhotosRequestSeq = 0;
+    bool m_icloudNotesEnabled = true;
+    bool m_icloudCalendarEnabled = true;
+    bool m_icloudPhotosEnabled = true;
+    int m_activeSendCount = 0;
+    QString m_lastCopiedImagePath;
+    qint64 m_lastCopiedImageTimeMs = 0;
+    std::shared_ptr<std::atomic<uint64_t>> m_clipboardCopySeq = std::make_shared<std::atomic<uint64_t>>(0);
+    QString m_pendingClipboardCopyGuid;
+    QString m_lastOpenedUrl;
+    qint64 m_lastOpenedUrlTimeMs = 0;
 };

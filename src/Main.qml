@@ -18,6 +18,8 @@ ApplicationWindow {
     property string replyTargetGuid: ""
     property string replyTargetSender: ""
     property string replyTargetText: ""
+    property var chatDrafts: ({})
+    property string lastDraftChatGuid: ""
     property string hoveredActionMessageGuid: ""
     property string pinnedActionMessageGuid: ""
     readonly property string activeActionMessageGuid: pinnedActionMessageGuid !== "" ? pinnedActionMessageGuid : hoveredActionMessageGuid
@@ -253,11 +255,33 @@ ApplicationWindow {
         }
     }
     property bool showPhotoViewer: false
+    property bool photoViewerFullScreen: false
     property var photoViewerItems: []
     property int photoViewerIndex: 0
     property real photoViewerZoom: 1.0
     property real photoViewerPanX: 0
     property real photoViewerPanY: 0
+
+    function cleanNoteDisplayBody(title, body, syncSource) {
+        if (syncSource === "local_hub") {
+            return String(body || "").trim()
+        }
+        var t = String(title || "").replace(/\ufffc/g, "").replace(/\r/g, "").trim()
+        var b = String(body || "").replace(/\ufffc/g, "").replace(/\r/g, "").trim()
+        if (!b) return ""
+        b = b.replace(/(?:\n+\s*(?:Wz&M|\}\$\}h|dNP\}M|P\.qFB|sqeL|iL\tH)[\s\S]*)$/, "").trim()
+        if (t.length > 0) {
+            if (b.length > t.length && b.slice(1).indexOf(t) === 0 &&
+                (b.length === t.length + 1 || b.charAt(1 + t.length) === "\n")) {
+                b = b.slice(1).trim()
+            }
+            if (b === t) return ""
+            if (b.indexOf(t + "\n") === 0) {
+                b = b.slice(t.length + 1).replace(/^\n+/, "").trim()
+            }
+        }
+        return b
+    }
 
     function openPhotoViewer(items, startIndex) {
         var list = []
@@ -268,7 +292,11 @@ ApplicationWindow {
                 list.push({
                     guid: it.guid || "",
                     name: it.name || ("Photo " + (i + 1)),
-                    localUrl: it.localUrl || ""
+                    localUrl: it.localUrl || "",
+                    previewUrl: it.previewUrl || "",
+                    isCloudEvicted: !!it.isCloudEvicted,
+                    canUnpurge: it.canUnpurge !== false,
+                    canRequestAttachment: !it.isCloudEvicted || it.canUnpurge !== false
                 })
             }
         }
@@ -287,8 +315,12 @@ ApplicationWindow {
             }
         })
         var cur = list[idx]
-        if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0) {
-            backend.openAttachment(cur.guid, cur.name || "")
+        if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0 && cur.canRequestAttachment) {
+            if (cur.isCloudEvicted) {
+                backend.downloadCloudAttachment(cur.guid)
+            } else {
+                backend.openAttachment(cur.guid, cur.name || "")
+            }
         }
     }
 
@@ -333,6 +365,14 @@ ApplicationWindow {
             event.accepted = true
             return true
         }
+        if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_C) {
+            var cp = photoViewerModal.currentPhoto
+            if (cp) {
+                backend.copyImageToClipboard(cp.localUrl || "", cp.guid || "")
+            }
+            event.accepted = true
+            return true
+        }
         if (k === Qt.Key_Escape) {
             root.closePhotoViewer()
             event.accepted = true
@@ -348,8 +388,12 @@ ApplicationWindow {
         root.photoViewerPanX = 0
         root.photoViewerPanY = 0
         var cur = root.photoViewerItems[root.photoViewerIndex]
-        if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0) {
-            backend.openAttachment(cur.guid, cur.name || "")
+        if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0 && cur.canRequestAttachment) {
+            if (cur.isCloudEvicted) {
+                backend.downloadCloudAttachment(cur.guid)
+            } else {
+                backend.openAttachment(cur.guid, cur.name || "")
+            }
         }
     }
 
@@ -360,8 +404,12 @@ ApplicationWindow {
         root.photoViewerPanX = 0
         root.photoViewerPanY = 0
         var cur = root.photoViewerItems[root.photoViewerIndex]
-        if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0) {
-            backend.openAttachment(cur.guid, cur.name || "")
+        if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0 && cur.canRequestAttachment) {
+            if (cur.isCloudEvicted) {
+                backend.downloadCloudAttachment(cur.guid)
+            } else {
+                backend.openAttachment(cur.guid, cur.name || "")
+            }
         }
     }
 
@@ -476,7 +524,16 @@ ApplicationWindow {
         }
     }
 
-    Component.onCompleted: backend.registerWindow(root)
+    Component.onCompleted: {
+        backend.registerWindow(root)
+        if (backend.selectedChatGuid && backend.selectedChatGuid.length > 0) {
+            root.lastDraftChatGuid = backend.selectedChatGuid
+            var savedDraft = (root.chatDrafts && root.chatDrafts[backend.selectedChatGuid] !== undefined) ? root.chatDrafts[backend.selectedChatGuid] : ""
+            if (savedDraft.length > 0 && composerInput.text !== savedDraft) {
+                composerInput.text = savedDraft
+            }
+        }
+    }
     onActiveChanged: backend.windowActive = root.active
 
     Connections {
@@ -487,6 +544,22 @@ ApplicationWindow {
         }
         function onSelectedChatChanged() {
             root.clearActionMenu()
+            root.replyTargetGuid = ""
+            root.replyTargetSender = ""
+            root.replyTargetText = ""
+            var newGuid = backend.selectedChatGuid || ""
+            if (root.lastDraftChatGuid !== "" && root.lastDraftChatGuid !== newGuid) {
+                var drafts = root.chatDrafts || ({})
+                drafts[root.lastDraftChatGuid] = composerInput.text
+                root.chatDrafts = drafts
+            }
+            if (root.lastDraftChatGuid !== newGuid) {
+                root.lastDraftChatGuid = newGuid
+                var savedDraft = (root.chatDrafts && newGuid !== "" && root.chatDrafts[newGuid] !== undefined) ? root.chatDrafts[newGuid] : ""
+                if (composerInput.text !== savedDraft) {
+                    composerInput.text = savedDraft
+                }
+            }
         }
         function onContactsChanged() {
             if (root.showNewChatModal) root.refreshNewChatSuggestions()
@@ -503,7 +576,10 @@ ApplicationWindow {
                     updated.push({
                         guid: item.guid,
                         name: item.name,
-                        localUrl: localUrl
+                        localUrl: localUrl,
+                        isCloudEvicted: false,
+                        canUnpurge: item.canUnpurge !== false,
+                        canRequestAttachment: true
                     })
                     changed = true
                 } else {
@@ -512,6 +588,56 @@ ApplicationWindow {
             }
             if (changed) {
                 root.photoViewerItems = updated
+            }
+        }
+        function onIcloudPhotosChanged() {
+            if (!root.photoViewerItems || root.photoViewerItems.length === 0) return
+            var photos = backend.icloudPhotos
+            if (!photos || photos.length === 0) return
+            var changed = false
+            var updated = []
+            var pendingOpenGuid = ""
+            var pendingOpenName = ""
+            for (var i = 0; i < root.photoViewerItems.length; ++i) {
+                var item = root.photoViewerItems[i]
+                var ig = item.guid || ""
+                var matched = null
+                for (var j = 0; j < photos.length; ++j) {
+                    var p = photos[j]
+                    if (p && p.guid === ig) {
+                        matched = p
+                        break
+                    }
+                }
+                if (matched) {
+                    var nextUrl = (matched.localUrl && matched.localUrl.length > 0) ? matched.localUrl : (item.localUrl || "")
+                    var nextEvicted = !!matched.isCloudEvicted && nextUrl.length === 0
+                    var nextCanUnpurge = matched.canUnpurge !== false
+                    var nextCanReq = !nextEvicted || nextCanUnpurge
+                    if (nextUrl !== (item.localUrl || "") || nextEvicted !== !!item.isCloudEvicted || nextCanReq !== !!item.canRequestAttachment) {
+                        changed = true
+                    }
+                    updated.push({
+                        guid: item.guid,
+                        name: item.name,
+                        localUrl: nextUrl,
+                        isCloudEvicted: nextEvicted,
+                        canUnpurge: nextCanUnpurge,
+                        canRequestAttachment: nextCanReq
+                    })
+                    if (i === root.photoViewerIndex && root.showPhotoViewer && nextUrl.length === 0 && !nextEvicted && ig.length > 0) {
+                        pendingOpenGuid = ig
+                        pendingOpenName = item.name || ""
+                    }
+                } else {
+                    updated.push(item)
+                }
+            }
+            if (changed) {
+                root.photoViewerItems = updated
+            }
+            if (pendingOpenGuid.length > 0) {
+                backend.openAttachment(pendingOpenGuid, pendingOpenName)
             }
         }
     }
@@ -618,15 +744,19 @@ ApplicationWindow {
 
     function linkifyText(text) {
         if (!text) return ""
-        var urlRegex = /(https?:\/\/[^\s<]+[^<.,:;"')\]\s])/g
+        var urlRegex = /((?:https?:\/\/[^\s<>"']+)|(?:www\.(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,24}(?:\/[^\s<>"']*)?)|(?:(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,24}\/[^\s<>"']+))/gi
         var parts = text.split(urlRegex)
         var res = ""
         for (var i = 0; i < parts.length; ++i) {
             var part = parts[i]
-            if (part && part.match(/^https?:\/\//i)) {
-                res += "<a href=\"" + part + "\" style=\"color: #64B5F6; text-decoration: underline;\">" + escapeHtml(part) + "</a>"
+            if (!part) continue
+            if (i % 2 === 1) {
+                var cleanUrl = part.replace(/[.,)\]?!;:"'>]+$/, "")
+                var trailing = part.substring(cleanUrl.length)
+                var href = /^https?:\/\//i.test(cleanUrl) ? cleanUrl : ("https://" + cleanUrl)
+                res += "<a href=\"" + escapeHtml(href) + "\" style=\"color: #64B5F6; text-decoration: underline;\">" + escapeHtml(cleanUrl) + "</a>" + escapeHtml(trailing).replace(/\r?\n/g, "<br/>")
             } else {
-                res += escapeHtml(part)
+                res += escapeHtml(part).replace(/\r?\n/g, "<br/>")
             }
         }
         return res
@@ -1246,6 +1376,214 @@ ApplicationWindow {
                         }
                     }
 
+                    // iCloud Hub Quick Navigation Bar (Notes, Calendar, Photos)
+                    Rectangle {
+                        id: icloudHubBar
+                        objectName: "icloudHubBar"
+                        visible: backend.icloudNotesEnabled || backend.icloudCalendarEnabled || backend.icloudPhotosEnabled
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 32
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.bottomMargin: 4
+                        color: "transparent"
+
+                        RowLayout {
+                            anchors.fill: parent
+                            spacing: 6
+
+                            Shortcut {
+                                sequence: "Ctrl+Shift+N"
+                                onActivated: {
+                                    if (icloudHubBar.visible && backend.icloudNotesEnabled) {
+                                        backend.fetchIcloudNotes()
+                                        icloudNotesPopup.open()
+                                    }
+                                }
+                            }
+                            Shortcut {
+                                sequence: "Ctrl+Shift+E"
+                                onActivated: {
+                                    if (icloudHubBar.visible && backend.icloudCalendarEnabled) {
+                                        backend.fetchIcloudEvents()
+                                        icloudCalendarPopup.open()
+                                    }
+                                }
+                            }
+                            Shortcut {
+                                sequence: "Ctrl+Shift+P"
+                                onActivated: {
+                                    if (icloudHubBar.visible && backend.icloudPhotosEnabled) {
+                                        backend.fetchIcloudPhotos()
+                                        icloudPhotosPopup.open()
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                id: notesHubTile
+                                objectName: "notesHubTile"
+                                visible: backend.icloudNotesEnabled
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                radius: 6
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Open iCloud Notes"
+                                color: (notesHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
+                                border.color: (notesHover.containsMouse || activeFocus) ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                border.width: activeFocus ? 2 : 1
+                                Keys.onReturnPressed: {
+                                    backend.fetchIcloudNotes()
+                                    icloudNotesPopup.open()
+                                }
+                                Keys.onEnterPressed: {
+                                    backend.fetchIcloudNotes()
+                                    icloudNotesPopup.open()
+                                }
+                                Keys.onSpacePressed: {
+                                    backend.fetchIcloudNotes()
+                                    icloudNotesPopup.open()
+                                }
+
+                                RowLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 4
+                                    Text {
+                                        text: "📝"
+                                        font.pixelSize: theme.fontSize - 1
+                                    }
+                                    Text {
+                                        text: "Notes"
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.foreground
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: notesHover
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        notesHubTile.forceActiveFocus()
+                                        backend.fetchIcloudNotes()
+                                        icloudNotesPopup.open()
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                id: calHubTile
+                                objectName: "calHubTile"
+                                visible: backend.icloudCalendarEnabled
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                radius: 6
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Open iCloud Calendar"
+                                color: (calHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
+                                border.color: (calHover.containsMouse || activeFocus) ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                border.width: activeFocus ? 2 : 1
+                                Keys.onReturnPressed: {
+                                    backend.fetchIcloudEvents()
+                                    icloudCalendarPopup.open()
+                                }
+                                Keys.onEnterPressed: {
+                                    backend.fetchIcloudEvents()
+                                    icloudCalendarPopup.open()
+                                }
+                                Keys.onSpacePressed: {
+                                    backend.fetchIcloudEvents()
+                                    icloudCalendarPopup.open()
+                                }
+
+                                RowLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 4
+                                    Text {
+                                        text: "📅"
+                                        font.pixelSize: theme.fontSize - 1
+                                    }
+                                    Text {
+                                        text: "Cal"
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.foreground
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: calHover
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        calHubTile.forceActiveFocus()
+                                        backend.fetchIcloudEvents()
+                                        icloudCalendarPopup.open()
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                id: photosHubTile
+                                objectName: "photosHubTile"
+                                visible: backend.icloudPhotosEnabled
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                radius: 6
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Open iCloud Photos"
+                                color: (photosHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
+                                border.color: (photosHover.containsMouse || activeFocus) ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                border.width: activeFocus ? 2 : 1
+                                Keys.onReturnPressed: {
+                                    backend.fetchIcloudPhotos()
+                                    icloudPhotosPopup.open()
+                                }
+                                Keys.onEnterPressed: {
+                                    backend.fetchIcloudPhotos()
+                                    icloudPhotosPopup.open()
+                                }
+                                Keys.onSpacePressed: {
+                                    backend.fetchIcloudPhotos()
+                                    icloudPhotosPopup.open()
+                                }
+
+                                RowLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 4
+                                    Text {
+                                        text: "☁️"
+                                        font.pixelSize: theme.fontSize - 1
+                                    }
+                                    Text {
+                                        text: "Photos"
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.foreground
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: photosHover
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        photosHubTile.forceActiveFocus()
+                                        backend.fetchIcloudPhotos()
+                                        icloudPhotosPopup.open()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Pinned Conversations Bar (synced from macOS pinning.plist / user pins)
                     Rectangle {
                         id: pinnedChatsBar
@@ -1334,8 +1672,10 @@ ApplicationWindow {
                                             if (mouse.button === Qt.RightButton) {
                                                 backend.togglePinChat(modelData.guid)
                                             } else {
-                                                backend.selectChat(modelData.guid)
-                                                root.focusAndScrollChat()
+                                                var win = root
+                                                var pinGuid = modelData.guid
+                                                backend.selectChat(pinGuid)
+                                                if (win) Qt.callLater(function() { win.focusAndScrollChat() })
                                             }
                                         }
                                     }
@@ -1555,7 +1895,7 @@ ApplicationWindow {
                                     var win = root
                                     chatContextMenuPopup.visible = false
                                     backend.selectChat(chatGuid)
-                                    root.focusAndScrollChat()
+                                    if (win) Qt.callLater(function() { win.focusAndScrollChat() })
                                 }
                             }
                         }
@@ -3017,7 +3357,9 @@ ApplicationWindow {
                     delegate: ColumnLayout {
                         id: msgDelegate
                         required property var modelData
+                        required property int index
                         property bool invisibleInkRevealed: false
+                        readonly property bool isGreenService: Boolean(modelData.isGreenBubble || modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
                         readonly property bool isInvisibleInkMsg: (modelData.expressiveEffect === "🕵️ Invisible Ink") || ((modelData.sendEffectLabel || "").toLowerCase().indexOf("invisible ink") !== -1)
                         readonly property bool isAnyPartHovered: (bubbleHover.hovered || (typeof msgTextHover !== "undefined" && msgTextHover.hovered) || actionZoneHover.hovered || actionBarHover.hovered || (typeof invisibleInkMouse !== "undefined" && invisibleInkMouse.containsMouse))
                         width: messageListView.width
@@ -3085,6 +3427,15 @@ ApplicationWindow {
                                 return downloadedAttachmentUrl
                             }
                             return ""
+                        }
+
+                        function copyPrimaryImageAttachment() {
+                            var imgList = modelData.imageAttachments || []
+                            var firstImg = imgList.length > 0 ? imgList[0] : null
+                            var guid = (firstImg && firstImg.guid) ? firstImg.guid : (modelData.attachmentGuid || "")
+                            var rawUrl = (firstImg && firstImg.localUrl) ? firstImg.localUrl : (msgDelegate.liveAttachmentUrl || modelData.attachmentLocalUrl || "")
+                            var resolvedUrl = msgDelegate.resolveAttachmentUrl(guid, rawUrl)
+                            return backend.copyImageToClipboard(resolvedUrl, guid)
                         }
 
                         Connections {
@@ -3338,7 +3689,7 @@ ApplicationWindow {
                                         }
 
                                         Rectangle {
-                                            visible: (msgDelegate.modelData.text || "").length > 0
+                                            visible: (msgDelegate.modelData.text || "").length > 0 || Boolean(msgDelegate.modelData.hasImageAttachment)
                                             height: 30
                                             implicitWidth: copyBtnRow.implicitWidth + 14
                                             radius: 15
@@ -3356,7 +3707,9 @@ ApplicationWindow {
                                                     color: theme.accent
                                                 }
                                                 Text {
-                                                    text: i18n.tr("Copy")
+                                                    text: (msgDelegate.modelData.hasImageAttachment && !(msgText.selectedText && msgText.selectedText.length > 0))
+                                                          ? i18n.tr("Copy Image")
+                                                          : i18n.tr("Copy")
                                                     font.pixelSize: theme.fontSize - 3
                                                     font.bold: true
                                                     color: theme.brightForeground
@@ -3369,10 +3722,13 @@ ApplicationWindow {
                                                 hoverEnabled: true
                                                 cursorShape: Qt.PointingHandCursor
                                                 onClicked: {
-                                                    var toCopy = (msgText.selectedText && msgText.selectedText.length > 0)
-                                                                 ? msgText.selectedText
-                                                                 : (msgDelegate.modelData.text || "")
-                                                    backend.copyToClipboard(toCopy, (msgText.selectedText && msgText.selectedText.length > 0) ? "selection" : "message")
+                                                    if (msgText.selectedText && msgText.selectedText.length > 0) {
+                                                        backend.copyToClipboard(msgText.selectedText, "selection")
+                                                    } else if (msgDelegate.modelData.hasImageAttachment) {
+                                                        msgDelegate.copyPrimaryImageAttachment()
+                                                    } else {
+                                                        backend.copyToClipboard(msgDelegate.modelData.text || "", "message")
+                                                    }
                                                     root.clearActionMenu()
                                                 }
                                             }
@@ -3504,15 +3860,13 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     radius: theme.radius + 2
                                     color: modelData.isFromMe
-                                           ? ((modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
-                                              ? "#30D158" : "#0A84FF")
+                                           ? (msgDelegate.isGreenService ? "#1B6E38" : "#0A84FF")
                                            : "#1e2430"
                                     border.width: 1
                                     border.color: (root.activeActionMessageGuid === modelData.guid)
                                                   ? theme.brightForeground
                                                   : (modelData.isFromMe
-                                                     ? ((modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
-                                                        ? "#248A3D" : "#0066CC")
+                                                     ? (msgDelegate.isGreenService ? "#268C48" : "#0066CC")
                                                      : "#2c3545")
                                     implicitWidth: Math.max(bubbleContent.width + 28, 96)
                                     implicitHeight: bubbleContent.height + 20
@@ -3552,11 +3906,12 @@ ApplicationWindow {
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: (mouse) => {
                                             if (mouse.button === Qt.RightButton) {
-                                                var toCopy = (msgText.selectedText && msgText.selectedText.length > 0)
-                                                             ? msgText.selectedText
-                                                             : (modelData.text || "")
-                                                if (toCopy.length > 0) {
-                                                    backend.copyToClipboard(toCopy, (msgText.selectedText && msgText.selectedText.length > 0) ? "selection" : "message")
+                                                if (msgText.selectedText && msgText.selectedText.length > 0) {
+                                                    backend.copyToClipboard(msgText.selectedText, "selection")
+                                                } else if (modelData.hasImageAttachment) {
+                                                    msgDelegate.copyPrimaryImageAttachment()
+                                                } else if ((modelData.text || "").length > 0) {
+                                                    backend.copyToClipboard(modelData.text, "message")
                                                 }
                                                 return
                                             }
@@ -3647,8 +4002,13 @@ ApplicationWindow {
 
                                                 MouseArea {
                                                     anchors.fill: parent
+                                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
                                                     cursorShape: Qt.PointingHandCursor
-                                                    onClicked: {
+                                                    onClicked: (mouse) => {
+                                                        if (mouse.button === Qt.RightButton) {
+                                                            backend.copyImageToClipboard(parent.resolvedImgUrl, modelData.guid || "")
+                                                            return
+                                                        }
                                                         var rawList = imageAttachmentRepeater.model || []
                                                         var resolvedList = []
                                                         for (var k = 0; k < rawList.length; ++k) {
@@ -3926,7 +4286,7 @@ ApplicationWindow {
                                                 cursorShape: Qt.PointingHandCursor
                                                 onClicked: {
                                                     if (msgDelegate.liveLinkPreview && msgDelegate.liveLinkPreview.url) {
-                                                        Qt.openUrlExternally(msgDelegate.liveLinkPreview.url);
+                                                        backend.openUrl(msgDelegate.liveLinkPreview.url);
                                                     }
                                                 }
                                                 onDoubleClicked: {
@@ -3950,20 +4310,40 @@ ApplicationWindow {
                                                 anchors.fill: parent
                                                 opacity: (msgDelegate.isInvisibleInkMsg && !msgDelegate.invisibleInkRevealed) ? 0.0 : 1.0
                                                 Behavior on opacity { NumberAnimation { duration: 200 } }
-                                                text: modelData.formattedText || root.linkifyText(modelData.text || "")
+                                                text: {
+                                                    var rawHtml = modelData.formattedText || root.linkifyText(modelData.text || "")
+                                                    if (modelData.isFromMe && rawHtml.indexOf("#64B5F6") !== -1) {
+                                                        return rawHtml.replace(/color:\s*#64B5F6;/gi, "color: #FFFFFF; font-weight: 600;")
+                                                    }
+                                                    return rawHtml
+                                                }
                                                 textFormat: TextEdit.RichText
                                                 readOnly: true
                                                 selectByMouse: true
                                                 selectByKeyboard: true
                                                 selectedTextColor: "#ffffff"
-                                                selectionColor: modelData.isFromMe ? "#004080" : theme.accent
+                                                selectionColor: modelData.isFromMe ? (msgDelegate.isGreenService ? "#0F4221" : "#004080") : theme.accent
                                                 font.pixelSize: theme.fontSize
                                                 color: modelData.isFromMe ? "#ffffff" : theme.brightForeground
                                                 wrapMode: TextEdit.Wrap
-                                                onLinkActivated: (link) => Qt.openUrlExternally(link)
+                                                onLinkActivated: (link) => backend.openUrl(link)
 
                                                 HoverHandler {
                                                     id: msgTextHover
+                                                    cursorShape: msgText.hoveredLink.length > 0 ? Qt.PointingHandCursor : Qt.IBeamCursor
+                                                }
+
+                                                TapHandler {
+                                                    acceptedButtons: Qt.LeftButton
+                                                    onTapped: (eventPoint) => {
+                                                        var lnk = msgText.linkAt(eventPoint.position.x, eventPoint.position.y)
+                                                        if (!lnk || lnk.length === 0) {
+                                                            lnk = msgText.hoveredLink
+                                                        }
+                                                        if (lnk && lnk.length > 0) {
+                                                            backend.openUrl(lnk)
+                                                        }
+                                                    }
                                                 }
 
                                                 Keys.onPressed: (event) => {
@@ -3998,9 +4378,9 @@ ApplicationWindow {
                                                 visible: textContainer.visible && msgDelegate.isInvisibleInkMsg && !msgDelegate.invisibleInkRevealed
                                                 clip: true
                                                 radius: 8
-                                                color: modelData.isFromMe ? "#0866c6" : "#252d3d"
+                                                color: modelData.isFromMe ? (msgDelegate.isGreenService ? "#15572C" : "#0866c6") : "#252d3d"
                                                 border.width: 1
-                                                border.color: modelData.isFromMe ? "#5cb3ff" : theme.accent
+                                                border.color: modelData.isFromMe ? (msgDelegate.isGreenService ? "#34D399" : "#5cb3ff") : theme.accent
                                                 z: 10
 
                                                 // Animated shimmering / twinkling dots
@@ -4120,8 +4500,7 @@ ApplicationWindow {
                                                 color: (modelData.isFailed || false)
                                                        ? theme.red
                                                        : (modelData.isFromMe
-                                                          ? ((modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && backend.selectedChatService !== "iMessage"))
-                                                             ? "#e0f8e9" : "#d0dff7")
+                                                          ? (msgDelegate.isGreenService ? "#CBEFD8" : "#d0dff7")
                                                           : theme.darkForeground)
                                             }
 
@@ -4631,7 +5010,9 @@ ApplicationWindow {
                                 background: Item {}
 
                                 readOnly: root.showPhotoViewer
-                                onTextChanged: root.updateEmojiAutocomplete()
+                                onTextChanged: {
+                                    root.updateEmojiAutocomplete()
+                                }
                                 onCursorPositionChanged: root.updateEmojiAutocomplete()
 
                                 Keys.priority: Keys.BeforeItem
@@ -4639,7 +5020,8 @@ ApplicationWindow {
                                     if (root.showPhotoViewer && root.handlePhotoViewerKey(event)) {
                                         return
                                     }
-                                    if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) {
+                                    if (((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) ||
+                                        ((event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Insert)) {
                                         var pastedPath = backend.pasteClipboardImageToTempFile()
                                         if (pastedPath && pastedPath.length > 0 && backend.selectedChatGuid.length > 0) {
                                             backend.sendAttachment(backend.selectedChatGuid, pastedPath, composerInput.text.trim())
@@ -4889,6 +5271,39 @@ ApplicationWindow {
                             ToolTip.delay: 400
                         }
 
+                        // iCloud Photos Hub Button
+                        Rectangle {
+                            id: icloudPhotosBtn
+                            objectName: "icloudPhotosBtn"
+                            visible: backend.icloudPhotosEnabled && root.width >= 760
+                            Layout.preferredWidth: 38
+                            Layout.preferredHeight: 38
+                            Layout.alignment: Qt.AlignVCenter
+                            radius: theme.radius
+                            color: icloudPhotosBtnMouse.containsMouse ? theme.lighterBackground : "transparent"
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "☁️"
+                                font.pixelSize: theme.fontSize + 2
+                            }
+
+                            MouseArea {
+                                id: icloudPhotosBtnMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    backend.fetchIcloudPhotos()
+                                    icloudPhotosPopup.open()
+                                }
+                            }
+
+                            ToolTip.visible: icloudPhotosBtnMouse.containsMouse
+                            ToolTip.text: i18n.tr("iCloud & iMessage Photos")
+                            ToolTip.delay: 400
+                        }
+
                         // Send Button
                         Rectangle {
                             Layout.preferredWidth: 82
@@ -4896,8 +5311,10 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignVCenter
                             radius: theme.radius
                             color: composerInput.text.trim().length > 0
-                                   ? (backend.selectedChatService !== "iMessage" ? "#30D158" : theme.accent)
+                                   ? (backend.selectedChatService !== "iMessage" ? "#1B6E38" : theme.accent)
                                    : theme.lighterBackground
+                            border.width: (composerInput.text.trim().length > 0 && backend.selectedChatService !== "iMessage") ? 1 : 0
+                            border.color: "#268C48"
 
                             Text {
                                 anchors.centerIn: parent
@@ -4922,6 +5339,2042 @@ ApplicationWindow {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Dedicated Note Detail & Editor Window
+    Window {
+        id: noteDetailWindow
+        objectName: "noteDetailWindow"
+        transientParent: root
+        flags: Qt.Dialog
+        title: (noteDetailTitleInput.text.trim().length > 0 ? noteDetailTitleInput.text.trim() : i18n.tr("Note Viewer")) + " - BluePill Notes"
+        property bool isFullScreen: false
+        width: isFullScreen ? Math.max(640, root.width - 24) : Math.min(680, Math.max(480, Math.round(root.width * 0.65)))
+        height: isFullScreen ? Math.max(480, root.height - 24) : Math.min(520, Math.max(380, Math.round(root.height * 0.65)))
+        minimumWidth: 440
+        minimumHeight: 340
+        color: theme.darkBackground
+
+        property string noteId: ""
+        property string noteSyncSource: "local_hub"
+        property int noteRevision: 0
+        property int noteMutationSeq: 0
+        property int noteConflictServerRevision: 0
+        property bool noteHasServerConflict: false
+        property string noteConflictTitle: ""
+        property string noteConflictBody: ""
+        property string noteConflictFolder: "Notes"
+        property bool pendingHubConflictPrompt: false
+        property string loadedTitle: ""
+        property string loadedFolder: "Notes"
+        property string loadedBody: ""
+        property bool noteSendInFlight: false
+        property string targetChatGuid: ""
+        property string targetChatTitle: ""
+
+        Shortcut {
+            sequence: "Escape"
+            context: Qt.WindowShortcut
+            onActivated: noteDetailWindow.close()
+        }
+
+        Connections {
+            target: backend
+            function onSendingMessageChanged() {
+                if (!backend.sendingMessage) {
+                    noteDetailWindow.noteSendInFlight = false
+                }
+            }
+            function onMessagesChanged() {
+                if (!backend.sendingMessage) {
+                    noteDetailWindow.noteSendInFlight = false
+                }
+            }
+            function onSelectedChatChanged() {
+                if (noteDetailWindow.visible && noteDetailWindow.targetChatGuid === "" && backend.selectedChatGuid !== "") {
+                    noteDetailWindow.targetChatGuid = backend.selectedChatGuid
+                    noteDetailWindow.targetChatTitle = backend.selectedChatTitle
+                }
+            }
+            function onIcloudNotesChanged() {
+                var all = backend.icloudNotes
+                for (var i = 0; i < all.length; ++i) {
+                    var n = all[i]
+                    if (!n || !n.id) continue
+                    var nRev = Number(n.revision || n.baseRevision || 0)
+                    var nSeq = Number(n.clientMutationSeq || 0)
+                    var nConflictRev = Number(n.conflictServerRevision || 0)
+                    var nHasConflict = !!n.hasServerConflict || (nConflictRev > nRev)
+                    if (n.id === icloudNotesPopup.selectedNoteId) {
+                        icloudNotesPopup.selectedNoteConflictServerRevision = nConflictRev
+                        icloudNotesPopup.selectedNoteHasServerConflict = nHasConflict
+                        icloudNotesPopup.selectedNoteConflictTitle = n.conflictServerTitle || ""
+                        icloudNotesPopup.selectedNoteConflictBody = n.conflictServerBody || ""
+                        icloudNotesPopup.selectedNoteConflictFolder = n.conflictServerFolder || "Notes"
+                        if (nSeq > 0 && nSeq === icloudNotesPopup.selectedNoteMutationSeq && nRev > icloudNotesPopup.selectedNoteRevision) {
+                            icloudNotesPopup.selectedNoteRevision = nRev
+                        }
+                        var popupClean = (noteTitleInput.text === icloudNotesPopup.loadedTitle &&
+                                          noteBodyInput.text === icloudNotesPopup.loadedBody &&
+                                          noteFolderInput.text === icloudNotesPopup.loadedFolder)
+                        var nextPopupTitle = n.title || ""
+                        var nextPopupFolder = n.folder || "Notes"
+                        var nextPopupBody = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "", n.syncSource || "local_hub")
+                        var popupFieldsChanged = (nextPopupTitle !== icloudNotesPopup.loadedTitle ||
+                                                  nextPopupFolder !== icloudNotesPopup.loadedFolder ||
+                                                  nextPopupBody !== icloudNotesPopup.loadedBody)
+                        if (popupClean && !nHasConflict && (nSeq > icloudNotesPopup.selectedNoteMutationSeq || nRev > icloudNotesPopup.selectedNoteRevision || popupFieldsChanged)) {
+                            noteTitleInput.text = nextPopupTitle
+                            noteFolderInput.text = nextPopupFolder
+                            noteBodyInput.text = nextPopupBody
+                            icloudNotesPopup.loadedTitle = noteTitleInput.text
+                            icloudNotesPopup.loadedFolder = noteFolderInput.text
+                            icloudNotesPopup.loadedBody = noteBodyInput.text
+                            icloudNotesPopup.selectedNoteRevision = nRev
+                            icloudNotesPopup.selectedNoteMutationSeq = nSeq
+                            icloudNotesPopup.pendingDetailConflictPrompt = false
+                        }
+                    }
+                    if (n.id === noteDetailWindow.noteId) {
+                        noteDetailWindow.noteConflictServerRevision = nConflictRev
+                        noteDetailWindow.noteHasServerConflict = nHasConflict
+                        noteDetailWindow.noteConflictTitle = n.conflictServerTitle || ""
+                        noteDetailWindow.noteConflictBody = n.conflictServerBody || ""
+                        noteDetailWindow.noteConflictFolder = n.conflictServerFolder || "Notes"
+                        if (nSeq > 0 && nSeq === noteDetailWindow.noteMutationSeq && nRev > noteDetailWindow.noteRevision) {
+                            noteDetailWindow.noteRevision = nRev
+                        }
+                        var detailClean = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
+                                           noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
+                                           noteDetailFolderInput.text === noteDetailWindow.loadedFolder)
+                        var nextDetailTitle = n.title || ""
+                        var nextDetailFolder = n.folder || "Notes"
+                        var nextDetailBody = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "", n.syncSource || "local_hub")
+                        var detailFieldsChanged = (nextDetailTitle !== noteDetailWindow.loadedTitle ||
+                                                   nextDetailFolder !== noteDetailWindow.loadedFolder ||
+                                                   nextDetailBody !== noteDetailWindow.loadedBody)
+                        if (detailClean && !nHasConflict && (nSeq > noteDetailWindow.noteMutationSeq || nRev > noteDetailWindow.noteRevision || detailFieldsChanged)) {
+                            noteDetailTitleInput.text = nextDetailTitle
+                            noteDetailFolderInput.text = nextDetailFolder
+                            noteDetailBodyInput.text = nextDetailBody
+                            noteDetailWindow.loadedTitle = noteDetailTitleInput.text
+                            noteDetailWindow.loadedFolder = noteDetailFolderInput.text
+                            noteDetailWindow.loadedBody = noteDetailBodyInput.text
+                            noteDetailWindow.noteRevision = nRev
+                            noteDetailWindow.noteMutationSeq = nSeq
+                            noteDetailWindow.pendingHubConflictPrompt = false
+                        }
+                    }
+                }
+                if (icloudNotesPopup.visible && icloudNotesPopup.selectedNoteId === "" &&
+                    noteTitleInput.text.length === 0 && noteBodyInput.text.length === 0 &&
+                    icloudNotesPopup.filteredNotes.length > 0) {
+                    icloudNotesPopup.selectNoteObject(icloudNotesPopup.filteredNotes[0])
+                }
+            }
+        }
+
+        onVisibleChanged: {
+            if (visible) {
+                if (noteDetailWindow.targetChatGuid === "") {
+                    noteDetailWindow.targetChatGuid = backend.selectedChatGuid
+                    noteDetailWindow.targetChatTitle = backend.selectedChatTitle
+                }
+            } else {
+                noteDetailWindow.noteSendInFlight = false
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 16
+            spacing: 12
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                Text {
+                    id: noteDetailHeadlineText
+                    objectName: "noteDetailHeadlineText"
+                    Layout.fillWidth: true
+                    visible: noteDetailTitleInput.text.trim().length > 0
+                    text: noteDetailTitleInput.text.trim()
+                    font.bold: true
+                    font.pixelSize: theme.fontSize + 8
+                    color: theme.brightForeground
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                }
+
+                Rectangle {
+                    height: 28
+                    width: syncBadgeText.implicitWidth + 16
+                    radius: 14
+                    color: noteDetailWindow.noteSyncSource === "apple_notes_ro"
+                           ? Qt.rgba(theme.green.r, theme.green.g, theme.green.b, 0.18)
+                           : Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
+                    border.color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
+                    border.width: 1
+                    Text {
+                        id: syncBadgeText
+                        anchors.centerIn: parent
+                        text: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? "🍏 Apple Notes (iCloud)" : "📝 Local Hub Note"
+                        font.pixelSize: 11
+                        font.bold: true
+                        color: noteDetailWindow.noteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
+                    }
+                }
+
+                Button {
+                    id: noteDetailFullScreenBtn
+                    objectName: "noteDetailFullScreenBtn"
+                    text: noteDetailWindow.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen"))
+                    onClicked: noteDetailWindow.isFullScreen = !noteDetailWindow.isFullScreen
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                visible: noteDetailWindow.noteSyncSource !== "apple_notes_ro"
+                spacing: 10
+
+                TextField {
+                    id: noteDetailTitleInput
+                    Layout.fillWidth: true
+                    placeholderText: i18n.tr("Note Title...")
+                    font.bold: true
+                    font.pixelSize: theme.fontSize + 3
+                    color: theme.brightForeground
+                    background: Rectangle {
+                        color: theme.background
+                        radius: 6
+                        border.color: noteDetailTitleInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                        border.width: 1
+                    }
+                }
+
+                TextField {
+                    id: noteDetailFolderInput
+                    Layout.preferredWidth: 140
+                    placeholderText: i18n.tr("Folder")
+                    font.pixelSize: theme.fontSize
+                    color: theme.foreground
+                    background: Rectangle {
+                        color: theme.background
+                        radius: 6
+                        border.color: noteDetailFolderInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                        border.width: 1
+                    }
+                }
+            }
+
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                ScrollBar.vertical.policy: ScrollBar.AlwaysOn
+                ScrollBar.vertical.interactive: true
+
+                TextArea {
+                    id: noteDetailBodyInput
+                    placeholderText: i18n.tr("Note content...")
+                    wrapMode: TextArea.Wrap
+                    font.pixelSize: theme.fontSize + 3
+                    leftPadding: 16
+                    rightPadding: 16
+                    topPadding: 14
+                    bottomPadding: 14
+                    color: theme.brightForeground
+                    selectByMouse: true
+                    background: Rectangle {
+                        color: theme.background
+                        radius: 8
+                        border.color: noteDetailBodyInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                        border.width: 1
+                    }
+                }
+            }
+
+            RowLayout {
+                visible: noteDetailWindow.pendingHubConflictPrompt ||
+                         (noteDetailWindow.noteId !== "" &&
+                          (noteDetailWindow.noteHasServerConflict || noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision))
+                Layout.fillWidth: true
+                spacing: 8
+
+                Text {
+                    Layout.fillWidth: true
+                    text: noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision
+                          ? i18n.tr("Server conflict (rev %1). Choose how to resolve your draft:").arg(noteDetailWindow.noteConflictServerRevision)
+                          : (noteDetailWindow.noteHasServerConflict
+                             ? i18n.tr("Note was deleted on server. Choose how to resolve your draft:")
+                             : i18n.tr("Updated in Notes Hub. Choose how to resolve your unsaved draft:"))
+                    font.pixelSize: theme.fontSize - 2
+                    color: "#f7768e"
+                    elide: Text.ElideRight
+                }
+
+                Button {
+                    text: i18n.tr("Reload Latest")
+                    onClicked: {
+                        if (noteDetailWindow.noteHasServerConflict || noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision) {
+                            var srvTitle = noteDetailWindow.noteConflictTitle
+                            var srvFolder = noteDetailWindow.noteConflictFolder || "Notes"
+                            var srvBody = noteDetailWindow.noteConflictBody
+                            var srvRev = noteDetailWindow.noteConflictServerRevision
+                            backend.reloadConflictedIcloudNoteServerVersion(noteDetailWindow.noteId)
+                            if (srvRev <= 0) {
+                                noteDetailWindow.noteId = ""
+                                noteDetailWindow.noteSyncSource = "local_hub"
+                                noteDetailWindow.noteRevision = 0
+                                noteDetailWindow.noteMutationSeq = 0
+                            } else {
+                                noteDetailWindow.noteRevision = srvRev
+                                var refreshedList = backend.icloudNotes
+                                for (var rIdx = 0; rIdx < refreshedList.length; ++rIdx) {
+                                    var rItem = refreshedList[rIdx]
+                                    if (rItem && rItem.id === noteDetailWindow.noteId) {
+                                        noteDetailWindow.noteMutationSeq = Number(rItem.clientMutationSeq || 0)
+                                        break
+                                    }
+                                }
+                            }
+                            noteDetailTitleInput.text = srvTitle
+                            noteDetailFolderInput.text = srvFolder
+                            noteDetailBodyInput.text = srvBody
+                            noteDetailWindow.loadedTitle = srvTitle
+                            noteDetailWindow.loadedFolder = srvFolder
+                            noteDetailWindow.loadedBody = srvBody
+                            noteDetailWindow.noteConflictServerRevision = 0
+                            noteDetailWindow.noteHasServerConflict = false
+                            noteDetailWindow.pendingHubConflictPrompt = false
+                            return
+                        }
+                        var existingList = backend.icloudNotes
+                        for (var i = 0; i < existingList.length; ++i) {
+                            var cur = existingList[i]
+                            if (cur && cur.id === noteDetailWindow.noteId) {
+                                noteDetailTitleInput.text = cur.title || ""
+                                noteDetailFolderInput.text = cur.folder || "Notes"
+                                noteDetailBodyInput.text = cur.body || cur.snippet || ""
+                                noteDetailWindow.loadedTitle = noteDetailTitleInput.text
+                                noteDetailWindow.loadedFolder = noteDetailFolderInput.text
+                                noteDetailWindow.loadedBody = noteDetailBodyInput.text
+                                noteDetailWindow.noteRevision = Number(cur.revision || cur.baseRevision || 0)
+                                noteDetailWindow.noteMutationSeq = Number(cur.clientMutationSeq || 0)
+                                noteDetailWindow.pendingHubConflictPrompt = false
+                                break
+                            }
+                        }
+                    }
+                }
+
+                Button {
+                    text: i18n.tr("Save as Copy")
+                    onClicked: {
+                        var prevId = noteDetailWindow.noteId
+                        var hadServerConflict = ((noteDetailWindow.noteHasServerConflict || noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision) && prevId !== "")
+                        var draftTitle = noteDetailTitleInput.text
+                        var draftBody = noteDetailBodyInput.text
+                        var draftFolder = noteDetailFolderInput.text
+                        var copyId = backend.saveIcloudNote("", draftTitle, draftBody, draftFolder, 0)
+                        var copyPersisted = (copyId !== "" && backend.isIcloudNoteDurablyPersisted(copyId))
+                        noteDetailWindow.noteId = copyId
+                        noteDetailWindow.noteSyncSource = "local_hub"
+                        noteDetailWindow.noteRevision = 0
+                        noteDetailWindow.noteConflictServerRevision = 0
+                        noteDetailWindow.noteHasServerConflict = false
+                        noteDetailWindow.pendingHubConflictPrompt = false
+                        noteDetailTitleInput.text = draftTitle
+                        noteDetailFolderInput.text = draftFolder
+                        noteDetailBodyInput.text = draftBody
+                        noteDetailWindow.loadedTitle = draftTitle
+                        noteDetailWindow.loadedFolder = draftFolder
+                        noteDetailWindow.loadedBody = draftBody
+                        var updatedList = backend.icloudNotes
+                        for (var j = 0; j < updatedList.length; ++j) {
+                            var saved = updatedList[j]
+                            if (saved && saved.id === copyId) {
+                                noteDetailWindow.noteMutationSeq = Number(saved.clientMutationSeq || 0)
+                                break
+                            }
+                        }
+                        if (hadServerConflict && copyPersisted) {
+                            backend.reloadConflictedIcloudNoteServerVersion(prevId)
+                        } else if (hadServerConflict && !copyPersisted) {
+                            root.showToast(i18n.tr("Copy could not be saved to disk yet; original conflicted draft preserved."))
+                        }
+                    }
+                }
+
+                Button {
+                    text: i18n.tr("Overwrite")
+                    onClicked: {
+                        var deletedOnServer = (noteDetailWindow.noteHasServerConflict && noteDetailWindow.noteConflictServerRevision <= 0)
+                        var overwriteRev = deletedOnServer ? 0 : Math.max(noteDetailWindow.noteRevision, noteDetailWindow.noteConflictServerRevision)
+                        if (!deletedOnServer) {
+                            var existingList = backend.icloudNotes
+                            for (var i = 0; i < existingList.length; ++i) {
+                                var cur = existingList[i]
+                                if (cur && cur.id === noteDetailWindow.noteId) {
+                                    overwriteRev = Math.max(overwriteRev, Number(cur.revision || cur.baseRevision || 0))
+                                    break
+                                }
+                            }
+                        }
+                        noteDetailWindow.noteId = backend.saveIcloudNote(noteDetailWindow.noteId, noteDetailTitleInput.text, noteDetailBodyInput.text, noteDetailFolderInput.text, overwriteRev, deletedOnServer)
+                        noteDetailWindow.noteSyncSource = "local_hub"
+                        noteDetailWindow.noteRevision = overwriteRev
+                        noteDetailWindow.noteConflictServerRevision = 0
+                        noteDetailWindow.noteHasServerConflict = false
+                        noteDetailWindow.pendingHubConflictPrompt = false
+                        noteDetailWindow.loadedTitle = noteDetailTitleInput.text
+                        noteDetailWindow.loadedFolder = noteDetailFolderInput.text
+                        noteDetailWindow.loadedBody = noteDetailBodyInput.text
+                        var updatedList = backend.icloudNotes
+                        for (var j = 0; j < updatedList.length; ++j) {
+                            var saved = updatedList[j]
+                            if (saved && saved.id === noteDetailWindow.noteId) {
+                                noteDetailWindow.noteMutationSeq = Number(saved.clientMutationSeq || 0)
+                                break
+                            }
+                        }
+                        if (icloudNotesPopup.selectedNoteId === noteDetailWindow.noteId) {
+                            var popupCleanOnOverwrite = (noteTitleInput.text === icloudNotesPopup.loadedTitle &&
+                                                         noteBodyInput.text === icloudNotesPopup.loadedBody &&
+                                                         noteFolderInput.text === icloudNotesPopup.loadedFolder)
+                            if (popupCleanOnOverwrite) {
+                                noteTitleInput.text = noteDetailTitleInput.text
+                                noteBodyInput.text = noteDetailBodyInput.text
+                                noteFolderInput.text = noteDetailFolderInput.text
+                                icloudNotesPopup.loadedTitle = noteDetailTitleInput.text
+                                icloudNotesPopup.loadedBody = noteDetailBodyInput.text
+                                icloudNotesPopup.loadedFolder = noteDetailFolderInput.text
+                                icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                                icloudNotesPopup.selectedNoteRevision = noteDetailWindow.noteRevision
+                                icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                                icloudNotesPopup.selectedNoteHasServerConflict = false
+                                icloudNotesPopup.selectedNoteMutationSeq = noteDetailWindow.noteMutationSeq
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Button {
+                    text: noteDetailWindow.noteSyncSource === "apple_notes_ro"
+                          ? ("📋 " + i18n.tr("Copy to Local Hub"))
+                          : ("💾 " + i18n.tr("Save Note"))
+                    onClicked: {
+                        var isCopy = noteDetailWindow.noteSyncSource === "apple_notes_ro"
+                        var targetId = isCopy ? "" : noteDetailWindow.noteId
+                        if (targetId !== "" && (noteDetailWindow.noteHasServerConflict || noteDetailWindow.noteConflictServerRevision > noteDetailWindow.noteRevision)) {
+                            root.showToast(i18n.tr("Server conflict paused (rev %1). Choose Reload Latest, Save as Copy, or Overwrite.").arg(noteDetailWindow.noteConflictServerRevision))
+                            return
+                        }
+                        if (targetId !== "") {
+                            var existingList = backend.icloudNotes
+                            for (var i = 0; i < existingList.length; ++i) {
+                                var cur = existingList[i]
+                                if (cur && cur.id === targetId) {
+                                    var curSeq = Number(cur.clientMutationSeq || 0)
+                                    var curConflictRev = Number(cur.conflictServerRevision || 0)
+                                    var curHasConflict = !!cur.hasServerConflict || (curConflictRev > noteDetailWindow.noteRevision)
+                                    if (curHasConflict) {
+                                        noteDetailWindow.noteConflictServerRevision = curConflictRev
+                                        noteDetailWindow.noteHasServerConflict = true
+                                        noteDetailWindow.noteConflictTitle = cur.conflictServerTitle || ""
+                                        noteDetailWindow.noteConflictBody = cur.conflictServerBody || ""
+                                        noteDetailWindow.noteConflictFolder = cur.conflictServerFolder || "Notes"
+                                        root.showToast(i18n.tr("Server conflict paused (rev %1). Choose Reload Latest, Save as Copy, or Overwrite.").arg(curConflictRev))
+                                        return
+                                    }
+                                    if (curSeq > noteDetailWindow.noteMutationSeq) {
+                                        var detailCleanOnSave = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
+                                                                 noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
+                                                                 noteDetailFolderInput.text === noteDetailWindow.loadedFolder)
+                                        if (detailCleanOnSave) {
+                                            noteDetailTitleInput.text = cur.title || ""
+                                            noteDetailFolderInput.text = cur.folder || "Notes"
+                                            noteDetailBodyInput.text = cur.body || cur.snippet || ""
+                                            noteDetailWindow.loadedTitle = noteDetailTitleInput.text
+                                            noteDetailWindow.loadedFolder = noteDetailFolderInput.text
+                                            noteDetailWindow.loadedBody = noteDetailBodyInput.text
+                                            noteDetailWindow.noteRevision = Number(cur.revision || cur.baseRevision || 0)
+                                            noteDetailWindow.noteMutationSeq = curSeq
+                                            noteDetailWindow.pendingHubConflictPrompt = false
+                                            root.showToast(i18n.tr("Note was updated in Notes Hub; loaded latest saved version."))
+                                        } else {
+                                            noteDetailWindow.pendingHubConflictPrompt = true
+                                            root.showToast(i18n.tr("Note was updated in Notes Hub; your draft is preserved. Choose Reload Latest, Save as Copy, or Overwrite."))
+                                        }
+                                        return
+                                    }
+                                    break
+                                }
+                            }
+                        }
+                        var baseRev = (isCopy || targetId === "") ? 0 : noteDetailWindow.noteRevision
+                        noteDetailWindow.noteId = backend.saveIcloudNote(targetId, noteDetailTitleInput.text, noteDetailBodyInput.text, noteDetailFolderInput.text, baseRev)
+                        noteDetailWindow.noteSyncSource = "local_hub"
+                        noteDetailWindow.pendingHubConflictPrompt = false
+                        noteDetailWindow.loadedTitle = noteDetailTitleInput.text
+                        noteDetailWindow.loadedFolder = noteDetailFolderInput.text
+                        noteDetailWindow.loadedBody = noteDetailBodyInput.text
+                        var updatedList = backend.icloudNotes
+                        for (var j = 0; j < updatedList.length; ++j) {
+                            var saved = updatedList[j]
+                            if (saved && saved.id === noteDetailWindow.noteId) {
+                                noteDetailWindow.noteMutationSeq = Number(saved.clientMutationSeq || 0)
+                                break
+                            }
+                        }
+                        if (icloudNotesPopup.selectedNoteId === noteDetailWindow.noteId) {
+                            var popupCleanOnDetailSave = (noteTitleInput.text === icloudNotesPopup.loadedTitle &&
+                                                          noteBodyInput.text === icloudNotesPopup.loadedBody &&
+                                                          noteFolderInput.text === icloudNotesPopup.loadedFolder)
+                            if (popupCleanOnDetailSave) {
+                                noteTitleInput.text = noteDetailTitleInput.text
+                                noteBodyInput.text = noteDetailBodyInput.text
+                                noteFolderInput.text = noteDetailFolderInput.text
+                                icloudNotesPopup.loadedTitle = noteDetailTitleInput.text
+                                icloudNotesPopup.loadedBody = noteDetailBodyInput.text
+                                icloudNotesPopup.loadedFolder = noteDetailFolderInput.text
+                                icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                                icloudNotesPopup.selectedNoteRevision = noteDetailWindow.noteRevision
+                                icloudNotesPopup.selectedNoteMutationSeq = noteDetailWindow.noteMutationSeq
+                            } else {
+                                root.showToast(i18n.tr("Note saved; unsaved draft in Notes Hub preserved."))
+                            }
+                        }
+                    }
+                }
+
+                Button {
+                    Layout.maximumWidth: 220
+                    text: {
+                        var recipient = noteDetailWindow.targetChatTitle.trim()
+                        if (recipient.length > 22) {
+                            recipient = recipient.substring(0, 21) + "…"
+                        }
+                        return "📤 " + (recipient.length > 0
+                                        ? i18n.tr("Send to %1").arg(recipient)
+                                        : i18n.tr("Send to Chat"))
+                    }
+                    enabled: !noteDetailWindow.noteSendInFlight && !backend.sendingMessage && noteDetailWindow.targetChatGuid !== "" && (noteDetailTitleInput.text.trim().length > 0 || noteDetailBodyInput.text.trim().length > 0)
+                    onClicked: {
+                        if (noteDetailWindow.noteSendInFlight || backend.sendingMessage || noteDetailWindow.targetChatGuid === "") return
+                        var textToSend = noteDetailTitleInput.text.trim()
+                        if (noteDetailBodyInput.text.trim().length > 0) {
+                            textToSend = (textToSend.length > 0 ? ("* " + textToSend + " *\n\n") : "") + noteDetailBodyInput.text.trim()
+                        }
+                        noteDetailWindow.noteSendInFlight = true
+                        backend.sendMessage(noteDetailWindow.targetChatGuid, textToSend, "")
+                        if (!backend.sendingMessage) {
+                            noteDetailWindow.noteSendInFlight = false
+                        }
+                    }
+                }
+
+                Button {
+                    text: "📋 " + i18n.tr("Copy Text")
+                    onClicked: {
+                        var textToCopy = noteDetailTitleInput.text.trim()
+                        if (noteDetailBodyInput.text.trim().length > 0) {
+                            textToCopy = (textToCopy.length > 0 ? (textToCopy + "\n\n") : "") + noteDetailBodyInput.text.trim()
+                        }
+                        backend.copyToClipboard(textToCopy)
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    text: "🗑 " + i18n.tr("Delete")
+                    enabled: noteDetailWindow.noteId !== "" && noteDetailWindow.noteSyncSource !== "apple_notes_ro"
+                    onClicked: {
+                        if (noteDetailWindow.noteSyncSource === "apple_notes_ro") return
+                        var deletedId = noteDetailWindow.noteId
+                        backend.deleteIcloudNote(deletedId)
+                        noteDetailWindow.noteId = ""
+                        noteDetailWindow.noteSyncSource = "local_hub"
+                        noteDetailWindow.noteRevision = 0
+                        noteDetailWindow.noteMutationSeq = 0
+                        noteDetailWindow.noteConflictServerRevision = 0
+                        noteDetailWindow.noteHasServerConflict = false
+                        noteDetailWindow.pendingHubConflictPrompt = false
+                        noteDetailTitleInput.text = ""
+                        noteDetailFolderInput.text = "Notes"
+                        noteDetailBodyInput.text = ""
+                        noteDetailWindow.loadedTitle = ""
+                        noteDetailWindow.loadedFolder = "Notes"
+                        noteDetailWindow.loadedBody = ""
+                        if (icloudNotesPopup.selectedNoteId === deletedId) {
+                            icloudNotesPopup.selectedNoteId = ""
+                            icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                            icloudNotesPopup.selectedNoteRevision = 0
+                            icloudNotesPopup.selectedNoteMutationSeq = 0
+                            icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                            icloudNotesPopup.selectedNoteHasServerConflict = false
+                            icloudNotesPopup.pendingDetailConflictPrompt = false
+                            noteTitleInput.text = ""
+                            noteFolderInput.text = "Notes"
+                            noteBodyInput.text = ""
+                            icloudNotesPopup.loadedTitle = ""
+                            icloudNotesPopup.loadedFolder = "Notes"
+                            icloudNotesPopup.loadedBody = ""
+                        }
+                        noteDetailWindow.close()
+                    }
+                }
+
+                Button {
+                    text: i18n.tr("Close")
+                    onClicked: noteDetailWindow.close()
+                }
+            }
+        }
+    }
+
+    // iCloud Notes Popup
+    Popup {
+        id: icloudNotesPopup
+        objectName: "icloudNotesPopup"
+        modal: true
+        focus: true
+        anchors.centerIn: parent
+        property bool isFullScreen: false
+        width: isFullScreen ? Math.max(520, root.width - 20) : Math.min(880, Math.max(560, root.width - 80))
+        height: isFullScreen ? Math.max(400, root.height - 20) : Math.min(580, Math.max(400, root.height - 80))
+        readonly property bool compactNotesLayout: width < 760
+        property int notesPage: 0
+        property int notesPageSize: 20
+        readonly property var filteredNotes: {
+            var q = noteSearchInput.text.trim().toLowerCase()
+            var all = backend.icloudNotes || []
+            if (q.length === 0) return all
+            return all.filter(function(n) {
+                var t = (n.title || "").toLowerCase()
+                var b = (n.body || n.snippet || "").toLowerCase()
+                return t.indexOf(q) !== -1 || b.indexOf(q) !== -1
+            })
+        }
+        readonly property int notesPageCount: Math.max(1, Math.ceil(filteredNotes.length / Math.max(1, notesPageSize)))
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            color: theme.darkBackground
+            radius: icloudNotesPopup.isFullScreen ? 8 : (theme.radius + 4)
+            border.width: 1
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.4)
+        }
+
+        property string selectedNoteId: ""
+        property string selectedNoteFolder: "Notes"
+        property string selectedNoteSyncSource: "local_hub"
+        property int selectedNoteRevision: 0
+        property int selectedNoteMutationSeq: 0
+        property int selectedNoteConflictServerRevision: 0
+        property bool selectedNoteHasServerConflict: false
+        property string selectedNoteConflictTitle: ""
+        property string selectedNoteConflictBody: ""
+        property string selectedNoteConflictFolder: "Notes"
+        property bool pendingDetailConflictPrompt: false
+        property string loadedTitle: ""
+        property string loadedFolder: "Notes"
+        property string loadedBody: ""
+
+        function selectNoteObject(n) {
+            if (!n) return
+            var loadedRev = Number(n.revision || n.baseRevision || 0)
+            var loadedSeq = Number(n.clientMutationSeq || 0)
+            var conflictRev = Number(n.conflictServerRevision || 0)
+            var hasConflict = !!n.hasServerConflict || (conflictRev > loadedRev)
+            icloudNotesPopup.selectedNoteId = n.id || ""
+            icloudNotesPopup.selectedNoteSyncSource = n.syncSource || "local_hub"
+            icloudNotesPopup.selectedNoteRevision = loadedRev
+            icloudNotesPopup.selectedNoteMutationSeq = loadedSeq
+            icloudNotesPopup.selectedNoteConflictServerRevision = conflictRev
+            icloudNotesPopup.selectedNoteHasServerConflict = hasConflict
+            icloudNotesPopup.selectedNoteConflictTitle = n.conflictServerTitle || ""
+            icloudNotesPopup.selectedNoteConflictBody = n.conflictServerBody || ""
+            icloudNotesPopup.selectedNoteConflictFolder = n.conflictServerFolder || "Notes"
+            icloudNotesPopup.pendingDetailConflictPrompt = false
+            noteTitleInput.text = n.title || ""
+            noteFolderInput.text = n.folder || "Notes"
+            noteBodyInput.text = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "", n.syncSource || "local_hub")
+            icloudNotesPopup.loadedTitle = noteTitleInput.text
+            icloudNotesPopup.loadedFolder = noteFolderInput.text
+            icloudNotesPopup.loadedBody = noteBodyInput.text
+
+            var detailHasUnsavedDraft = (noteDetailWindow.noteId !== "" ||
+                                         noteDetailTitleInput.text.length > 0 ||
+                                         noteDetailBodyInput.text.length > 0) &&
+                                        (noteDetailTitleInput.text !== noteDetailWindow.loadedTitle ||
+                                         noteDetailBodyInput.text !== noteDetailWindow.loadedBody ||
+                                         noteDetailFolderInput.text !== noteDetailWindow.loadedFolder)
+            if (detailHasUnsavedDraft) {
+                if (noteDetailWindow.noteId === (n.id || "")) {
+                    noteDetailWindow.noteConflictServerRevision = conflictRev
+                    noteDetailWindow.noteHasServerConflict = hasConflict
+                    noteDetailWindow.noteConflictTitle = n.conflictServerTitle || ""
+                    noteDetailWindow.noteConflictBody = n.conflictServerBody || ""
+                    noteDetailWindow.noteConflictFolder = n.conflictServerFolder || "Notes"
+                } else {
+                    noteDetailWindow.pendingHubConflictPrompt = true
+                    root.showToast(i18n.tr("Unsaved draft in Note Viewer preserved."))
+                }
+            } else {
+                noteDetailWindow.noteId = n.id || ""
+                noteDetailWindow.noteSyncSource = n.syncSource || "local_hub"
+                noteDetailWindow.noteRevision = loadedRev
+                noteDetailWindow.noteMutationSeq = loadedSeq
+                noteDetailWindow.noteConflictServerRevision = conflictRev
+                noteDetailWindow.noteHasServerConflict = hasConflict
+                noteDetailWindow.noteConflictTitle = n.conflictServerTitle || ""
+                noteDetailWindow.noteConflictBody = n.conflictServerBody || ""
+                noteDetailWindow.noteConflictFolder = n.conflictServerFolder || "Notes"
+                noteDetailWindow.pendingHubConflictPrompt = false
+                noteDetailWindow.targetChatGuid = backend.selectedChatGuid
+                noteDetailWindow.targetChatTitle = backend.selectedChatTitle
+                noteDetailTitleInput.text = n.title || ""
+                noteDetailFolderInput.text = n.folder || "Notes"
+                noteDetailBodyInput.text = root.cleanNoteDisplayBody(n.title, n.body || n.snippet || "", n.syncSource || "local_hub")
+                noteDetailWindow.loadedTitle = noteDetailTitleInput.text
+                noteDetailWindow.loadedFolder = noteDetailFolderInput.text
+                noteDetailWindow.loadedBody = noteDetailBodyInput.text
+            }
+            if (noteDetailWindow.visible) {
+                noteDetailWindow.raise()
+                noteDetailWindow.requestActivate()
+            }
+        }
+
+        function popOutCurrentNote() {
+            var detailClean = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
+                               noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
+                               noteDetailFolderInput.text === noteDetailWindow.loadedFolder);
+            if (!detailClean && noteDetailWindow.noteId !== "") {
+                root.showToast("⚠️ " + i18n.tr("Pop-out window has unsaved edits"))
+                noteDetailWindow.show()
+                noteDetailWindow.raise()
+                noteDetailWindow.requestActivate()
+                return
+            }
+            noteDetailWindow.noteId = icloudNotesPopup.selectedNoteId
+            noteDetailWindow.noteSyncSource = icloudNotesPopup.selectedNoteSyncSource
+            noteDetailWindow.noteRevision = icloudNotesPopup.selectedNoteRevision
+            noteDetailWindow.noteMutationSeq = icloudNotesPopup.selectedNoteMutationSeq
+            noteDetailWindow.noteConflictServerRevision = icloudNotesPopup.selectedNoteConflictServerRevision
+            noteDetailWindow.noteHasServerConflict = icloudNotesPopup.selectedNoteHasServerConflict
+            noteDetailWindow.noteConflictTitle = icloudNotesPopup.selectedNoteConflictTitle
+            noteDetailWindow.noteConflictBody = icloudNotesPopup.selectedNoteConflictBody
+            noteDetailWindow.noteConflictFolder = icloudNotesPopup.selectedNoteConflictFolder
+            noteDetailWindow.pendingHubConflictPrompt = false
+            noteDetailWindow.targetChatGuid = backend.selectedChatGuid
+            noteDetailWindow.targetChatTitle = backend.selectedChatTitle
+            noteDetailTitleInput.text = noteTitleInput.text
+            noteDetailFolderInput.text = noteFolderInput.text
+            noteDetailBodyInput.text = noteBodyInput.text
+            noteDetailWindow.loadedTitle = icloudNotesPopup.loadedTitle
+            noteDetailWindow.loadedFolder = icloudNotesPopup.loadedFolder
+            noteDetailWindow.loadedBody = icloudNotesPopup.loadedBody
+            noteDetailWindow.show()
+            noteDetailWindow.raise()
+            noteDetailWindow.requestActivate()
+        }
+
+        onOpened: {
+            if (icloudNotesPopup.selectedNoteId === "" &&
+                noteTitleInput.text.length === 0 &&
+                noteBodyInput.text.length === 0 &&
+                icloudNotesPopup.filteredNotes.length > 0) {
+                icloudNotesPopup.selectNoteObject(icloudNotesPopup.filteredNotes[0])
+            }
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 16
+            spacing: 10
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Text {
+                    text: "📝 " + i18n.tr("iCloud (Read-Only) & Local Hub Notes")
+                    font.pixelSize: theme.fontSize + 2
+                    font.bold: true
+                    color: theme.brightForeground
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+                Text {
+                    visible: icloudNotesPopup.filteredNotes.length > 0
+                    text: "(" + icloudNotesPopup.filteredNotes.length + ")"
+                    font.pixelSize: theme.fontSize - 1
+                    color: theme.darkForeground
+                }
+                Text {
+                    text: i18n.tr("Per page:")
+                    font.pixelSize: theme.fontSize - 2
+                    color: theme.darkForeground
+                }
+                ComboBox {
+                    id: notesPageSizeSelector
+                    objectName: "notesPageSizeSelector"
+                    Layout.preferredWidth: 76
+                    model: [10, 20, 50, 100]
+                    currentIndex: 1
+                    onActivated: {
+                        icloudNotesPopup.notesPageSize = Number(model[currentIndex] || 20)
+                        icloudNotesPopup.notesPage = 0
+                        notesListView.positionViewAtBeginning()
+                    }
+                }
+                Button {
+                    text: "+ " + i18n.tr("New Note")
+                    onClicked: {
+                        icloudNotesPopup.selectedNoteId = ""
+                        icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                        icloudNotesPopup.selectedNoteRevision = 0
+                        icloudNotesPopup.selectedNoteMutationSeq = 0
+                        icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                        icloudNotesPopup.selectedNoteHasServerConflict = false
+                        icloudNotesPopup.selectedNoteConflictTitle = ""
+                        icloudNotesPopup.selectedNoteConflictBody = ""
+                        icloudNotesPopup.selectedNoteConflictFolder = "Notes"
+                        icloudNotesPopup.pendingDetailConflictPrompt = false
+                        noteTitleInput.text = ""
+                        noteFolderInput.text = "Notes"
+                        noteBodyInput.text = ""
+                        icloudNotesPopup.loadedTitle = ""
+                        icloudNotesPopup.loadedFolder = "Notes"
+                        icloudNotesPopup.loadedBody = ""
+                        noteTitleInput.forceActiveFocus()
+                    }
+                }
+                Button {
+                    id: notesFullScreenBtn
+                    objectName: "notesFullScreenBtn"
+                    text: icloudNotesPopup.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen"))
+                    onClicked: icloudNotesPopup.isFullScreen = !icloudNotesPopup.isFullScreen
+                }
+                Button {
+                    text: "✕"
+                    onClicked: icloudNotesPopup.close()
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 14
+
+                ColumnLayout {
+                    Layout.preferredWidth: icloudNotesPopup.compactNotesLayout ? Math.floor(icloudNotesPopup.width * 0.40) : Math.max(290, Math.floor(icloudNotesPopup.width * 0.36))
+                    Layout.minimumWidth: 230
+                    Layout.maximumWidth: Math.floor(icloudNotesPopup.width * 0.45)
+                    Layout.fillHeight: true
+                    spacing: 8
+
+                    TextField {
+                        id: noteSearchInput
+                        objectName: "noteSearchInput"
+                        Layout.fillWidth: true
+                        placeholderText: "🔍 " + i18n.tr("Search notes...")
+                        placeholderTextColor: theme.darkForeground
+                        font.pixelSize: theme.fontSize
+                        color: theme.brightForeground
+                        leftPadding: 10
+                        rightPadding: 10
+                        topPadding: 7
+                        bottomPadding: 7
+                        background: Rectangle {
+                            color: theme.background
+                            radius: 6
+                            border.color: noteSearchInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.14)
+                            border.width: 1
+                        }
+                        onTextChanged: icloudNotesPopup.notesPage = 0
+                    }
+
+                    ListView {
+                        id: notesListView
+                        objectName: "notesListView"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: ScrollBar {
+                            id: notesListScrollBar
+                            objectName: "notesListScrollBar"
+                            policy: ScrollBar.AlwaysOn
+                            interactive: true
+                            width: 10
+                        }
+                        model: {
+                            var all = icloudNotesPopup.filteredNotes
+                            var maxPage = Math.max(0, icloudNotesPopup.notesPageCount - 1)
+                            var pg = Math.min(Math.max(0, icloudNotesPopup.notesPage), maxPage)
+                            var startIdx = pg * icloudNotesPopup.notesPageSize
+                            return all.slice(startIdx, startIdx + icloudNotesPopup.notesPageSize)
+                        }
+                        spacing: 6
+
+                        delegate: Rectangle {
+                            width: Math.max(140, notesListView.width - 16)
+                            height: 72
+                            radius: 8
+                            clip: true
+                            color: icloudNotesPopup.selectedNoteId === (modelData.id || "")
+                                   ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.24)
+                                   : (itemMouse.containsMouse ? theme.lighterBackground : theme.background)
+                            border.color: icloudNotesPopup.selectedNoteId === (modelData.id || "") ? theme.accent : Qt.rgba(1, 1, 1, 0.08)
+                            border.width: 1
+
+                            ColumnLayout {
+                                id: noteCardCol
+                                anchors.fill: parent
+                                anchors.margins: 9
+                                spacing: 3
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    Text {
+                                        text: modelData.syncSource === "apple_notes_ro" ? "🍏" : "📝"
+                                        font.pixelSize: theme.fontSize - 2
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData.title || i18n.tr("Untitled Note")
+                                        font.bold: true
+                                        font.pixelSize: theme.fontSize
+                                        color: theme.brightForeground
+                                        elide: Text.ElideRight
+                                        maximumLineCount: 1
+                                    }
+                                    Rectangle {
+                                        visible: !!(modelData.folder && modelData.folder.length > 0)
+                                        height: 16
+                                        width: Math.min(72, folderTagTxt.implicitWidth + 10)
+                                        radius: 4
+                                        color: Qt.rgba(1, 1, 1, 0.06)
+                                        Text {
+                                            id: folderTagTxt
+                                            anchors.centerIn: parent
+                                            width: parent.width - 6
+                                            horizontalAlignment: Text.AlignHCenter
+                                            text: modelData.folder || "Notes"
+                                            font.pixelSize: 10
+                                            color: theme.darkForeground
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    text: {
+                                        var cleaned = root.cleanNoteDisplayBody(modelData.title, modelData.body || modelData.snippet || "", modelData.syncSource || "local_hub").replace(/\r?\n+/g, " · ")
+                                        return cleaned.length > 0 ? cleaned : i18n.tr("No additional text")
+                                    }
+                                    font.pixelSize: theme.fontSize - 2
+                                    color: theme.darkForeground
+                                    wrapMode: Text.WordWrap
+                                    maximumLineCount: 2
+                                    elide: Text.ElideRight
+                                }
+                            }
+
+                            MouseArea {
+                                id: itemMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: icloudNotesPopup.selectNoteObject(modelData)
+                                onDoubleClicked: icloudNotesPopup.popOutCurrentNote()
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    id: noteSideDetailPane
+                    objectName: "noteSideDetailPane"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    color: theme.background
+                    radius: 8
+                    border.color: Qt.rgba(1, 1, 1, 0.1)
+                    border.width: 1
+                    clip: true
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 10
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Text {
+                                id: notePopupHeadlineText
+                                objectName: "notePopupHeadlineText"
+                                Layout.fillWidth: true
+                                text: noteTitleInput.text.trim().length > 0 ? noteTitleInput.text.trim() : i18n.tr("Untitled Note")
+                                font.bold: true
+                                font.pixelSize: theme.fontSize + 4
+                                color: theme.brightForeground
+                                wrapMode: Text.WordWrap
+                                maximumLineCount: 2
+                                elide: Text.ElideRight
+                            }
+
+                            Rectangle {
+                                height: 24
+                                width: sideSyncBadgeTxt.implicitWidth + 14
+                                radius: 12
+                                color: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro"
+                                       ? Qt.rgba(theme.green.r, theme.green.g, theme.green.b, 0.18)
+                                       : Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
+                                border.color: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
+                                border.width: 1
+                                Text {
+                                    id: sideSyncBadgeTxt
+                                    anchors.centerIn: parent
+                                    text: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro" ? "🍏 Apple Notes" : "📝 Local Hub"
+                                    font.pixelSize: 11
+                                    font.bold: true
+                                    color: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro" ? theme.green : theme.accent
+                                }
+                            }
+
+                            Button {
+                                id: notePopOutBtn
+                                objectName: "notePopOutBtn"
+                                text: "⤢ " + i18n.tr("Pop Out")
+                                enabled: icloudNotesPopup.selectedNoteId !== "" || noteTitleInput.text.trim().length > 0 || noteBodyInput.text.trim().length > 0
+                                onClicked: icloudNotesPopup.popOutCurrentNote()
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            visible: icloudNotesPopup.selectedNoteSyncSource !== "apple_notes_ro"
+                            spacing: 8
+                            TextField {
+                                id: noteTitleInput
+                                objectName: "noteTitleInput"
+                                Layout.fillWidth: true
+                                placeholderText: i18n.tr("Note Title")
+                                placeholderTextColor: theme.darkForeground
+                                font.bold: true
+                                font.pixelSize: theme.fontSize + 1
+                                color: theme.brightForeground
+                                leftPadding: 10
+                                rightPadding: 10
+                                topPadding: 7
+                                bottomPadding: 7
+                                background: Rectangle {
+                                    color: theme.darkBackground
+                                    radius: 6
+                                    border.color: noteTitleInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.14)
+                                    border.width: 1
+                                }
+                            }
+                            TextField {
+                                id: noteFolderInput
+                                objectName: "noteFolderInput"
+                                Layout.preferredWidth: 120
+                                placeholderText: i18n.tr("Folder")
+                                placeholderTextColor: theme.darkForeground
+                                text: "Notes"
+                                font.pixelSize: theme.fontSize
+                                color: theme.foreground
+                                leftPadding: 10
+                                rightPadding: 10
+                                topPadding: 7
+                                bottomPadding: 7
+                                background: Rectangle {
+                                    color: theme.darkBackground
+                                    radius: 6
+                                    border.color: noteFolderInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.14)
+                                    border.width: 1
+                                }
+                            }
+                        }
+
+                        ScrollView {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            ScrollBar.vertical.policy: ScrollBar.AlwaysOn
+                            ScrollBar.vertical.interactive: true
+                            TextArea {
+                                id: noteBodyInput
+                                objectName: "noteBodyInput"
+                                placeholderText: i18n.tr("Write note content here...")
+                                placeholderTextColor: theme.darkForeground
+                                readOnly: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro"
+                                color: theme.brightForeground
+                                wrapMode: TextArea.Wrap
+                                selectByMouse: true
+                                font.pixelSize: theme.fontSize + 1
+                                leftPadding: 14
+                                rightPadding: 14
+                                topPadding: 12
+                                bottomPadding: 12
+                                background: Rectangle {
+                                    color: theme.darkBackground
+                                    radius: 8
+                                    border.color: noteBodyInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.12)
+                                    border.width: 1
+                                }
+                            }
+                        }
+
+                        RowLayout {
+                            visible: icloudNotesPopup.pendingDetailConflictPrompt ||
+                                     (icloudNotesPopup.selectedNoteId !== "" &&
+                                      (icloudNotesPopup.selectedNoteHasServerConflict ||
+                                       icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision))
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision
+                                      ? i18n.tr("Server conflict (rev %1). Resolve draft:").arg(icloudNotesPopup.selectedNoteConflictServerRevision)
+                                      : (icloudNotesPopup.selectedNoteHasServerConflict
+                                         ? i18n.tr("Note deleted on server. Resolve draft:")
+                                         : i18n.tr("Updated in detail window. Resolve draft:"))
+                                font.pixelSize: theme.fontSize - 2
+                                color: "#f7768e"
+                                elide: Text.ElideRight
+                            }
+
+                            Button {
+                                text: i18n.tr("Reload Server")
+                                onClicked: {
+                                    if (icloudNotesPopup.selectedNoteHasServerConflict ||
+                                        icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision) {
+                                        var srvTitle = icloudNotesPopup.selectedNoteConflictTitle
+                                        var srvFolder = icloudNotesPopup.selectedNoteConflictFolder || "Notes"
+                                        var srvBody = icloudNotesPopup.selectedNoteConflictBody
+                                        var srvRev = icloudNotesPopup.selectedNoteConflictServerRevision
+                                        backend.reloadConflictedIcloudNoteServerVersion(icloudNotesPopup.selectedNoteId)
+                                        if (srvRev <= 0) {
+                                            icloudNotesPopup.selectedNoteId = ""
+                                            icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                                            icloudNotesPopup.selectedNoteRevision = 0
+                                            icloudNotesPopup.selectedNoteMutationSeq = 0
+                                        } else {
+                                            icloudNotesPopup.selectedNoteRevision = srvRev
+                                            var refreshedPopupList = backend.icloudNotes
+                                            for (var rpIdx = 0; rpIdx < refreshedPopupList.length; ++rpIdx) {
+                                                var rpItem = refreshedPopupList[rpIdx]
+                                                if (rpItem && rpItem.id === icloudNotesPopup.selectedNoteId) {
+                                                    icloudNotesPopup.selectedNoteMutationSeq = Number(rpItem.clientMutationSeq || 0)
+                                                    break
+                                                }
+                                            }
+                                        }
+                                        noteTitleInput.text = srvTitle
+                                        noteFolderInput.text = srvFolder
+                                        noteBodyInput.text = srvBody
+                                        icloudNotesPopup.loadedTitle = srvTitle
+                                        icloudNotesPopup.loadedFolder = srvFolder
+                                        icloudNotesPopup.loadedBody = srvBody
+                                        icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                                        icloudNotesPopup.selectedNoteHasServerConflict = false
+                                        icloudNotesPopup.pendingDetailConflictPrompt = false
+                                        return
+                                    }
+                                    var existingList = backend.icloudNotes
+                                    for (var i = 0; i < existingList.length; ++i) {
+                                        var cur = existingList[i]
+                                        if (cur && cur.id === icloudNotesPopup.selectedNoteId) {
+                                            noteTitleInput.text = cur.title || ""
+                                            noteFolderInput.text = cur.folder || "Notes"
+                                            noteBodyInput.text = cur.body || cur.snippet || ""
+                                            icloudNotesPopup.loadedTitle = noteTitleInput.text
+                                            icloudNotesPopup.loadedFolder = noteFolderInput.text
+                                            icloudNotesPopup.loadedBody = noteBodyInput.text
+                                            icloudNotesPopup.selectedNoteRevision = Number(cur.revision || cur.baseRevision || 0)
+                                            icloudNotesPopup.selectedNoteMutationSeq = Number(cur.clientMutationSeq || 0)
+                                            icloudNotesPopup.pendingDetailConflictPrompt = false
+                                            break
+                                        }
+                                    }
+                                }
+                            }
+
+                            Button {
+                                text: i18n.tr("Save as Copy")
+                                onClicked: {
+                                    var prevId = icloudNotesPopup.selectedNoteId
+                                    var hadServerConflict = ((icloudNotesPopup.selectedNoteHasServerConflict ||
+                                                              icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision) &&
+                                                             prevId !== "")
+                                    var draftTitle = noteTitleInput.text
+                                    var draftBody = noteBodyInput.text
+                                    var draftFolder = noteFolderInput.text
+                                    var copyId = backend.saveIcloudNote("", draftTitle, draftBody, draftFolder, 0)
+                                    var copyPersisted = (copyId !== "" && backend.isIcloudNoteDurablyPersisted(copyId))
+                                    icloudNotesPopup.selectedNoteId = copyId
+                                    icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                                    icloudNotesPopup.selectedNoteRevision = 0
+                                    icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                                    icloudNotesPopup.selectedNoteHasServerConflict = false
+                                    icloudNotesPopup.pendingDetailConflictPrompt = false
+                                    noteTitleInput.text = draftTitle
+                                    noteFolderInput.text = draftFolder
+                                    noteBodyInput.text = draftBody
+                                    icloudNotesPopup.loadedTitle = draftTitle
+                                    icloudNotesPopup.loadedFolder = draftFolder
+                                    icloudNotesPopup.loadedBody = draftBody
+                                    var updatedList = backend.icloudNotes
+                                    for (var i = 0; i < updatedList.length; ++i) {
+                                        var saved = updatedList[i]
+                                        if (saved && saved.id === copyId) {
+                                            icloudNotesPopup.selectedNoteMutationSeq = Number(saved.clientMutationSeq || 0)
+                                            break
+                                        }
+                                    }
+                                    if (hadServerConflict && copyPersisted) {
+                                        backend.reloadConflictedIcloudNoteServerVersion(prevId)
+                                    } else if (hadServerConflict && !copyPersisted) {
+                                        root.showToast(i18n.tr("Copy could not be saved to disk yet; original conflicted draft preserved."))
+                                    }
+                                }
+                            }
+
+                            Button {
+                                text: i18n.tr("Overwrite Server")
+                                onClicked: {
+                                    var deletedOnServer = (icloudNotesPopup.selectedNoteHasServerConflict && icloudNotesPopup.selectedNoteConflictServerRevision <= 0)
+                                    var overwriteRev = deletedOnServer ? 0 : Math.max(icloudNotesPopup.selectedNoteRevision, icloudNotesPopup.selectedNoteConflictServerRevision)
+                                    if (!deletedOnServer) {
+                                        var existingList = backend.icloudNotes
+                                        for (var k = 0; k < existingList.length; ++k) {
+                                            var cur = existingList[k]
+                                            if (cur && cur.id === icloudNotesPopup.selectedNoteId) {
+                                                overwriteRev = Math.max(overwriteRev, Number(cur.revision || cur.baseRevision || 0))
+                                                break
+                                            }
+                                        }
+                                    }
+                                    icloudNotesPopup.selectedNoteId = backend.saveIcloudNote(icloudNotesPopup.selectedNoteId, noteTitleInput.text, noteBodyInput.text, noteFolderInput.text, overwriteRev, deletedOnServer)
+                                    icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                                    icloudNotesPopup.selectedNoteRevision = overwriteRev
+                                    icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                                    icloudNotesPopup.selectedNoteHasServerConflict = false
+                                    icloudNotesPopup.pendingDetailConflictPrompt = false
+                                    icloudNotesPopup.loadedTitle = noteTitleInput.text
+                                    icloudNotesPopup.loadedFolder = noteFolderInput.text
+                                    icloudNotesPopup.loadedBody = noteBodyInput.text
+                                    var updatedList = backend.icloudNotes
+                                    for (var i = 0; i < updatedList.length; ++i) {
+                                        var saved = updatedList[i]
+                                        if (saved && saved.id === icloudNotesPopup.selectedNoteId) {
+                                            icloudNotesPopup.selectedNoteMutationSeq = Number(saved.clientMutationSeq || 0)
+                                            break
+                                        }
+                                    }
+                                    if (noteDetailWindow.noteId === icloudNotesPopup.selectedNoteId) {
+                                        var detailCleanOnPopupOverwrite = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
+                                                                           noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
+                                                                           noteDetailFolderInput.text === noteDetailWindow.loadedFolder)
+                                        if (detailCleanOnPopupOverwrite) {
+                                            noteDetailTitleInput.text = noteTitleInput.text
+                                            noteDetailBodyInput.text = noteBodyInput.text
+                                            noteDetailFolderInput.text = noteFolderInput.text
+                                            noteDetailWindow.loadedTitle = noteTitleInput.text
+                                            noteDetailWindow.loadedBody = noteBodyInput.text
+                                            noteDetailWindow.loadedFolder = noteFolderInput.text
+                                            noteDetailWindow.noteSyncSource = "local_hub"
+                                            noteDetailWindow.noteRevision = icloudNotesPopup.selectedNoteRevision
+                                            noteDetailWindow.noteConflictServerRevision = 0
+                                            noteDetailWindow.noteHasServerConflict = false
+                                            noteDetailWindow.noteMutationSeq = icloudNotesPopup.selectedNoteMutationSeq
+                                            noteDetailWindow.pendingHubConflictPrompt = false
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Button {
+                                text: icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro"
+                                      ? ("📋 " + i18n.tr("Copy to Local Hub"))
+                                      : ("💾 " + i18n.tr("Save"))
+                                onClicked: {
+                                    var isCopy = icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro"
+                                    var targetId = isCopy ? "" : icloudNotesPopup.selectedNoteId
+                                    if (targetId !== "" && (icloudNotesPopup.selectedNoteHasServerConflict ||
+                                                            icloudNotesPopup.selectedNoteConflictServerRevision > icloudNotesPopup.selectedNoteRevision)) {
+                                        root.showToast(i18n.tr("Server conflict paused (rev %1). Choose Reload Server, Save as Copy, or Overwrite Server.").arg(icloudNotesPopup.selectedNoteConflictServerRevision))
+                                        return
+                                    }
+                                    if (targetId !== "") {
+                                        var preList = backend.icloudNotes
+                                        for (var k = 0; k < preList.length; ++k) {
+                                            var curN = preList[k]
+                                            if (curN && curN.id === targetId) {
+                                                var curConflictRev = Number(curN.conflictServerRevision || 0)
+                                                var curHasConflict = !!curN.hasServerConflict || (curConflictRev > icloudNotesPopup.selectedNoteRevision)
+                                                if (curHasConflict) {
+                                                    icloudNotesPopup.selectedNoteConflictServerRevision = curConflictRev
+                                                    icloudNotesPopup.selectedNoteHasServerConflict = true
+                                                    icloudNotesPopup.selectedNoteConflictTitle = curN.conflictServerTitle || ""
+                                                    icloudNotesPopup.selectedNoteConflictBody = curN.conflictServerBody || ""
+                                                    icloudNotesPopup.selectedNoteConflictFolder = curN.conflictServerFolder || "Notes"
+                                                    root.showToast(i18n.tr("Server conflict paused (rev %1). Choose Reload Server, Save as Copy, or Overwrite Server.").arg(curConflictRev))
+                                                    return
+                                                }
+                                                var curSeq = Number(curN.clientMutationSeq || 0)
+                                                if (curSeq > icloudNotesPopup.selectedNoteMutationSeq) {
+                                                    var popupCleanOnSave = (noteTitleInput.text === icloudNotesPopup.loadedTitle &&
+                                                                            noteBodyInput.text === icloudNotesPopup.loadedBody &&
+                                                                            noteFolderInput.text === icloudNotesPopup.loadedFolder)
+                                                    if (popupCleanOnSave) {
+                                                        noteTitleInput.text = curN.title || ""
+                                                        noteFolderInput.text = curN.folder || "Notes"
+                                                        noteBodyInput.text = curN.body || curN.snippet || ""
+                                                        icloudNotesPopup.loadedTitle = noteTitleInput.text
+                                                        icloudNotesPopup.loadedFolder = noteFolderInput.text
+                                                        icloudNotesPopup.loadedBody = noteBodyInput.text
+                                                        icloudNotesPopup.selectedNoteRevision = Number(curN.revision || curN.baseRevision || 0)
+                                                        icloudNotesPopup.selectedNoteMutationSeq = curSeq
+                                                        icloudNotesPopup.pendingDetailConflictPrompt = false
+                                                        root.showToast(i18n.tr("Note was updated in the detail window; loaded latest saved version."))
+                                                    } else {
+                                                        icloudNotesPopup.pendingDetailConflictPrompt = true
+                                                        root.showToast(i18n.tr("Note was updated in the detail window; your draft is preserved. Choose Reload Server, Save as Copy, or Overwrite Server."))
+                                                    }
+                                                    return
+                                                }
+                                                break
+                                            }
+                                        }
+                                    }
+                                    var baseRev = (isCopy || targetId === "") ? 0 : icloudNotesPopup.selectedNoteRevision
+                                    icloudNotesPopup.selectedNoteId = backend.saveIcloudNote(targetId, noteTitleInput.text, noteBodyInput.text, noteFolderInput.text, baseRev)
+                                    icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                                    icloudNotesPopup.pendingDetailConflictPrompt = false
+                                    icloudNotesPopup.loadedTitle = noteTitleInput.text
+                                    icloudNotesPopup.loadedFolder = noteFolderInput.text
+                                    icloudNotesPopup.loadedBody = noteBodyInput.text
+                                    var updatedList = backend.icloudNotes
+                                    for (var i = 0; i < updatedList.length; ++i) {
+                                        var saved = updatedList[i]
+                                        if (saved && saved.id === icloudNotesPopup.selectedNoteId) {
+                                            icloudNotesPopup.selectedNoteMutationSeq = Number(saved.clientMutationSeq || 0)
+                                            break
+                                        }
+                                    }
+                                    if (noteDetailWindow.noteId === icloudNotesPopup.selectedNoteId) {
+                                        var detailCleanOnPopupSave = (noteDetailTitleInput.text === noteDetailWindow.loadedTitle &&
+                                                                      noteDetailBodyInput.text === noteDetailWindow.loadedBody &&
+                                                                      noteDetailFolderInput.text === noteDetailWindow.loadedFolder)
+                                        if (detailCleanOnPopupSave) {
+                                            noteDetailTitleInput.text = noteTitleInput.text
+                                            noteDetailBodyInput.text = noteBodyInput.text
+                                            noteDetailFolderInput.text = noteFolderInput.text
+                                            noteDetailWindow.loadedTitle = noteTitleInput.text
+                                            noteDetailWindow.loadedBody = noteBodyInput.text
+                                            noteDetailWindow.loadedFolder = noteFolderInput.text
+                                            noteDetailWindow.noteSyncSource = "local_hub"
+                                            noteDetailWindow.noteRevision = icloudNotesPopup.selectedNoteRevision
+                                            noteDetailWindow.noteMutationSeq = icloudNotesPopup.selectedNoteMutationSeq
+                                            noteDetailWindow.pendingHubConflictPrompt = false
+                                        } else {
+                                            root.showToast(i18n.tr("Note saved in Notes Hub; unsaved draft in detail window preserved."))
+                                        }
+                                    }
+                                }
+                            }
+
+                            Button {
+                                text: "📤 " + i18n.tr("Send to Chat")
+                                enabled: backend.selectedChatGuid !== "" && (noteTitleInput.text.trim().length > 0 || noteBodyInput.text.trim().length > 0)
+                                onClicked: {
+                                    var textToSend = noteTitleInput.text.trim()
+                                    if (noteBodyInput.text.trim().length > 0) {
+                                        textToSend = (textToSend.length > 0 ? ("* " + textToSend + " *\n\n") : "") + noteBodyInput.text.trim()
+                                    }
+                                    backend.sendMessage(backend.selectedChatGuid, textToSend, "")
+                                    icloudNotesPopup.close()
+                                }
+                            }
+
+                            Button {
+                                text: "📋 " + i18n.tr("Copy")
+                                enabled: noteTitleInput.text.trim().length > 0 || noteBodyInput.text.trim().length > 0
+                                onClicked: {
+                                    var textToCopy = noteTitleInput.text.trim()
+                                    if (noteBodyInput.text.trim().length > 0) {
+                                        textToCopy = (textToCopy.length > 0 ? (textToCopy + "\n\n") : "") + noteBodyInput.text.trim()
+                                    }
+                                    backend.copyToClipboard(textToCopy)
+                                }
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            Button {
+                                text: "🗑 " + i18n.tr("Delete")
+                                enabled: icloudNotesPopup.selectedNoteId !== "" && icloudNotesPopup.selectedNoteSyncSource !== "apple_notes_ro"
+                                onClicked: {
+                                    if (icloudNotesPopup.selectedNoteSyncSource === "apple_notes_ro") return
+                                    var deletedPopupId = icloudNotesPopup.selectedNoteId
+                                    backend.deleteIcloudNote(deletedPopupId)
+                                    icloudNotesPopup.selectedNoteId = ""
+                                    icloudNotesPopup.selectedNoteSyncSource = "local_hub"
+                                    icloudNotesPopup.selectedNoteRevision = 0
+                                    icloudNotesPopup.selectedNoteMutationSeq = 0
+                                    icloudNotesPopup.selectedNoteConflictServerRevision = 0
+                                    icloudNotesPopup.selectedNoteHasServerConflict = false
+                                    icloudNotesPopup.pendingDetailConflictPrompt = false
+                                    noteTitleInput.text = ""
+                                    noteFolderInput.text = "Notes"
+                                    noteBodyInput.text = ""
+                                    icloudNotesPopup.loadedTitle = ""
+                                    icloudNotesPopup.loadedFolder = "Notes"
+                                    icloudNotesPopup.loadedBody = ""
+                                    if (noteDetailWindow.noteId === deletedPopupId) {
+                                        noteDetailWindow.noteId = ""
+                                        noteDetailWindow.noteSyncSource = "local_hub"
+                                        noteDetailWindow.noteRevision = 0
+                                        noteDetailWindow.noteMutationSeq = 0
+                                        noteDetailWindow.noteConflictServerRevision = 0
+                                        noteDetailWindow.noteHasServerConflict = false
+                                        noteDetailWindow.pendingHubConflictPrompt = false
+                                        noteDetailTitleInput.text = ""
+                                        noteDetailFolderInput.text = "Notes"
+                                        noteDetailBodyInput.text = ""
+                                        noteDetailWindow.loadedTitle = ""
+                                        noteDetailWindow.loadedFolder = "Notes"
+                                        noteDetailWindow.loadedBody = ""
+                                        noteDetailWindow.close()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                id: notesPaginationBar
+                objectName: "notesPaginationBar"
+                Layout.fillWidth: true
+                spacing: 8
+                Button {
+                    text: "‹ Prev"
+                    enabled: icloudNotesPopup.notesPage > 0
+                    onClicked: {
+                        if (icloudNotesPopup.notesPage > 0) {
+                            icloudNotesPopup.notesPage -= 1
+                            notesListView.positionViewAtBeginning()
+                        }
+                    }
+                }
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: {
+                        var total = icloudNotesPopup.filteredNotes.length
+                        var pg = icloudNotesPopup.notesPage + 1
+                        var pgCount = icloudNotesPopup.notesPageCount
+                        var startNum = total > 0 ? (icloudNotesPopup.notesPage * icloudNotesPopup.notesPageSize + 1) : 0
+                        var endNum = Math.min(total, startNum + icloudNotesPopup.notesPageSize - 1)
+                        return "Page " + pg + " / " + pgCount + (total > 0 ? (" · Showing " + startNum + "–" + Math.max(startNum, endNum) + " of " + total + " notes") : " (0 notes)")
+                    }
+                    font.pixelSize: theme.fontSize - 2
+                    color: theme.darkForeground
+                    elide: Text.ElideRight
+                }
+                Button {
+                    text: "Next ›"
+                    enabled: (icloudNotesPopup.notesPage + 1) < icloudNotesPopup.notesPageCount
+                    onClicked: {
+                        if ((icloudNotesPopup.notesPage + 1) < icloudNotesPopup.notesPageCount) {
+                            icloudNotesPopup.notesPage += 1
+                            notesListView.positionViewAtBeginning()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // iCloud Calendar Popup
+    Popup {
+        id: icloudCalendarPopup
+        objectName: "icloudCalendarPopup"
+        modal: true
+        focus: true
+        anchors.centerIn: parent
+        property bool isFullScreen: false
+        width: isFullScreen ? Math.max(500, root.width - 20) : Math.min(840, Math.max(500, root.width - 80))
+        height: isFullScreen ? Math.max(400, root.height - 20) : Math.min(560, Math.max(380, root.height - 80))
+        property int eventsPage: 0
+        property int eventsPageSize: 25
+        readonly property int eventsPageCount: Math.max(1, Math.ceil((backend.icloudEvents ? backend.icloudEvents.length : 0) / Math.max(1, eventsPageSize)))
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            color: theme.darkBackground
+            radius: theme.radius + 4
+            border.width: 1
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.4)
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 16
+            spacing: 12
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Text {
+                    text: "📅 " + i18n.tr("iCloud (Read-Only) & Local Hub Calendar")
+                    font.pixelSize: theme.fontSize + 3
+                    font.bold: true
+                    color: theme.brightForeground
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+                Text {
+                    text: i18n.tr("Per page:")
+                    font.pixelSize: theme.fontSize - 2
+                    color: theme.darkForeground
+                }
+                ComboBox {
+                    id: eventsPageSizeSelector
+                    objectName: "eventsPageSizeSelector"
+                    Layout.preferredWidth: 76
+                    model: [15, 25, 50, 100]
+                    currentIndex: 1
+                    onActivated: {
+                        icloudCalendarPopup.eventsPageSize = Number(model[currentIndex] || 25)
+                        icloudCalendarPopup.eventsPage = 0
+                        eventsListView.positionViewAtBeginning()
+                    }
+                }
+                Button {
+                    id: calendarFullScreenBtn
+                    objectName: "calendarFullScreenBtn"
+                    text: icloudCalendarPopup.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen"))
+                    onClicked: icloudCalendarPopup.isFullScreen = !icloudCalendarPopup.isFullScreen
+                }
+                Button {
+                    text: "✕"
+                    onClicked: icloudCalendarPopup.close()
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 48
+                color: theme.background
+                radius: 6
+                border.color: Qt.rgba(1, 1, 1, 0.1)
+                border.width: 1
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    spacing: 8
+
+                    TextField {
+                        id: eventTitleInput
+                        Layout.fillWidth: true
+                        placeholderText: i18n.tr("Event summary / title...")
+                        color: theme.brightForeground
+                        placeholderTextColor: theme.darkForeground
+                        selectedTextColor: theme.brightForeground
+                        selectionColor: theme.selection
+                        background: Rectangle {
+                            color: theme.darkBackground
+                            radius: 5
+                            border.width: 1
+                            border.color: eventTitleInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.14)
+                        }
+                    }
+
+                    ComboBox {
+                        id: eventCalendarSelector
+                        Layout.preferredWidth: 120
+                        model: {
+                            var cals = backend.icloudCalendars || []
+                            var names = []
+                            for (var i = 0; i < cals.length; ++i) {
+                                var t = (cals[i] && cals[i].title) ? String(cals[i].title).trim() : ""
+                                if (t.length > 0 && names.indexOf(t) === -1) names.push(t)
+                            }
+                            return names.length > 0 ? names : ["Home", "Work", "Family", "Calendar"]
+                        }
+                    }
+
+                    Button {
+                        text: "+1h"
+                        onClicked: {
+                            if (eventTitleInput.text.trim().length === 0) return
+                            var now = Date.now()
+                            backend.saveIcloudEvent(eventTitleInput.text.trim(), now + 3600000, now + 7200000, eventCalendarSelector.currentText, "")
+                            eventTitleInput.text = ""
+                        }
+                    }
+
+                    Button {
+                        text: "+ " + i18n.tr("Add Event")
+                        onClicked: {
+                            if (eventTitleInput.text.trim().length === 0) return
+                            var now = Date.now()
+                            backend.saveIcloudEvent(eventTitleInput.text.trim(), now, now + 3600000, eventCalendarSelector.currentText, "")
+                            eventTitleInput.text = ""
+                        }
+                    }
+                }
+            }
+
+            ListView {
+                id: eventsListView
+                objectName: "eventsListView"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ScrollBar {
+                    id: eventsListScrollBar
+                    objectName: "eventsListScrollBar"
+                    policy: ScrollBar.AlwaysOn
+                    interactive: true
+                    width: 10
+                }
+                model: {
+                    var all = backend.icloudEvents || []
+                    var maxPage = Math.max(0, icloudCalendarPopup.eventsPageCount - 1)
+                    var pg = Math.min(Math.max(0, icloudCalendarPopup.eventsPage), maxPage)
+                    var startIdx = pg * icloudCalendarPopup.eventsPageSize
+                    return all.slice(startIdx, startIdx + icloudCalendarPopup.eventsPageSize)
+                }
+                spacing: 6
+
+                delegate: Rectangle {
+                    width: Math.max(180, eventsListView.width - 14)
+                    height: 54
+                    radius: 6
+                    color: theme.background
+                    border.color: Qt.rgba(1, 1, 1, 0.08)
+                    border.width: 1
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 12
+
+                        Rectangle {
+                            Layout.preferredWidth: 4
+                            Layout.fillHeight: true
+                            radius: 2
+                            color: modelData.calendarTitle === "Work" ? "#007AFF" : (modelData.calendarTitle === "Family" ? "#FF9500" : "#30D158")
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Text {
+                                text: modelData.title || i18n.tr("Untitled Event")
+                                font.bold: true
+                                font.pixelSize: theme.fontSize
+                                color: theme.brightForeground
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                text: {
+                                    var d = new Date(modelData.startMs || Date.now())
+                                    return (modelData.calendarTitle || "Calendar") + " · " + d.toLocaleString(Qt.locale(), "ddd, MMM d h:mm AP")
+                                }
+                                font.pixelSize: theme.fontSize - 2
+                                color: theme.darkForeground
+                            }
+                        }
+
+                        Button {
+                            text: "📤 " + i18n.tr("Share")
+                            enabled: backend.selectedChatGuid !== ""
+                            onClicked: {
+                                var d = new Date(modelData.startMs || Date.now())
+                                var shareText = "📅 " + (modelData.title || "Event") + "\n" + d.toLocaleString(Qt.locale(), "ddd, MMM d, yyyy h:mm AP")
+                                backend.sendMessage(backend.selectedChatGuid, shareText, "")
+                                icloudCalendarPopup.close()
+                            }
+                        }
+
+                        Button {
+                            text: "🗑"
+                            enabled: !!modelData.id && modelData.syncSource !== "apple_calendar_ro"
+                            onClicked: {
+                                if (modelData.id && modelData.syncSource !== "apple_calendar_ro") backend.deleteIcloudEvent(modelData.id)
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                id: eventsPaginationBar
+                objectName: "eventsPaginationBar"
+                Layout.fillWidth: true
+                spacing: 8
+                Button {
+                    text: "‹ Prev"
+                    enabled: icloudCalendarPopup.eventsPage > 0
+                    onClicked: {
+                        if (icloudCalendarPopup.eventsPage > 0) {
+                            icloudCalendarPopup.eventsPage -= 1
+                            eventsListView.positionViewAtBeginning()
+                        }
+                    }
+                }
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "Page " + (icloudCalendarPopup.eventsPage + 1) + " / " + icloudCalendarPopup.eventsPageCount + " (" + (backend.icloudEvents ? backend.icloudEvents.length : 0) + " events)"
+                    font.pixelSize: theme.fontSize - 2
+                    color: theme.darkForeground
+                    elide: Text.ElideRight
+                }
+                Button {
+                    text: "Next ›"
+                    enabled: (icloudCalendarPopup.eventsPage + 1) < icloudCalendarPopup.eventsPageCount
+                    onClicked: {
+                        if ((icloudCalendarPopup.eventsPage + 1) < icloudCalendarPopup.eventsPageCount) {
+                            icloudCalendarPopup.eventsPage += 1
+                            eventsListView.positionViewAtBeginning()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // iCloud Photos Popup
+    Popup {
+        id: icloudPhotosPopup
+        objectName: "icloudPhotosPopup"
+        modal: true
+        focus: true
+        anchors.centerIn: parent
+        property bool isFullScreen: false
+        width: isFullScreen ? Math.max(520, root.width - 20) : Math.min(880, Math.max(540, root.width - 80))
+        height: isFullScreen ? Math.max(400, root.height - 20) : Math.min(580, Math.max(400, root.height - 80))
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            color: theme.darkBackground
+            radius: theme.radius + 4
+            border.width: 1
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.4)
+        }
+
+        contentItem: ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 14
+            spacing: 10
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Text {
+                    text: "☁️ " + i18n.tr("iCloud & iMessage Photos")
+                    font.pixelSize: theme.fontSize + 2
+                    font.bold: true
+                    color: theme.brightForeground
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+                Text {
+                    visible: backend.icloudPhotosTotal > 0 || backend.icloudPhotos.length > 0
+                    text: "(" + (backend.icloudPhotosTotal > 0 ? backend.icloudPhotosTotal : backend.icloudPhotos.length) + ")"
+                    font.pixelSize: theme.fontSize - 1
+                    color: theme.darkForeground
+                }
+                Text {
+                    text: i18n.tr("Per page:")
+                    font.pixelSize: theme.fontSize - 2
+                    color: theme.darkForeground
+                }
+                ComboBox {
+                    id: photosPageSizeSelector
+                    objectName: "photosPageSizeSelector"
+                    Layout.preferredWidth: 78
+                    model: [24, 48, 60, 120, 240]
+                    currentIndex: {
+                        var idx = model.indexOf(backend.icloudPhotosPageSize)
+                        return idx >= 0 ? idx : 2
+                    }
+                    onActivated: {
+                        var chosen = Number(model[currentIndex] || 60)
+                        photosGridView.positionViewAtBeginning()
+                        backend.setIcloudPhotosPageSize(chosen)
+                    }
+                }
+                Button {
+                    text: backend.icloudPhotosSyncing
+                          ? ("⏳ " + i18n.tr("Syncing..."))
+                          : ("⬇ " + i18n.tr("Sync All"))
+                    enabled: !backend.icloudPhotosSyncing
+                    onClicked: {
+                        if (backend.icloudPhotosSyncing) return
+                        backend.syncIcloudPhotos()
+                    }
+                }
+                Button {
+                    text: "🔄 " + i18n.tr("Refresh")
+                    onClicked: backend.fetchIcloudPhotos(backend.icloudPhotosPage, false)
+                }
+                Button {
+                    id: photosFullScreenBtn
+                    objectName: "photosFullScreenBtn"
+                    text: icloudPhotosPopup.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen"))
+                    onClicked: icloudPhotosPopup.isFullScreen = !icloudPhotosPopup.isFullScreen
+                }
+                Button {
+                    text: "✕"
+                    onClicked: icloudPhotosPopup.close()
+                }
+            }
+
+            GridView {
+                id: photosGridView
+                objectName: "photosGridView"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                cellWidth: 156
+                cellHeight: 210
+                model: backend.icloudPhotos
+                ScrollBar.vertical: ScrollBar {
+                    id: photosGridScrollBar
+                    objectName: "photosGridScrollBar"
+                    policy: ScrollBar.AlwaysOn
+                    interactive: true
+                    width: 10
+                }
+                onAtYEndChanged: {
+                    if (atYEnd && moving && backend.icloudPhotosHasMore && !backend.icloudPhotosLoading) {
+                        backend.loadMoreIcloudPhotos()
+                    }
+                }
+
+                delegate: Rectangle {
+                    width: 146
+                    height: 200
+                    radius: 8
+                    color: theme.background
+                    border.color: Qt.rgba(1, 1, 1, 0.1)
+                    border.width: 1
+
+                    Connections {
+                        target: backend
+                        function onAttachmentReady(guid, localUrl) {
+                            if (modelData && modelData.guid === guid && localUrl && localUrl.length > 0) {
+                                thumbImg.source = localUrl
+                            }
+                        }
+                    }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        spacing: 4
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: modelData.isPortrait ? 132 : 104
+                            radius: 6
+                            color: theme.darkBackground
+                            clip: true
+
+                            Image {
+                                id: thumbImg
+                                anchors.fill: parent
+                                anchors.margins: 2
+                                fillMode: Image.PreserveAspectFit
+                                autoTransform: true
+                                smooth: true
+                                source: modelData.localUrl || modelData.previewUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
+                                asynchronous: true
+                                cache: true
+                            }
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "🖼"
+                                font.pixelSize: 24
+                                visible: thumbImg.status !== Image.Ready
+                            }
+
+                            RowLayout {
+                                anchors.top: parent.top
+                                anchors.right: parent.right
+                                anchors.margins: 4
+                                spacing: 4
+
+                                Rectangle {
+                                    height: 18
+                                    width: orientText.implicitWidth + 8
+                                    radius: 4
+                                    color: Qt.rgba(theme.background.r, theme.background.g, theme.background.b, 0.85)
+                                    border.color: Qt.rgba(theme.foreground.r, theme.foreground.g, theme.foreground.b, 0.25)
+                                    border.width: 1
+                                    Text {
+                                        id: orientText
+                                        anchors.centerIn: parent
+                                        text: modelData.isPortrait ? "▯ Portrait" : "▭ Landscape"
+                                        font.pixelSize: 9
+                                        color: theme.foreground
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 18
+                                    height: 18
+                                    radius: 9
+                                    color: modelData.isCloudEvicted ? theme.accent : theme.green
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData.isCloudEvicted ? "☁" : "✓"
+                                        font.pixelSize: 10
+                                        color: theme.brightForeground
+                                    }
+                                }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (modelData.guid && !modelData.isCloudEvicted) {
+                                        icloudPhotosPopup.close()
+                                        root.openPhotoViewer(backend.icloudPhotos, index)
+                                    } else if (modelData.guid && modelData.isCloudEvicted && modelData.canUnpurge !== false) {
+                                        backend.downloadCloudAttachment(modelData.guid)
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: modelData.name || "Photo"
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.foreground
+                            elide: Text.ElideMiddle
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Button {
+                                Layout.fillWidth: true
+                                enabled: !modelData.isCloudEvicted || modelData.canUnpurge !== false
+                                text: modelData.isCloudEvicted ? (modelData.canUnpurge === false ? "☁ iCloud Only" : "☁ Unpurge") : "View"
+                                onClicked: {
+                                    if (!modelData.guid) return
+                                    if (modelData.isCloudEvicted) {
+                                        if (modelData.canUnpurge === false) return
+                                        backend.downloadCloudAttachment(modelData.guid)
+                                    } else {
+                                        icloudPhotosPopup.close()
+                                        root.openPhotoViewer(backend.icloudPhotos, index)
+                                    }
+                                }
+                            }
+
+                            Button {
+                                text: "📤"
+                                enabled: backend.selectedChatGuid !== "" && !!modelData.guid && !modelData.isCloudEvicted
+                                onClicked: {
+                                    if (modelData.guid && !modelData.isCloudEvicted) {
+                                        backend.shareIcloudPhotoToChat(backend.selectedChatGuid, modelData.guid, modelData.name || "photo.jpg")
+                                        icloudPhotosPopup.close()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                id: photosPaginationBar
+                objectName: "photosPaginationBar"
+                Layout.fillWidth: true
+                spacing: 8
+
+                Button {
+                    text: "‹ Prev"
+                    enabled: backend.icloudPhotosPage > 0 && !backend.icloudPhotosLoading
+                    onClicked: {
+                        photosGridView.positionViewAtBeginning()
+                        backend.prevIcloudPhotosPage()
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: {
+                        var total = backend.icloudPhotosTotal > 0 ? backend.icloudPhotosTotal : backend.icloudPhotos.length
+                        var pg = backend.icloudPhotosPage + 1
+                        var pgCount = Math.max(1, backend.icloudPhotosPageCount)
+                        var startNum = total > 0 ? (backend.icloudPhotosPage * backend.icloudPhotosPageSize + 1) : 0
+                        var endNum = Math.min(total, startNum + backend.icloudPhotos.length - 1)
+                        if (backend.icloudPhotosLoading) {
+                            return "Loading page " + pg + " / " + pgCount + "..."
+                        }
+                        return "Page " + pg + " / " + pgCount + (total > 0 ? (" · Showing " + startNum + "–" + Math.max(startNum, endNum) + " of " + total) : "")
+                    }
+                    font.pixelSize: theme.fontSize - 2
+                    color: theme.darkForeground
+                    elide: Text.ElideRight
+                }
+
+                Button {
+                    text: "+ Load More"
+                    visible: backend.icloudPhotosHasMore
+                    enabled: backend.icloudPhotosHasMore && !backend.icloudPhotosLoading
+                    onClicked: backend.loadMoreIcloudPhotos()
+                }
+
+                Button {
+                    text: "Next ›"
+                    enabled: ((backend.icloudPhotosPage + 1) < backend.icloudPhotosPageCount || backend.icloudPhotosHasMore) && !backend.icloudPhotosLoading
+                    onClicked: {
+                        photosGridView.positionViewAtBeginning()
+                        backend.nextIcloudPhotosPage()
                     }
                 }
             }
@@ -5679,6 +8132,95 @@ ApplicationWindow {
                     }
                 }
 
+                // Optional iCloud Hub Feature Modules
+                ColumnLayout {
+                    id: icloudModulesSettingsCol
+                    objectName: "icloudModulesSettingsCol"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Text {
+                        Layout.fillWidth: true
+                        text: i18n.tr("iCloud Hub Modules (Optional)")
+                        font.pixelSize: theme.fontSize - 2
+                        font.bold: true
+                        color: theme.foreground
+                        elide: Text.ElideRight
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Rectangle {
+                            id: toggleNotesModuleBtn
+                            objectName: "toggleNotesModuleBtn"
+                            Layout.fillWidth: true
+                            height: 34
+                            radius: 6
+                            color: backend.icloudNotesEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.icloudNotesEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.icloudNotesEnabled ? "✓ " : "○ ") + "📝 " + i18n.tr("Notes")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.icloudNotesEnabled
+                                color: backend.icloudNotesEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.icloudNotesEnabled = !backend.icloudNotesEnabled
+                            }
+                        }
+
+                        Rectangle {
+                            id: toggleCalendarModuleBtn
+                            objectName: "toggleCalendarModuleBtn"
+                            Layout.fillWidth: true
+                            height: 34
+                            radius: 6
+                            color: backend.icloudCalendarEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.icloudCalendarEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.icloudCalendarEnabled ? "✓ " : "○ ") + "📅 " + i18n.tr("Calendar")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.icloudCalendarEnabled
+                                color: backend.icloudCalendarEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.icloudCalendarEnabled = !backend.icloudCalendarEnabled
+                            }
+                        }
+
+                        Rectangle {
+                            id: togglePhotosModuleBtn
+                            objectName: "togglePhotosModuleBtn"
+                            Layout.fillWidth: true
+                            height: 34
+                            radius: 6
+                            color: backend.icloudPhotosEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.icloudPhotosEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.icloudPhotosEnabled ? "✓ " : "○ ") + "☁️ " + i18n.tr("Photos")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.icloudPhotosEnabled
+                                color: backend.icloudPhotosEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.icloudPhotosEnabled = !backend.icloudPhotosEnabled
+                            }
+                        }
+                    }
+                }
+
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 10
@@ -6181,7 +8723,27 @@ ApplicationWindow {
 
         readonly property var currentPhoto: (root.photoViewerItems && root.photoViewerIndex >= 0 && root.photoViewerIndex < root.photoViewerItems.length)
                                             ? root.photoViewerItems[root.photoViewerIndex]
-                                            : ({ guid: "", name: "", localUrl: "" })
+                                            : ({ guid: "", name: "", localUrl: "", previewUrl: "", isCloudEvicted: false, canUnpurge: true, canRequestAttachment: true })
+
+        Connections {
+            target: backend
+            function onAttachmentReady(guid, localUrl) {
+                if (!root.showPhotoViewer || !guid || !localUrl) return
+                var items = root.photoViewerItems ? root.photoViewerItems.slice() : []
+                var changed = false
+                for (var i = 0; i < items.length; ++i) {
+                    if (items[i] && items[i].guid === guid && items[i].localUrl !== localUrl) {
+                        var copy = Object.assign({}, items[i])
+                        copy.localUrl = localUrl
+                        items[i] = copy
+                        changed = true
+                    }
+                }
+                if (changed) {
+                    root.photoViewerItems = items
+                }
+            }
+        }
 
         // Backdrop click to close
         MouseArea {
@@ -6196,13 +8758,28 @@ ApplicationWindow {
             }
         }
 
+        // Compact Centered Lightbox Card (or Full Screen when toggled)
+        Rectangle {
+            id: photoViewerCard
+            objectName: "photoViewerCard"
+            anchors.centerIn: parent
+            width: root.photoViewerFullScreen ? parent.width : Math.min(820, Math.max(480, root.width - 90))
+            height: root.photoViewerFullScreen ? parent.height : Math.min(580, Math.max(380, root.height - 90))
+            radius: root.photoViewerFullScreen ? 0 : 12
+            color: theme.darkBackground
+            border.width: root.photoViewerFullScreen ? 0 : 1
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.45)
+            clip: true
+
+            MouseArea { anchors.fill: parent }
+
         // Top Header Bar (Filename, Index Counter, Zoom Controls, Close Button)
         Rectangle {
             id: photoViewerTopBar
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
-            height: 56
+            height: 50
             color: "#cc131620"
             z: 5
 
@@ -6320,6 +8897,63 @@ ApplicationWindow {
                     }
                 }
 
+                // Copy Image Button (Ctrl+C)
+                Rectangle {
+                    height: 32
+                    implicitWidth: copyViewerTxt.implicitWidth + 20
+                    radius: 7
+                    color: copyViewerMouse.containsMouse ? theme.selection : theme.lighterBackground
+                    border.width: 1
+                    border.color: copyViewerMouse.containsMouse ? theme.accent : theme.muted
+                    Text {
+                        id: copyViewerTxt
+                        anchors.centerIn: parent
+                        text: "󰆏  " + i18n.tr("Copy Image")
+                        font.pixelSize: theme.fontSize - 2
+                        font.bold: true
+                        color: copyViewerMouse.containsMouse ? theme.accent : theme.brightForeground
+                    }
+                    MouseArea {
+                        id: copyViewerMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            var cp = photoViewerModal.currentPhoto
+                            if (cp) {
+                                backend.copyImageToClipboard(cp.localUrl || "", cp.guid || "")
+                            }
+                        }
+                    }
+                }
+
+                // Full Screen / Compact Toggle Button
+                Rectangle {
+                    id: photoViewerFullScreenBtn
+                    objectName: "photoViewerFullScreenBtn"
+                    height: 32
+                    implicitWidth: fsViewerTxt.implicitWidth + 20
+                    radius: 7
+                    color: fsViewerMouse.containsMouse ? theme.selection : theme.lighterBackground
+                    border.width: 1
+                    border.color: root.photoViewerFullScreen ? theme.accent : theme.muted
+                    Text {
+                        id: fsViewerTxt
+                        anchors.centerIn: parent
+                        text: root.photoViewerFullScreen ? ("🗗  " + i18n.tr("Compact")) : ("⛶  " + i18n.tr("Full Screen"))
+                        font.pixelSize: theme.fontSize - 2
+                        font.bold: true
+                        color: root.photoViewerFullScreen ? theme.accent : theme.brightForeground
+                    }
+                    MouseArea {
+                        id: fsViewerMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.photoViewerFullScreen = !root.photoViewerFullScreen
+                    }
+                }
+
                 // Close Button (Esc)
                 Rectangle {
                     height: 32
@@ -6363,9 +8997,9 @@ ApplicationWindow {
                 anchors.centerIn: parent
                 anchors.horizontalCenterOffset: root.photoViewerPanX
                 anchors.verticalCenterOffset: root.photoViewerPanY
-                width: Math.max(120, parent.width - (root.photoViewerItems.length > 1 ? 140 : 32))
-                height: Math.max(120, parent.height - 24)
-                source: photoViewerModal.currentPhoto.localUrl || ""
+                width: Math.max(120, parent.width - (root.photoViewerItems.length > 1 ? 120 : 24))
+                height: Math.max(120, parent.height - 16)
+                source: photoViewerModal.currentPhoto.localUrl || photoViewerModal.currentPhoto.previewUrl || ((photoViewerModal.currentPhoto.guid && !photoViewerModal.currentPhoto.isCloudEvicted) ? backend.attachmentDownloadUrl(photoViewerModal.currentPhoto.guid) : "")
                 asynchronous: true
                 cache: true
                 autoTransform: true
@@ -6431,14 +9065,18 @@ ApplicationWindow {
                     spacing: 6
                     Text {
                         Layout.alignment: Qt.AlignHCenter
-                        text: "📷 " + (photoViewerModal.currentPhoto.name || i18n.tr("Loading photo..."))
+                        text: photoViewerModal.currentPhoto.canRequestAttachment === false
+                              ? ("☁ " + i18n.tr("iCloud Only") + " — " + (photoViewerModal.currentPhoto.name || i18n.tr("Photo")))
+                              : ("📷 " + (photoViewerModal.currentPhoto.name || i18n.tr("Loading photo...")))
                         font.pixelSize: theme.fontSize
                         font.bold: true
                         color: theme.brightForeground
                     }
                     Text {
                         Layout.alignment: Qt.AlignHCenter
-                        text: i18n.tr("Preparing high-resolution preview...")
+                        text: photoViewerModal.currentPhoto.canRequestAttachment === false
+                              ? i18n.tr("Evicted from local Mac cache (unpurge unavailable)")
+                              : i18n.tr("Preparing high-resolution preview...")
                         font.pixelSize: theme.fontSize - 3
                         color: theme.darkForeground
                     }
@@ -6517,47 +9155,87 @@ ApplicationWindow {
 
             MouseArea { anchors.fill: parent }
 
-            Row {
-                anchors.centerIn: parent
+            ListView {
+                id: photoThumbListView
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.topMargin: 10
+                anchors.bottomMargin: 10
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: Math.min(parent.width - 32, Math.max(66, count * 76 - 10))
+                orientation: ListView.Horizontal
                 spacing: 10
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                model: root.photoViewerItems
+                currentIndex: root.photoViewerIndex
 
-                Repeater {
-                    model: root.photoViewerItems
-                    delegate: Rectangle {
-                        required property var modelData
-                        required property int index
-                        width: 66
-                        height: 66
-                        radius: 8
-                        color: theme.darkBackground
-                        border.width: index === root.photoViewerIndex ? 2 : 1
-                        border.color: index === root.photoViewerIndex ? theme.accent : theme.muted
-                        clip: true
+                onCurrentIndexChanged: {
+                    if (currentIndex >= 0 && currentIndex < count) {
+                        positionViewAtIndex(currentIndex, ListView.Contain)
+                    }
+                }
+                onCountChanged: {
+                    if (currentIndex >= 0 && currentIndex < count) {
+                        Qt.callLater(function() {
+                            if (photoThumbListView.currentIndex >= 0 && photoThumbListView.currentIndex < photoThumbListView.count) {
+                                photoThumbListView.positionViewAtIndex(photoThumbListView.currentIndex, ListView.Center)
+                            }
+                        })
+                    }
+                }
 
-                        Image {
-                            anchors.fill: parent
-                            anchors.margins: 2
-                            source: modelData.localUrl || ""
-                            asynchronous: true
-                            cache: true
-                            autoTransform: true
-                            fillMode: Image.PreserveAspectCrop
-                            opacity: index === root.photoViewerIndex ? 1.0 : 0.65
+                delegate: Rectangle {
+                    required property var modelData
+                    required property int index
+                    width: 66
+                    height: 66
+                    radius: 8
+                    color: theme.darkBackground
+                    border.width: index === root.photoViewerIndex ? 2 : 1
+                    border.color: index === root.photoViewerIndex ? theme.accent : theme.muted
+                    clip: true
+
+                    Image {
+                        anchors.fill: parent
+                        anchors.margins: 2
+                        source: modelData.localUrl || modelData.previewUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
+                        asynchronous: true
+                        cache: true
+                        autoTransform: true
+                        fillMode: Image.PreserveAspectCrop
+                        opacity: index === root.photoViewerIndex ? 1.0 : 0.65
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            root.photoViewerIndex = index
+                            root.photoViewerZoom = 1.0
+                            root.photoViewerPanX = 0
+                            root.photoViewerPanY = 0
+                            var cur = root.photoViewerItems[index]
+                            if (cur && (!cur.localUrl || cur.localUrl.length === 0) && cur.guid && cur.guid.length > 0 && cur.canRequestAttachment) {
+                                if (cur.isCloudEvicted) {
+                                    backend.downloadCloudAttachment(cur.guid)
+                                } else {
+                                    backend.openAttachment(cur.guid, cur.name || "")
+                                }
+                            }
                         }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                root.photoViewerIndex = index
-                                root.photoViewerZoom = 1.0
-                                root.photoViewerPanX = 0
-                                root.photoViewerPanY = 0
+                        onWheel: (wheel) => {
+                            var delta = wheel.angleDelta.x !== 0 ? wheel.angleDelta.x : wheel.angleDelta.y
+                            if (delta !== 0) {
+                                var maxContentX = Math.max(0, photoThumbListView.contentWidth - photoThumbListView.width)
+                                photoThumbListView.contentX = Math.max(0, Math.min(maxContentX, photoThumbListView.contentX - delta))
+                                wheel.accepted = true
                             }
                         }
                     }
                 }
             }
+        }
         }
     }
 

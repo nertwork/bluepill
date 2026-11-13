@@ -1,3 +1,5 @@
+#include <QImageReader>
+#include <QElapsedTimer>
 #include <QKeyEvent>
 #include <QClipboard>
 #include <QGuiApplication>
@@ -477,6 +479,19 @@ private slots:
         const QString formatted = Backend::formatMessageTextWithLinks(input);
         QVERIFY(formatted.contains(QStringLiteral("<a href=\"https://example.com/test\"")));
         QVERIFY(formatted.contains(QStringLiteral("&amp; enjoy &lt;cool&gt;!")));
+
+        const QString youngLaSms = QStringLiteral(
+            "Promo: YOUR HOLIDAY FIRST LOOK IS HERE!!!\n\n"
+            "Get an exclusive sneak peek at our new Winter and Expedition 2.0 Compression Collections! promo.example.com/a1mj-cMJ6fZX \n\n"
+            "30% OFF SITEWIDE starts 11/24, plus your chance to WIN $1,000,000 CASH!\n\n"
+            "No purchase necessary. Exclusions apply. Terms: shop.example.net/a7qcUWK503Mo");
+        QCOMPARE(Backend::extractFirstUrl(youngLaSms), QStringLiteral("https://promo.example.com/a1mj-cMJ6fZX"));
+        const QString formattedSms = Backend::formatMessageTextWithLinks(youngLaSms);
+        QVERIFY(formattedSms.contains(QStringLiteral("<a href=\"https://promo.example.com/a1mj-cMJ6fZX\" style=\"color: #64B5F6; text-decoration: underline;\">promo.example.com/a1mj-cMJ6fZX</a>")));
+        QVERIFY(formattedSms.contains(QStringLiteral("<a href=\"https://shop.example.net/a7qcUWK503Mo\" style=\"color: #64B5F6; text-decoration: underline;\">shop.example.net/a7qcUWK503Mo</a>")));
+        QVERIFY(!formattedSms.contains(QStringLiteral("href=\"https://2.0")));
+        QVERIFY(!formattedSms.contains(QStringLiteral("href=\"https://11/24")));
+        QVERIFY(formattedSms.contains(QStringLiteral("<br/><br/>")));
     }
 
     void testImageMimeAndExtensionDetection() {
@@ -1837,7 +1852,7 @@ private slots:
         QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
         const QString qml = QString::fromUtf8(qmlFile.readAll());
         QVERIFY(qml.contains(QStringLiteral("function focusAndScrollChat()")));
-        QVERIFY(qml.contains(QStringLiteral("backend.selectChat(chatGuid)\n                                    root.focusAndScrollChat()")));
+        QVERIFY(qml.contains(QStringLiteral("backend.selectChat(chatGuid)\n                                    if (win) Qt.callLater(function() { win.focusAndScrollChat() })")));
     }
 
     void testV162MessageListKeyboardNavigation() {
@@ -2282,7 +2297,7 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("function nextPhotoInViewer()")));
         QVERIFY(qml.contains(QStringLiteral("function zoomPhotoViewer(delta)")));
         QVERIFY(qml.contains(QStringLiteral("root.openPhotoViewer(resolvedList, index)")));
-        QVERIFY(qml.contains(QStringLiteral("Component.onCompleted: backend.registerWindow(root)")));
+        QVERIFY(qml.contains(QStringLiteral("backend.registerWindow(root)")));
         QVERIFY(qml.contains(QStringLiteral("function zoomInPhotoViewer()")));
         QVERIFY(qml.contains(QStringLiteral("function zoomOutPhotoViewer()")));
         QVERIFY(qml.contains(QStringLiteral("function resetZoomPhotoViewer()")));
@@ -2999,7 +3014,29 @@ private slots:
         tempMsg.insert(QStringLiteral("isFromMe"), true);
         tempMsg.insert(QStringLiteral("dateCreated"), 1794368786000LL);
         tempMsg.insert(QStringLiteral("chats"), QJsonArray{chatObj});
-        b.ingestMessagesForTest(QJsonArray{tempMsg}, false);
+        const QString chatGuidB = QStringLiteral("iMessage;-;+14155550142");
+        QJsonObject chatObjB;
+        chatObjB.insert(QStringLiteral("guid"), chatGuidB);
+        chatObjB.insert(QStringLiteral("chatIdentifier"), QStringLiteral("+14155550142"));
+        chatObjB.insert(QStringLiteral("style"), 45);
+        QJsonObject msgB;
+        msgB.insert(QStringLiteral("guid"), QStringLiteral("real-alex-msg-1"));
+        msgB.insert(QStringLiteral("text"), QStringLiteral("Existing Alex Rivera message"));
+        msgB.insert(QStringLiteral("isFromMe"), false);
+        msgB.insert(QStringLiteral("dateCreated"), 1794368700000LL);
+        msgB.insert(QStringLiteral("chats"), QJsonArray{chatObjB});
+
+        b.ingestMessagesForTest(QJsonArray{tempMsg, msgB}, false);
+        b.selectChat(chatGuid);
+        QCOMPARE(b.messages().size(), 1);
+
+        // Switching from chatGuid (which has temp-*) to chatGuidB must NEVER bleed temp-* into chatGuidB!
+        b.selectChat(chatGuidB);
+        QCOMPARE(b.messages().size(), 1);
+        QCOMPARE(b.messages().first().toMap().value(QStringLiteral("guid")).toString(),
+                 QStringLiteral("real-alex-msg-1"));
+
+        // Switch back to chatGuid -> still has its 1 message
         b.selectChat(chatGuid);
         QCOMPARE(b.messages().size(), 1);
 
@@ -3274,6 +3311,7 @@ private slots:
         QVERIFY(tempDir.isValid());
         Backend backend(false);
         backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_parts.json")));
+        backend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_parts.json")));
         backend.loadDemoData();
 
         const QVariantList chats = backend.chats();
@@ -3327,6 +3365,1031 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("property string activeScreenEffect:")));
         QVERIFY(qml.contains(QStringLiteral("function triggerExpressiveEffect(effectText)")));
         QVERIFY(qml.contains(QStringLiteral("function playBubbleEffect(effectLabel)")));
+
+        // Verify BluePill iCloud Hub (Notes, Calendar, Photos)
+        QVERIFY(qml.contains(QStringLiteral("id: icloudHubBar")));
+        QVERIFY(qml.contains(QStringLiteral("id: icloudPhotosBtn")));
+        QVERIFY(qml.contains(QStringLiteral("id: icloudNotesPopup")));
+        QVERIFY(qml.contains(QStringLiteral("id: notePopupHeadlineText")));
+        QVERIFY(qml.contains(QStringLiteral("id: noteDetailHeadlineText")));
+        QVERIFY(qml.contains(QStringLiteral("function cleanNoteDisplayBody(title, body, syncSource)")));
+        QVERIFY(qml.contains(QStringLiteral("id: icloudCalendarPopup")));
+        QVERIFY(qml.contains(QStringLiteral("id: icloudPhotosPopup")));
+        // Verify compact non-fullscreen dimensions, interactive scrollbars, and pagination bars for Notes, Calendar, and Photos
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"notesListScrollBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"eventsListScrollBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photosGridScrollBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"notesPaginationBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"eventsPaginationBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photosPaginationBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photoViewerCard\"")));
+        // Verify Full Screen toggles, page-size selectors, and dark-styled side note reader pane
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"notesFullScreenBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"calendarFullScreenBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photosFullScreenBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photoViewerFullScreenBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"noteDetailFullScreenBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"notesPageSizeSelector\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"eventsPageSizeSelector\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photosPageSizeSelector\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"noteSideDetailPane\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"notePopOutBtn\"")));
+        // Verify high-contrast dark green RCS/SMS sent bubble palette (#1B6E38 background, #268C48 border, #CBEFD8 metadata)
+        QVERIFY(qml.contains(QStringLiteral("readonly property bool isGreenService:")));
+        QVERIFY(qml.contains(QStringLiteral("#1B6E38")));
+        QVERIFY(qml.contains(QStringLiteral("#268C48")));
+        QVERIFY(qml.contains(QStringLiteral("#CBEFD8")));
+    }
+
+    void testIcloudNotesLifecycle() {
+        const char *credVars[] = {
+            "BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+            "BLUEPILL_SECONDARY_URL", "IMSG_SECONDARY_URL", "BLUEBUBBLES_SECONDARY_URL",
+            "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"
+        };
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) {
+                savedEnv.insert(QByteArray(k), qgetenv(k));
+            }
+            qunsetenv(k);
+        }
+
+        Backend backend(false);
+        QTemporaryDir tempDir;
+        const QString statePath = tempDir.filePath(QStringLiteral("state_notes.json"));
+        backend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_notes_offline.json")));
+        backend.loadCredentials();
+        backend.setStateFilePath(statePath);
+
+        QVERIFY(backend.icloudNotes().isEmpty());
+
+        // Create Note (including auto-generated ID return value) and verify never-sent local create + delete cancels cleanly
+        const QString genId = backend.saveIcloudNote(QString(), QStringLiteral("Auto ID Note"), QStringLiteral("Body 0"), QStringLiteral("Notes"));
+        QVERIFY(genId.startsWith(QStringLiteral("note_")));
+        QVERIFY(backend.hasPendingIcloudNoteSaveForTest(genId));
+        backend.deleteIcloudNote(genId);
+        QVERIFY(!backend.hasPendingIcloudNoteSaveForTest(genId));
+        QVERIFY(!backend.hasPendingIcloudNoteDeleteForTest(genId));
+
+        const QString savedId = backend.saveIcloudNote(QStringLiteral("note_test_1"), QStringLiteral("Meeting Notes"), QStringLiteral("Discuss Q3 sync and calendar items"), QStringLiteral("Work"));
+        QCOMPARE(savedId, QStringLiteral("note_test_1"));
+        QCOMPARE(backend.icloudNotes().size(), 1);
+        QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("Meeting Notes"));
+        QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("folder")).toString(), QStringLiteral("Work"));
+
+        // Verify state file has 0600 owner-only permissions
+        QFileInfo fi(statePath);
+        QVERIFY(fi.exists());
+        QCOMPARE(fi.permissions() & (QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ReadOther | QFileDevice::WriteOther), QFileDevice::Permissions());
+
+        // Update Note (passing baseRevision = 1 to represent an existing server-backed note edited offline)
+        backend.saveIcloudNote(QStringLiteral("note_test_1"), QStringLiteral("Updated Meeting Notes"), QStringLiteral("New action items"), QStringLiteral("Work"), 1);
+        QCOMPARE(backend.icloudNotes().size(), 1);
+        QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("Updated Meeting Notes"));
+        QCOMPARE(backend.icloudNotes().first().toMap().value(QStringLiteral("body")).toString(), QStringLiteral("New action items"));
+
+        // Reconciling with an empty remote array while note_test_1 is still pending offline save preserves note_test_1
+        backend.reconcileRemoteIcloudNotesForTest(QJsonArray());
+        QCOMPARE(backend.icloudNotes().size(), 1);
+
+        // Delete Note
+        backend.deleteIcloudNote(QStringLiteral("note_test_1"));
+        QCOMPARE(backend.icloudNotes().size(), 0);
+        QVERIFY(backend.hasPendingIcloudNoteDeleteForTest(QStringLiteral("note_test_1")));
+
+        // Reconciling with a stale remote array containing deleted note_test_1 keeps it deleted while delete is pending
+        QJsonObject staleNote;
+        staleNote.insert(QStringLiteral("id"), QStringLiteral("note_test_1"));
+        staleNote.insert(QStringLiteral("title"), QStringLiteral("Stale Remote Title"));
+        backend.reconcileRemoteIcloudNotesForTest(QJsonArray{staleNote});
+        QCOMPARE(backend.icloudNotes().size(), 0);
+
+        // Save another note so pending mutation sequence is persisted, then verify a fresh Backend restores
+        // icloudNotesGeneration above all restored clientMutationSeq values across restarts
+        backend.saveIcloudNote(QStringLiteral("note_restart_seq"), QStringLiteral("Restart Seq Note"), QStringLiteral("Body"), QStringLiteral("Notes"));
+        const quint64 preRestartGen = backend.icloudNotesGenerationForTest();
+        QVERIFY(preRestartGen > 0);
+
+        // Start a local mock HTTP relay to test:
+        // 1) Delayed replay response after restart when a newer edit is queued while replay is in flight
+        // 2) Concurrent mutation A failing (entering backoff) followed by mutation B succeeding (triggering scheduleIcloudMutationRetry(true))
+        //    without prematurely retrying mutation A before its backoff deadline
+        QTcpServer mockServer;
+        QVERIFY(mockServer.listen(QHostAddress::LocalHost, 0));
+        const quint16 mockPort = mockServer.serverPort();
+        int noteACount = 0;
+        qint64 firstAttemptAMs = 0;
+        qint64 secondAttemptAMs = 0;
+        int noteBCount = 0;
+        int noteWsReplayCount = 0;
+        int noteRealConflictCount = 0;
+        int noteDeletedConflictCount = 0;
+        bool noteDeletedAllowRecreateSeen = false;
+        int restartNoteCount = 0;
+        bool lostAckCreatedOnServer = false;
+        int unwritableNotePostCount = 0;
+        qint64 secondRestartBaseRev = -1;
+        QTcpSocket *stalledRestartSock = nullptr;
+
+        auto sendHttpJson = [](QTcpSocket *s, int status, const QByteArray &statusText, const QByteArray &jsonBody) {
+            const QByteArray resp = "HTTP/1.1 " + QByteArray::number(status) + " " + statusText + "\r\n"
+                                    "Content-Type: application/json\r\n"
+                                    "Content-Length: " + QByteArray::number(jsonBody.size()) + "\r\n"
+                                    "Connection: close\r\n\r\n" + jsonBody;
+            s->write(resp);
+            s->flush();
+            s->disconnectFromHost();
+        };
+
+        QObject::connect(&mockServer, &QTcpServer::newConnection, &mockServer, [&]() {
+            while (QTcpSocket *sock = mockServer.nextPendingConnection()) {
+                auto buf = std::make_shared<QByteArray>();
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock, buf]() {
+                    buf->append(sock->readAll());
+                    const int bodyIdx = buf->indexOf("\r\n\r\n");
+                    if (bodyIdx < 0) return;
+                    const QByteArray headers = buf->left(bodyIdx).toLower();
+                    const int clIdx = headers.indexOf("content-length:");
+                    const int contentLength = clIdx >= 0
+                        ? headers.mid(clIdx + 15, headers.indexOf('\r', clIdx) - clIdx - 15).trimmed().toInt()
+                        : 0;
+                    if (buf->size() - (bodyIdx + 4) < contentLength) return;
+                    const QByteArray rawBody = buf->mid(bodyIdx + 4, contentLength);
+                    buf->clear();
+                    const QJsonObject bodyObj = QJsonDocument::fromJson(rawBody).object();
+                    const QString reqId = bodyObj.value(QStringLiteral("id")).toString();
+
+                    if (reqId == QStringLiteral("note_restart_seq")) {
+                        restartNoteCount++;
+                        if (restartNoteCount == 1) {
+                            // Hold the first replayed request in flight so a post-restart edit can queue behind it
+                            stalledRestartSock = sock;
+                            return;
+                        }
+                        secondRestartBaseRev = bodyObj.value(QStringLiteral("baseRevision")).toVariant().toLongLong();
+                        sendHttpJson(sock, 200, "OK",
+                                     R"({"status":200,"data":[{"id":"note_restart_seq","title":"Newer Post-Restart Edit","body":"Body 2","folder":"Notes","revision":3}]})");
+                        return;
+                    }
+                    if (bodyObj.value(QStringLiteral("title")).toString() == QStringLiteral("Lost Ack Auto Note")) {
+                        // Simulate server persisting the created note and dropping the TCP connection before the HTTP ACK arrives
+                        lostAckCreatedOnServer = true;
+                        sock->disconnectFromHost();
+                        return;
+                    }
+                    if (bodyObj.value(QStringLiteral("title")).toString() == QStringLiteral("Unwritable State Note")) {
+                        unwritableNotePostCount++;
+                        sendHttpJson(sock, 200, "OK", R"({"status":200,"data":[]})");
+                        return;
+                    }
+                    if (reqId == QStringLiteral("note_conc_a")) {
+                        noteACount++;
+                        const qint64 nowAttemptMs = QDateTime::currentMSecsSinceEpoch();
+                        if (noteACount == 1) {
+                            firstAttemptAMs = nowAttemptMs;
+                        } else if (noteACount == 2) {
+                            secondAttemptAMs = nowAttemptMs;
+                        }
+                        sendHttpJson(sock, 503, "Service Unavailable",
+                                     R"({"status":503,"message":"Transient upstream failure"})");
+                        return;
+                    }
+                    if (reqId == QStringLiteral("note_conc_b")) {
+                        noteBCount++;
+                        sendHttpJson(sock, 200, "OK",
+                                     R"({"status":200,"data":[{"id":"note_conc_b","title":"Note B","body":"Body B","folder":"Notes","revision":1}]})");
+                        return;
+                    }
+                    if (reqId == QStringLiteral("note_ws_replay")) {
+                        noteWsReplayCount++;
+                        if (noteWsReplayCount == 1) {
+                            // Simulate dropped ACK after server already stored the trimmed note
+                            sendHttpJson(sock, 503, "Service Unavailable",
+                                         R"({"status":503,"message":"Dropped ACK"})");
+                            return;
+                        }
+                        // On replay, server returns 409 with the stored (trimmed) body
+                        sendHttpJson(sock, 409, "Conflict",
+                                     R"({"status":409,"error":"revision_conflict","data":[{"id":"note_ws_replay","title":"Trailing WS Note","body":"Body with trailing newline","folder":"Notes","revision":5}]})");
+                        return;
+                    }
+                    if (reqId == QStringLiteral("note_real_conflict")) {
+                        noteRealConflictCount++;
+                        sendHttpJson(sock, 409, "Conflict",
+                                     R"({"status":409,"error":"revision_conflict","data":[{"id":"note_real_conflict","title":"Conflict Note","body":"Different Server Body","folder":"Notes","revision":6}]})");
+                        return;
+                    }
+                    if (reqId == QStringLiteral("note_deleted_conflict")) {
+                        noteDeletedConflictCount++;
+                        if (bodyObj.value(QStringLiteral("allowRecreate")).toBool()) {
+                            noteDeletedAllowRecreateSeen = true;
+                            sendHttpJson(sock, 200, "OK",
+                                         R"({"status":200,"data":[{"id":"note_deleted_conflict","title":"Recreated Deleted Note","body":"Restored Draft","folder":"Notes","revision":7}]})");
+                        } else {
+                            sendHttpJson(sock, 409, "Conflict",
+                                         R"({"status":409,"error":"revision_conflict","data":[]})");
+                        }
+                        return;
+                    }
+                    sendHttpJson(sock, 200, "OK", R"({"status":200,"data":[]})");
+                });
+            }
+        });
+
+        qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(mockPort).toUtf8());
+        qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+
+        Backend restartedBackend(false);
+        restartedBackend.setStateFilePath(statePath);
+        restartedBackend.loadCredentials();
+        QVERIFY(restartedBackend.icloudNotesGenerationForTest() >= preRestartGen);
+
+        // Trigger replay of restored pending note_restart_seq and wait until it is in flight at the mock server
+        restartedBackend.scheduleIcloudMutationRetryForTest(true);
+        QTRY_COMPARE_WITH_TIMEOUT(restartNoteCount, 1, 1500);
+        QVERIFY(stalledRestartSock != nullptr);
+
+        // Save a newer edit to note_restart_seq while the initial replay is still in flight
+        restartedBackend.saveIcloudNote(QStringLiteral("note_restart_seq"), QStringLiteral("Newer Post-Restart Edit"), QStringLiteral("Body 2"), QStringLiteral("Notes"));
+        QVERIFY(restartedBackend.icloudNotesGenerationForTest() > preRestartGen);
+
+        // Now complete the first in-flight replay with revision=2; the callback must NOT drop the newer edit,
+        // and must advance the queued edit's baseRevision to 2 and immediately replay it
+        sendHttpJson(stalledRestartSock, 200, "OK",
+                     R"({"status":200,"data":[{"id":"note_restart_seq","title":"Restart Seq Note","body":"Body","folder":"Notes","revision":2}]})");
+        stalledRestartSock = nullptr;
+        QTRY_COMPARE_WITH_TIMEOUT(restartNoteCount, 2, 1500);
+        QCOMPARE(secondRestartBaseRev, qint64(2));
+
+        // Now test concurrent mutations A (fails -> enters backoff) and B (succeeds -> calls scheduleIcloudMutationRetry(true))
+        Backend liveBackend(false);
+        liveBackend.setStateFilePath(tempDir.filePath(QStringLiteral("state_live_backoff.json")));
+        liveBackend.loadCredentials();
+
+        const QString keyA = QStringLiteral("note_save:note_conc_a");
+        liveBackend.saveIcloudNote(QStringLiteral("note_conc_a"), QStringLiteral("Note A"), QStringLiteral("Body A"), QStringLiteral("Notes"));
+        QTRY_COMPARE_WITH_TIMEOUT(noteACount, 1, 1500);
+        QTRY_COMPARE_WITH_TIMEOUT(liveBackend.icloudMutationRetryCountForTest(keyA), 1, 1500);
+        QVERIFY(liveBackend.isIcloudMutationInBackoffForTest(keyA));
+
+        // Dispatch mutation B which succeeds with HTTP 200 and triggers scheduleIcloudMutationRetry(true)
+        liveBackend.saveIcloudNote(QStringLiteral("note_conc_b"), QStringLiteral("Note B"), QStringLiteral("Body B"), QStringLiteral("Notes"));
+        QTRY_COMPARE_WITH_TIMEOUT(noteBCount, 1, 1500);
+        // Wait for client-side checkpoint confirming mutation B's HTTP 200 response was processed and applied
+        // along with its clientMutationSeq so consecutive edits in QML editors advance their revision
+        QTRY_VERIFY_WITH_TIMEOUT([&]() {
+            for (const QVariant &v : liveBackend.icloudNotes()) {
+                const QVariantMap m = v.toMap();
+                if (m.value(QStringLiteral("id")).toString() == QStringLiteral("note_conc_b") &&
+                    m.value(QStringLiteral("revision")).toLongLong() == 1 &&
+                    m.value(QStringLiteral("clientMutationSeq")).toULongLong() > 0) {
+                    return true;
+                }
+            }
+            return false;
+        }(), 1500);
+        QCoreApplication::processEvents();
+
+        // Verify mutation A was NOT retried early before its 1000ms backoff deadline when mutation B succeeded
+        const qint64 elapsedSinceFirstAttemptAMs = QDateTime::currentMSecsSinceEpoch() - firstAttemptAMs;
+        if (noteACount == 1 && elapsedSinceFirstAttemptAMs < 900) {
+            QCOMPARE(liveBackend.icloudMutationRetryCountForTest(keyA), 1);
+            QVERIFY(liveBackend.isIcloudMutationInBackoffForTest(keyA));
+        } else {
+            if (noteACount == 1) {
+                QTRY_COMPARE_WITH_TIMEOUT(noteACount, 2, 1500);
+            }
+            QVERIFY2(secondAttemptAMs - firstAttemptAMs >= 900,
+                     qPrintable(QStringLiteral("Mutation A retried too early after %1 ms").arg(secondAttemptAMs - firstAttemptAMs)));
+        }
+        liveBackend.clearIcloudMutationRetryStateForTest(keyA);
+        QCOMPARE(liveBackend.icloudMutationRetryCountForTest(keyA), 0);
+        QVERIFY(!liveBackend.isIcloudMutationInBackoffForTest(keyA));
+
+        // Verify an auto-ID note create that was created on the server before the connection dropped (lost ACK),
+        // followed by a client restart without credentials, retains its pending deletion when deleted after restart
+        {
+            const QString lostAckNoteId = liveBackend.saveIcloudNote(QString(), QStringLiteral("Lost Ack Auto Note"), QStringLiteral("Body"), QStringLiteral("Notes"));
+            const QString lostAckMutKey = QStringLiteral("note_save:") + lostAckNoteId;
+            QTRY_VERIFY_WITH_TIMEOUT(lostAckCreatedOnServer, 1500);
+            QTRY_VERIFY_WITH_TIMEOUT(liveBackend.isIcloudMutationInBackoffForTest(lostAckMutKey), 1500);
+            liveBackend.clearIcloudMutationRetryStateForTest(lostAckMutKey);
+
+            const QString copyNoteStatePath = tempDir.filePath(QStringLiteral("state_live_backoff_copy.json"));
+            QFile::remove(copyNoteStatePath);
+            QVERIFY(QFile::copy(tempDir.filePath(QStringLiteral("state_live_backoff.json")), copyNoteStatePath));
+            qunsetenv("BLUEBUBBLES_URL");
+            qunsetenv("BLUEBUBBLES_PASSWORD");
+            Backend offlineRestartNoteBackend(false);
+            offlineRestartNoteBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_notes_offline.json")));
+            offlineRestartNoteBackend.loadCredentials();
+            offlineRestartNoteBackend.setStateFilePath(copyNoteStatePath);
+            QVERIFY(offlineRestartNoteBackend.hasPendingIcloudNoteSaveForTest(lostAckNoteId));
+            offlineRestartNoteBackend.deleteIcloudNote(lostAckNoteId);
+            QVERIFY(!offlineRestartNoteBackend.hasPendingIcloudNoteSaveForTest(lostAckNoteId));
+            QVERIFY(offlineRestartNoteBackend.hasPendingIcloudNoteDeleteForTest(lostAckNoteId));
+            qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(mockPort).toUtf8());
+            qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+            liveBackend.deleteIcloudNote(lostAckNoteId);
+
+            // Also verify that if saveAppState() fails (unwritable state path), saveIcloudNote does not dispatch
+            // the network POST until state can be durably persisted
+            const QString blockerFile = tempDir.filePath(QStringLiteral("unwritable_note_blocker"));
+            QFile bf(blockerFile);
+            QVERIFY(bf.open(QIODevice::WriteOnly));
+            bf.write("x");
+            bf.close();
+            Backend failPersistNoteBackend(false);
+            failPersistNoteBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_notes_fail_persist.json")));
+            failPersistNoteBackend.setStateFilePath(blockerFile + QStringLiteral("/state.json"));
+            failPersistNoteBackend.loadCredentials();
+            const QString failNoteId = failPersistNoteBackend.saveIcloudNote(QString(), QStringLiteral("Unwritable State Note"), QStringLiteral("Body"), QStringLiteral("Notes"));
+            QVERIFY(!failPersistNoteBackend.isIcloudNoteDurablyPersisted(failNoteId));
+            QTest::qWait(300);
+            QCOMPARE(unwritableNotePostCount, 0);
+            failPersistNoteBackend.deleteIcloudNote(failNoteId);
+            QVERIFY(!failPersistNoteBackend.hasPendingIcloudNoteSaveForTest(failNoteId));
+            QVERIFY(failPersistNoteBackend.hasPendingIcloudNoteDeleteForTest(failNoteId));
+        }
+
+        // Verify dropped ACK followed by 409 replay with trailing whitespace in saved body is recognized as already-applied (not paused)
+        const QString wsKey = QStringLiteral("note_save:note_ws_replay");
+        liveBackend.saveIcloudNote(QStringLiteral("note_ws_replay"), QStringLiteral("Trailing WS Note "), QStringLiteral("Body with trailing newline\n  "), QStringLiteral("Notes"));
+        QTRY_COMPARE_WITH_TIMEOUT(noteWsReplayCount, 1, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(liveBackend.isIcloudMutationInBackoffForTest(wsKey), 1500);
+        liveBackend.clearIcloudMutationRetryStateForTest(wsKey);
+        liveBackend.replayPendingIcloudMutations();
+        QTRY_COMPARE_WITH_TIMEOUT(noteWsReplayCount, 2, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(!liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_ws_replay")), 1500);
+        QVERIFY(!liveBackend.isIcloudMutationPausedForTest(wsKey));
+
+        // Verify a genuine 409 conflict with a different server body still pauses the pending mutation,
+        // keeps the pause when saved again with a stale revision, and recovers via reloadConflictedIcloudNoteServerVersion
+        const QString conflictKey = QStringLiteral("note_save:note_real_conflict");
+        liveBackend.saveIcloudNote(QStringLiteral("note_real_conflict"), QStringLiteral("Conflict Note"), QStringLiteral("Local Draft\n"), QStringLiteral("Notes"));
+        QTRY_COMPARE_WITH_TIMEOUT(noteRealConflictCount, 1, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(liveBackend.isIcloudMutationPausedForTest(conflictKey), 1500);
+        QVERIFY(liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_real_conflict")));
+
+        // Saving with a stale baseRevision (< 6) preserves the draft and keeps the conflict paused without re-submitting
+        liveBackend.saveIcloudNote(QStringLiteral("note_real_conflict"), QStringLiteral("Conflict Note Edited"), QStringLiteral("Updated Draft"), QStringLiteral("Notes"), 1);
+        QTest::qWait(300);
+        QCOMPARE(noteRealConflictCount, 1);
+        QVERIFY(liveBackend.isIcloudMutationPausedForTest(conflictKey));
+        QVERIFY(liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_real_conflict")));
+
+        // Verify Save-as-Copy followed by reloadConflictedIcloudNoteServerVersion preserves the user's draft in the new copy
+        // while restoring the conflicted note to the server version (revision 6 / "Different Server Body")
+        const QString conflictCopyId = liveBackend.saveIcloudNote(QString(), QStringLiteral("Conflict Note Edited"), QStringLiteral("Updated Draft"), QStringLiteral("Notes"), 0);
+        QVERIFY(!conflictCopyId.isEmpty());
+        QVERIFY(conflictCopyId != QStringLiteral("note_real_conflict"));
+        QVERIFY(liveBackend.isIcloudNoteDurablyPersisted(conflictCopyId));
+        QVERIFY(liveBackend.reloadConflictedIcloudNoteServerVersion(QStringLiteral("note_real_conflict")));
+        QVERIFY(!liveBackend.isIcloudMutationPausedForTest(conflictKey));
+        QVERIFY(!liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_real_conflict")));
+        bool foundCopyDraft = false;
+        bool foundReloadedServer = false;
+        for (const QVariant &nv : liveBackend.icloudNotes()) {
+            const QVariantMap nm = nv.toMap();
+            if (nm.value(QStringLiteral("id")).toString() == conflictCopyId) {
+                foundCopyDraft = (nm.value(QStringLiteral("title")).toString() == QStringLiteral("Conflict Note Edited") &&
+                                  nm.value(QStringLiteral("body")).toString() == QStringLiteral("Updated Draft"));
+            } else if (nm.value(QStringLiteral("id")).toString() == QStringLiteral("note_real_conflict")) {
+                foundReloadedServer = (nm.value(QStringLiteral("body")).toString() == QStringLiteral("Different Server Body") &&
+                                       nm.value(QStringLiteral("revision")).toLongLong() == 6);
+            }
+        }
+        QVERIFY(foundCopyDraft);
+        QVERIFY(foundReloadedServer);
+
+        // Verify server-deleted note 409 conflict: regular save with baseRevision 0 remains paused unless allowRecreate=true is passed
+        const QString delConflictKey = QStringLiteral("note_save:note_deleted_conflict");
+        liveBackend.saveIcloudNote(QStringLiteral("note_deleted_conflict"), QStringLiteral("Deleted On Server"), QStringLiteral("Draft Body"), QStringLiteral("Notes"), 1);
+        QTRY_COMPARE_WITH_TIMEOUT(noteDeletedConflictCount, 1, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(liveBackend.isIcloudMutationPausedForTest(delConflictKey), 1500);
+        liveBackend.saveIcloudNote(QStringLiteral("note_deleted_conflict"), QStringLiteral("Deleted On Server"), QStringLiteral("Restored Draft"), QStringLiteral("Notes"), 0, false);
+        QTest::qWait(300);
+        QCOMPARE(noteDeletedConflictCount, 1);
+        QVERIFY(liveBackend.isIcloudMutationPausedForTest(delConflictKey));
+        liveBackend.saveIcloudNote(QStringLiteral("note_deleted_conflict"), QStringLiteral("Recreated Deleted Note"), QStringLiteral("Restored Draft"), QStringLiteral("Notes"), 0, true);
+        QTRY_COMPARE_WITH_TIMEOUT(noteDeletedConflictCount, 2, 1500);
+        QVERIFY(noteDeletedAllowRecreateSeen);
+        QTRY_VERIFY_WITH_TIMEOUT(!liveBackend.hasPendingIcloudNoteSaveForTest(QStringLiteral("note_deleted_conflict")), 1500);
+        QVERIFY(!liveBackend.isIcloudMutationPausedForTest(delConflictKey));
+
+        for (const char *k : credVars) {
+            const QByteArray key(k);
+            if (savedEnv.contains(key)) qputenv(k, savedEnv.value(key)); else qunsetenv(k);
+        }
+    }
+
+    void testIcloudCalendarEventsLifecycle() {
+        const char *credVars[] = {
+            "BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+            "BLUEPILL_SECONDARY_URL", "IMSG_SECONDARY_URL", "BLUEBUBBLES_SECONDARY_URL",
+            "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"
+        };
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) {
+                savedEnv.insert(QByteArray(k), qgetenv(k));
+            }
+            qunsetenv(k);
+        }
+
+        QTemporaryDir tempDir;
+        Backend backend(false);
+        backend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_events_offline.json")));
+        backend.loadCredentials();
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_events.json")));
+
+        QVERIFY(backend.icloudEvents().isEmpty());
+
+        // Create Event (and verify unique IDs even within the same millisecond)
+        const QString evtId = backend.saveIcloudEvent(QStringLiteral("BluePill Architecture Review"), 1700000000000, 1700003600000, QStringLiteral("Work"), QStringLiteral("Discuss iCloud Hub sync"));
+        const QString evtId2 = backend.saveIcloudEvent(QStringLiteral("BluePill Architecture Review 2"), 1700000000000, 1700003600000, QStringLiteral("Work"), QStringLiteral("Discuss iCloud Hub sync 2"));
+        QVERIFY(!evtId.isEmpty());
+        QVERIFY(!evtId2.isEmpty());
+        QVERIFY(evtId != evtId2);
+        QVERIFY(backend.hasPendingIcloudEventSaveForTest(evtId2));
+        backend.deleteIcloudEvent(evtId2);
+        // Never-sent local create + delete cancels out cleanly without queueing a remote delete
+        QVERIFY(!backend.hasPendingIcloudEventSaveForTest(evtId2));
+        QVERIFY(!backend.hasPendingIcloudEventDeleteForTest(evtId2));
+        QCOMPARE(backend.icloudEvents().size(), 1);
+        QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("title")).toString(), QStringLiteral("BluePill Architecture Review"));
+        QCOMPARE(backend.icloudEvents().first().toMap().value(QStringLiteral("calendarTitle")).toString(), QStringLiteral("Work"));
+        QVERIFY(backend.icloudEvents().first().toMap().value(QStringLiteral("clientMutationSeq")).toULongLong() > 0);
+
+        // Offline pending event survives remote snapshot reconciliation and normalizes calendarName -> calendarTitle
+        QJsonObject remoteEvt;
+        remoteEvt.insert(QStringLiteral("id"), QStringLiteral("evt_remote_99"));
+        remoteEvt.insert(QStringLiteral("title"), QStringLiteral("Remote Standup"));
+        remoteEvt.insert(QStringLiteral("calendarName"), QStringLiteral("Work"));
+        remoteEvt.insert(QStringLiteral("startMs"), 1700007200000LL);
+        remoteEvt.insert(QStringLiteral("endMs"), 1700010800000LL);
+        backend.reconcileRemoteIcloudEventsForTest(QJsonArray{remoteEvt});
+        QCOMPARE(backend.icloudEvents().size(), 2);
+        QCOMPARE(backend.icloudEvents().last().toMap().value(QStringLiteral("calendarTitle")).toString(), QStringLiteral("Work"));
+
+        // Delete Events
+        backend.deleteIcloudEvent(evtId);
+        backend.deleteIcloudEvent(QStringLiteral("evt_remote_99"));
+        QCOMPARE(backend.icloudEvents().size(), 0);
+
+        // Verify 250-event capped window reconciliation drops remotely deleted in-window events while preserving out-of-window events
+        QJsonArray initial250;
+        for (int i = 0; i < 250; ++i) {
+            QJsonObject e;
+            e.insert(QStringLiteral("id"), QStringLiteral("evt_win_%1").arg(i));
+            e.insert(QStringLiteral("title"), QStringLiteral("Event %1").arg(i));
+            e.insert(QStringLiteral("startMs"), 1700000000000LL + i * 3600000LL);
+            e.insert(QStringLiteral("endMs"), 1700003600000LL + i * 3600000LL);
+            initial250.append(e);
+        }
+        QJsonObject outOfWindowEvt;
+        outOfWindowEvt.insert(QStringLiteral("id"), QStringLiteral("evt_out_of_win"));
+        outOfWindowEvt.insert(QStringLiteral("title"), QStringLiteral("Far Future Out-Of-Window Event"));
+        outOfWindowEvt.insert(QStringLiteral("startMs"), 1800000000000LL);
+        outOfWindowEvt.insert(QStringLiteral("endMs"), 1800003600000LL);
+        QJsonArray withOut = initial250;
+        withOut.append(outOfWindowEvt);
+        backend.reconcileRemoteIcloudEventsForTest(withOut);
+        QCOMPARE(backend.icloudEvents().size(), 251);
+
+        // Next 250-item snapshot omits in-window evt_win_10 (deleted remotely) and shifts window by 1
+        QJsonArray next250;
+        for (int i = 0; i < 251; ++i) {
+            if (i == 10) continue; // deleted remotely inside the returned [minRemoteStartMs, maxRemoteStartMs] window
+            QJsonObject e;
+            e.insert(QStringLiteral("id"), QStringLiteral("evt_win_%1").arg(i));
+            e.insert(QStringLiteral("title"), QStringLiteral("Event %1").arg(i));
+            e.insert(QStringLiteral("startMs"), 1700000000000LL + i * 3600000LL);
+            e.insert(QStringLiteral("endMs"), 1700003600000LL + i * 3600000LL);
+            next250.append(e);
+        }
+        QCOMPARE(next250.size(), 250);
+        backend.reconcileRemoteIcloudEventsForTest(next250);
+        bool foundDeletedInWindow = false;
+        bool foundOutOfWindow = false;
+        for (const QVariant &v : backend.icloudEvents()) {
+            const QString id = v.toMap().value(QStringLiteral("id")).toString();
+            if (id == QStringLiteral("evt_win_10")) foundDeletedInWindow = true;
+            if (id == QStringLiteral("evt_out_of_win")) foundOutOfWindow = true;
+        }
+        QVERIFY(!foundDeletedInWindow);
+        QVERIFY(foundOutOfWindow);
+
+        // Verify both 200 OK save and dropped-ACK -> 409 replay for far-future events outside the 250-event window
+        // preserve both the 250th near-window event (evt_near_249) and cached intermediate out-of-window events (evt_mid_cached)
+        QTcpServer evtServer;
+        QVERIFY(evtServer.listen(QHostAddress::LocalHost, 0));
+        int evtRequestCount = 0;
+        int unwritableEvtPostCount = 0;
+        bool evtCreatedBeforeDroppedAck = false;
+        QString capturedEvtId;
+        auto buildNear250 = []() {
+            QJsonArray snap250;
+            for (int i = 0; i < 250; ++i) {
+                QJsonObject e;
+                e.insert(QStringLiteral("id"), QStringLiteral("evt_near_%1").arg(i));
+                e.insert(QStringLiteral("title"), QStringLiteral("Near Event %1").arg(i));
+                e.insert(QStringLiteral("startMs"), 1700000000000LL + i * 3600000LL);
+                e.insert(QStringLiteral("endMs"), 1700003600000LL + i * 3600000LL);
+                e.insert(QStringLiteral("calendarTitle"), QStringLiteral("Work"));
+                e.insert(QStringLiteral("notes"), QStringLiteral(""));
+                e.insert(QStringLiteral("revision"), 1);
+                snap250.append(e);
+            }
+            return snap250;
+        };
+        QObject::connect(&evtServer, &QTcpServer::newConnection, &evtServer, [&]() {
+            while (QTcpSocket *sock = evtServer.nextPendingConnection()) {
+                auto buf = std::make_shared<QByteArray>();
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock, buf]() {
+                    buf->append(sock->readAll());
+                    const int bodyIdx = buf->indexOf("\r\n\r\n");
+                    if (bodyIdx < 0) return;
+                    const QByteArray headers = buf->left(bodyIdx).toLower();
+                    const int clIdx = headers.indexOf("content-length:");
+                    const int contentLength = clIdx >= 0
+                        ? headers.mid(clIdx + 15, headers.indexOf('\r', clIdx) - clIdx - 15).trimmed().toInt()
+                        : 0;
+                    if (buf->size() - (bodyIdx + 4) < contentLength) return;
+                    const QByteArray rawBody = buf->mid(bodyIdx + 4, contentLength);
+                    buf->clear();
+                    const QJsonObject bodyObj = QJsonDocument::fromJson(rawBody).object();
+                    auto sendJson = [](QTcpSocket *s, int st, const QByteArray &stText, const QByteArray &jb) {
+                        const QByteArray r = "HTTP/1.1 " + QByteArray::number(st) + " " + stText + "\r\n"
+                                             "Content-Type: application/json\r\n"
+                                             "Content-Length: " + QByteArray::number(jb.size()) + "\r\n"
+                                             "Connection: close\r\n\r\n" + jb;
+                        s->write(r);
+                        s->flush();
+                        s->disconnectFromHost();
+                    };
+                    if (bodyObj.value(QStringLiteral("title")).toString() == QStringLiteral("Unwritable State Event")) {
+                        unwritableEvtPostCount++;
+                        QJsonObject respObj;
+                        respObj.insert(QStringLiteral("status"), 200);
+                        respObj.insert(QStringLiteral("data"), QJsonArray());
+                        sendJson(sock, 200, "OK", QJsonDocument(respObj).toJson(QJsonDocument::Compact));
+                        return;
+                    }
+                    if (!headers.startsWith("post ")) {
+                        sendJson(sock, 200, "OK", "{}");
+                        return;
+                    }
+                    capturedEvtId = bodyObj.value(QStringLiteral("id")).toString();
+                    evtRequestCount++;
+                    if (evtRequestCount == 1) {
+                        // First request: 200 OK for far-future event save (returns full 250 near events + appended outsideWindow target)
+                        QJsonArray snap = buildNear250();
+                        QJsonObject okEvt;
+                        okEvt.insert(QStringLiteral("id"), capturedEvtId);
+                        okEvt.insert(QStringLiteral("title"), QStringLiteral("Far Future 200 OK Event"));
+                        okEvt.insert(QStringLiteral("startMs"), 1900000000000LL);
+                        okEvt.insert(QStringLiteral("endMs"), 1900003600000LL);
+                        okEvt.insert(QStringLiteral("calendarTitle"), QStringLiteral("Work"));
+                        okEvt.insert(QStringLiteral("notes"), QStringLiteral("Saved via 200 OK"));
+                        okEvt.insert(QStringLiteral("revision"), 1);
+                        okEvt.insert(QStringLiteral("outsideWindow"), true);
+                        snap.append(okEvt);
+                        QJsonObject respObj;
+                        respObj.insert(QStringLiteral("status"), 200);
+                        respObj.insert(QStringLiteral("data"), snap);
+                        sendJson(sock, 200, "OK", QJsonDocument(respObj).toJson(QJsonDocument::Compact));
+                        return;
+                    }
+                    if (evtRequestCount == 2) {
+                        // Simulate server creating the event and dropping the connection before sending the HTTP ACK
+                        evtCreatedBeforeDroppedAck = true;
+                        sock->disconnectFromHost();
+                        return;
+                    }
+                    // Third request: 409 Conflict snapshot with full 250 near events + appended outsideWindow target
+                    QJsonArray snap = buildNear250();
+                    QJsonObject appliedEvt;
+                    appliedEvt.insert(QStringLiteral("id"), capturedEvtId);
+                    appliedEvt.insert(QStringLiteral("title"), QStringLiteral("Far Future Replay Event"));
+                    appliedEvt.insert(QStringLiteral("startMs"), 1950000000000LL);
+                    appliedEvt.insert(QStringLiteral("endMs"), 1950003600000LL);
+                    appliedEvt.insert(QStringLiteral("calendarTitle"), QStringLiteral("Work"));
+                    appliedEvt.insert(QStringLiteral("notes"), QStringLiteral("Trimmed event notes"));
+                    appliedEvt.insert(QStringLiteral("revision"), 4);
+                    appliedEvt.insert(QStringLiteral("outsideWindow"), true);
+                    snap.append(appliedEvt);
+                    QJsonObject respObj;
+                    respObj.insert(QStringLiteral("status"), 409);
+                    respObj.insert(QStringLiteral("data"), snap);
+                    sendJson(sock, 409, "Conflict", QJsonDocument(respObj).toJson(QJsonDocument::Compact));
+                });
+            }
+        });
+        qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(evtServer.serverPort()).toUtf8());
+        qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+        Backend evtBackend(false);
+        evtBackend.setStateFilePath(tempDir.filePath(QStringLiteral("state_events_replay.json")));
+        evtBackend.loadCredentials();
+
+        // Seed 250 near events + 1 cached intermediate out-of-window event at 1800000000000
+        QJsonArray initialSeed = buildNear250();
+        QJsonObject midCachedEvt;
+        midCachedEvt.insert(QStringLiteral("id"), QStringLiteral("evt_mid_cached"));
+        midCachedEvt.insert(QStringLiteral("title"), QStringLiteral("Intermediate Cached Out-of-Window Event"));
+        midCachedEvt.insert(QStringLiteral("startMs"), 1800000000000LL);
+        midCachedEvt.insert(QStringLiteral("endMs"), 1800003600000LL);
+        midCachedEvt.insert(QStringLiteral("calendarTitle"), QStringLiteral("Work"));
+        midCachedEvt.insert(QStringLiteral("revision"), 2);
+        initialSeed.append(midCachedEvt);
+        evtBackend.reconcileRemoteIcloudEventsForTest(initialSeed, QStringLiteral("evt_mid_cached"));
+        QCOMPARE(evtBackend.icloudEvents().size(), 251);
+
+        auto hasCachedEventId = [&](const QString &targetId) {
+            for (const QVariant &v : evtBackend.icloudEvents()) {
+                if (v.toMap().value(QStringLiteral("id")).toString() == targetId) return true;
+            }
+            return false;
+        };
+
+        // 1) 200 OK save of far-future event at 1900000000000 must preserve evt_near_249 and evt_mid_cached (1800000000000)
+        const QString okEvtId = evtBackend.saveIcloudEvent(
+            QStringLiteral("Far Future 200 OK Event"),
+            1900000000000LL,
+            1900003600000LL,
+            QStringLiteral("Work"),
+            QStringLiteral("Saved via 200 OK")
+        );
+        QTRY_COMPARE_WITH_TIMEOUT(evtRequestCount, 1, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(!evtBackend.hasPendingIcloudEventSaveForTest(okEvtId), 1500);
+        QVERIFY(hasCachedEventId(QStringLiteral("evt_near_249")));
+        QVERIFY(hasCachedEventId(QStringLiteral("evt_mid_cached")));
+        QVERIFY(hasCachedEventId(okEvtId));
+
+        // 2) Dropped ACK followed by 409 Conflict replay of far-future event at 1950000000000 must also preserve evt_near_249 and evt_mid_cached
+        const QString savedEvtId = evtBackend.saveIcloudEvent(
+            QStringLiteral("Far Future Replay Event "),
+            1950000000000LL,
+            1950003600000LL,
+            QStringLiteral("Work"),
+            QStringLiteral("Trimmed event notes\n  ")
+        );
+        const QString evtMutKey = QStringLiteral("evt_save:") + savedEvtId;
+        QTRY_COMPARE_WITH_TIMEOUT(evtRequestCount, 2, 1500);
+        QVERIFY(evtCreatedBeforeDroppedAck);
+        QTRY_VERIFY_WITH_TIMEOUT(evtBackend.isIcloudMutationInBackoffForTest(evtMutKey), 1500);
+
+        // Verify that if a client restarts without credentials after a dropped event-create ACK,
+        // deleting the restored event preserves the pending deletion rather than cancelling it as never-sent
+        {
+            const QString copyStatePath = tempDir.filePath(QStringLiteral("state_events_lost_ack_copy.json"));
+            QFile::remove(copyStatePath);
+            QVERIFY(QFile::copy(tempDir.filePath(QStringLiteral("state_events_replay.json")), copyStatePath));
+            qunsetenv("BLUEBUBBLES_URL");
+            qunsetenv("BLUEBUBBLES_PASSWORD");
+            Backend offlineRestartEvtBackend(false);
+            offlineRestartEvtBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_events_offline.json")));
+            offlineRestartEvtBackend.loadCredentials();
+            offlineRestartEvtBackend.setStateFilePath(copyStatePath);
+            QVERIFY(offlineRestartEvtBackend.hasPendingIcloudEventSaveForTest(savedEvtId));
+            offlineRestartEvtBackend.deleteIcloudEvent(savedEvtId);
+            QVERIFY(!offlineRestartEvtBackend.hasPendingIcloudEventSaveForTest(savedEvtId));
+            QVERIFY(offlineRestartEvtBackend.hasPendingIcloudEventDeleteForTest(savedEvtId));
+            qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(evtServer.serverPort()).toUtf8());
+            qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+
+            // Also verify that if saveAppState() fails (unwritable state path), saveIcloudEvent does not dispatch
+            // the network POST until state can be durably persisted
+            const QString blockerEvtFile = tempDir.filePath(QStringLiteral("unwritable_evt_blocker"));
+            QFile ebf(blockerEvtFile);
+            QVERIFY(ebf.open(QIODevice::WriteOnly));
+            ebf.write("x");
+            ebf.close();
+            Backend failPersistEvtBackend(false);
+            failPersistEvtBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_events_fail_persist.json")));
+            failPersistEvtBackend.setStateFilePath(blockerEvtFile + QStringLiteral("/state.json"));
+            failPersistEvtBackend.loadCredentials();
+            const QString failEvtId = failPersistEvtBackend.saveIcloudEvent(
+                QStringLiteral("Unwritable State Event"),
+                1960000000000LL,
+                1960003600000LL,
+                QStringLiteral("Work"),
+                QStringLiteral("Notes")
+            );
+            QTest::qWait(300);
+            QCOMPARE(unwritableEvtPostCount, 0);
+            failPersistEvtBackend.deleteIcloudEvent(failEvtId);
+            QVERIFY(!failPersistEvtBackend.hasPendingIcloudEventSaveForTest(failEvtId));
+            QVERIFY(failPersistEvtBackend.hasPendingIcloudEventDeleteForTest(failEvtId));
+        }
+
+        evtBackend.clearIcloudMutationRetryStateForTest(evtMutKey);
+        evtBackend.replayPendingIcloudMutations();
+        QTRY_COMPARE_WITH_TIMEOUT(evtRequestCount, 3, 1500);
+        QTRY_VERIFY_WITH_TIMEOUT(!evtBackend.hasPendingIcloudEventSaveForTest(savedEvtId), 1500);
+        QVERIFY(!evtBackend.isIcloudMutationPausedForTest(evtMutKey));
+        QVERIFY(hasCachedEventId(QStringLiteral("evt_near_249")));
+        QVERIFY(hasCachedEventId(QStringLiteral("evt_mid_cached")));
+        QVERIFY(hasCachedEventId(savedEvtId));
+        for (const char *k : credVars) {
+            const QByteArray key(k);
+            if (savedEnv.contains(key)) qputenv(k, savedEnv.value(key)); else qunsetenv(k);
+        }
+    }
+
+    void testIcloudPhotosAndUnpurge() {
+        struct EnvGuard {
+            const QList<QByteArray> vars{
+                "BLUEPILL_SERVER_URL", "BLUEBUBBLES_URL", "IMSG_SERVER_URL",
+                "BLUEPILL_PASSWORD", "BLUEBUBBLES_PASSWORD", "IMSG_PASSWORD",
+                "BLUEPILL_SECONDARY_SERVER_URL", "BLUEBUBBLES_SECONDARY_URL",
+                "BLUEPILL_SECONDARY_URL", "IMSG_SECONDARY_URL",
+                "BLUEPILL_SECONDARY_PASSWORD", "BLUEBUBBLES_SECONDARY_PASSWORD",
+                "BLUEPILL_ENABLE_NOTES", "BLUEPILL_ENABLE_CALENDAR", "BLUEPILL_ENABLE_PHOTOS",
+                "BLUEPILL_PORT", "BLUEPILL_CONFIG_DIR"
+            };
+            QMap<QByteArray, QByteArray> saved;
+            QSet<QByteArray> wasSet;
+            EnvGuard() {
+                for (const auto &v : vars) {
+                    if (qEnvironmentVariableIsSet(v.constData())) {
+                        saved[v] = qgetenv(v.constData());
+                        wasSet.insert(v);
+                    }
+                    qunsetenv(v.constData());
+                }
+            }
+            ~EnvGuard() {
+                for (const auto &v : vars) {
+                    if (wasSet.contains(v)) {
+                        qputenv(v.constData(), saved[v]);
+                    } else {
+                        qunsetenv(v.constData());
+                    }
+                }
+            }
+        } envGuard;
+
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        qputenv("BLUEPILL_CONFIG_DIR", tempDir.path().toUtf8());
+
+        Backend backend(false);
+        backend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_photos.json")));
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_photos.json")));
+
+        QVariantList samplePhotos;
+        QVariantMap p1;
+        p1.insert(QStringLiteral("guid"), QStringLiteral("att_cloud_123"));
+        p1.insert(QStringLiteral("name"), QStringLiteral("vacation.heic"));
+        p1.insert(QStringLiteral("mimeType"), QStringLiteral("image/heic"));
+        p1.insert(QStringLiteral("isCloudEvicted"), true);
+        p1.insert(QStringLiteral("width"), 3024);
+        p1.insert(QStringLiteral("height"), 4032);
+        p1.insert(QStringLiteral("isPortrait"), true);
+
+        QVariantMap p2;
+        p2.insert(QStringLiteral("guid"), QStringLiteral("att_local_456"));
+        p2.insert(QStringLiteral("name"), QStringLiteral("landscape.jpg"));
+        p2.insert(QStringLiteral("mimeType"), QStringLiteral("image/jpeg"));
+        p2.insert(QStringLiteral("isCloudEvicted"), false);
+        p2.insert(QStringLiteral("width"), 1920);
+        p2.insert(QStringLiteral("height"), 1080);
+        p2.insert(QStringLiteral("isPortrait"), false);
+
+        samplePhotos.append(p1);
+        samplePhotos.append(p2);
+
+        backend.setIcloudPhotosForTest(samplePhotos);
+        QCOMPARE(backend.icloudPhotos().size(), 2);
+        QVERIFY(backend.icloudPhotos().first().toMap().value(QStringLiteral("isCloudEvicted")).toBool());
+        QVERIFY(backend.icloudPhotos().first().toMap().value(QStringLiteral("isPortrait")).toBool());
+        QCOMPARE(backend.icloudPhotos().first().toMap().value(QStringLiteral("width")).toInt(), 3024);
+        QCOMPARE(backend.icloudPhotos().first().toMap().value(QStringLiteral("height")).toInt(), 4032);
+
+        QVERIFY(!backend.icloudPhotos().last().toMap().value(QStringLiteral("isPortrait")).toBool());
+
+        // Trigger unpurge/download and batch sync
+        backend.downloadCloudAttachment(QStringLiteral("att_cloud_123"));
+        backend.syncIcloudPhotos();
+        // Method should execute without crash even if offline
+
+        // Verify optional iCloud Hub module toggles default to true and persist across state reload
+        QVERIFY(backend.icloudNotesEnabled());
+        QVERIFY(backend.icloudCalendarEnabled());
+        QVERIFY(backend.icloudPhotosEnabled());
+
+        backend.setIcloudNotesEnabled(false);
+        backend.setIcloudCalendarEnabled(false);
+        backend.setIcloudPhotosEnabled(false);
+        QVERIFY(!backend.icloudNotesEnabled());
+        QVERIFY(!backend.icloudCalendarEnabled());
+        QVERIFY(!backend.icloudPhotosEnabled());
+
+        Backend reloadedBackend(false);
+        reloadedBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_photos.json")));
+        reloadedBackend.setStateFilePath(tempDir.filePath(QStringLiteral("state_photos.json")));
+        QVERIFY(!reloadedBackend.icloudNotesEnabled());
+        QVERIFY(!reloadedBackend.icloudCalendarEnabled());
+        QVERIFY(!reloadedBackend.icloudPhotosEnabled());
+
+        reloadedBackend.setIcloudNotesEnabled(true);
+        reloadedBackend.setIcloudCalendarEnabled(true);
+        reloadedBackend.setIcloudPhotosEnabled(true);
+        QVERIFY(reloadedBackend.icloudNotesEnabled());
+        QVERIFY(reloadedBackend.icloudCalendarEnabled());
+        QVERIFY(reloadedBackend.icloudPhotosEnabled());
+
+        // Verify iCloud Photos pagination (fetchIcloudPhotos(page), nextIcloudPhotosPage, prevIcloudPhotosPage, loadMoreIcloudPhotos)
+        QTcpServer photosServer;
+        QVERIFY(photosServer.listen(QHostAddress::LocalHost, 0));
+        QList<QString> requestedQueries;
+        int totalPhotosOnServer = 150;
+        bool syncShouldFail = false;
+        int syncPollCount = 0;
+        QObject::connect(&photosServer, &QTcpServer::newConnection, &photosServer, [&]() {
+            while (QTcpSocket *sock = photosServer.nextPendingConnection()) {
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
+                    const QByteArray req = sock->readAll();
+                    const int firstLineEnd = req.indexOf("\r\n");
+                    const QString reqLine = QString::fromUtf8(firstLineEnd > 0 ? req.left(firstLineEnd) : req);
+                    if (reqLine.contains(QStringLiteral("/api/v1/icloud/photos/sync"))) {
+                        QJsonObject dataObj;
+                        dataObj.insert(QStringLiteral("jobId"), QStringLiteral("job_sync_test"));
+                        if (reqLine.startsWith(QStringLiteral("POST "))) {
+                            syncPollCount = 0;
+                            dataObj.insert(QStringLiteral("state"), QStringLiteral("running"));
+                            dataObj.insert(QStringLiteral("status"), QStringLiteral("running"));
+                        } else {
+                            syncPollCount++;
+                            if (syncShouldFail) {
+                                dataObj.insert(QStringLiteral("state"), QStringLiteral("failed"));
+                                dataObj.insert(QStringLiteral("status"), QStringLiteral("error"));
+                                dataObj.insert(QStringLiteral("synced"), 0);
+                                dataObj.insert(QStringLiteral("failed"), 1);
+                                dataObj.insert(QStringLiteral("error"), QStringLiteral("Simulated sync error"));
+                            } else {
+                                totalPhotosOnServer = 152;
+                                dataObj.insert(QStringLiteral("state"), QStringLiteral("completed"));
+                                dataObj.insert(QStringLiteral("status"), QStringLiteral("ok"));
+                                dataObj.insert(QStringLiteral("synced"), 2);
+                                dataObj.insert(QStringLiteral("failed"), 0);
+                            }
+                        }
+                        QJsonObject resp;
+                        resp.insert(QStringLiteral("status"), 200);
+                        resp.insert(QStringLiteral("data"), dataObj);
+                        const QByteArray body = QJsonDocument(resp).toJson(QJsonDocument::Compact);
+                        const QByteArray raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                               + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+                        sock->write(raw);
+                        sock->flush();
+                        sock->disconnectFromHost();
+                    } else if (reqLine.contains(QStringLiteral("/api/v1/icloud/photos"))) {
+                        requestedQueries.append(reqLine);
+                        const QUrl reqUrl(QStringLiteral("http://localhost") + reqLine.section(QLatin1Char(' '), 1, 1));
+                        const QUrlQuery q(reqUrl);
+                        const int limit = q.queryItemValue(QStringLiteral("limit")).toInt() > 0 ? q.queryItemValue(QStringLiteral("limit")).toInt() : 60;
+                        const int offset = q.queryItemValue(QStringLiteral("offset")).toInt();
+                        const int total = totalPhotosOnServer;
+                        QJsonArray items;
+                        const int count = qMax(0, qMin(limit, total - offset));
+                        for (int i = 0; i < count; ++i) {
+                            const int idx = offset + i;
+                            QJsonObject item;
+                            item.insert(QStringLiteral("guid"), QStringLiteral("plib:PHOTO-GUID-%1").arg(idx));
+                            item.insert(QStringLiteral("transferName"), QStringLiteral("IMG_%1.JPG").arg(1000 + idx));
+                            item.insert(QStringLiteral("mimeType"), QStringLiteral("image/jpeg"));
+                            item.insert(QStringLiteral("isCloudEvicted"), false);
+                            item.insert(QStringLiteral("width"), 4032);
+                            item.insert(QStringLiteral("height"), 3024);
+                            items.append(item);
+                        }
+                        QJsonObject resp;
+                        resp.insert(QStringLiteral("status"), 200);
+                        resp.insert(QStringLiteral("data"), items);
+                        resp.insert(QStringLiteral("total"), total);
+                        resp.insert(QStringLiteral("offset"), offset);
+                        resp.insert(QStringLiteral("limit"), limit);
+                        resp.insert(QStringLiteral("hasMore"), (offset + count) < total);
+                        const QByteArray body = QJsonDocument(resp).toJson(QJsonDocument::Compact);
+                        const QByteArray raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                               + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+                        sock->write(raw);
+                        sock->flush();
+                        sock->disconnectFromHost();
+                    } else {
+                        const QByteArray body = R"({"status":200,"data":[]})";
+                        const QByteArray raw = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                               + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+                        sock->write(raw);
+                        sock->flush();
+                        sock->disconnectFromHost();
+                    }
+                });
+            }
+        });
+
+        const QByteArray prevUrl = qgetenv("BLUEBUBBLES_URL");
+        const QByteArray prevPass = qgetenv("BLUEBUBBLES_PASSWORD");
+        qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(photosServer.serverPort()).toUtf8());
+        qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+
+        Backend pagedBackend(false);
+        pagedBackend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_photos_paged.json")));
+        pagedBackend.setStateFilePath(tempDir.filePath(QStringLiteral("state_photos_paged.json")));
+        pagedBackend.loadCredentials();
+
+        pagedBackend.fetchIcloudPhotos(0, false);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().size(), 60, 1500);
+        QCOMPARE(pagedBackend.icloudPhotosTotal(), 150);
+        QCOMPARE(pagedBackend.icloudPhotosPage(), 0);
+        QCOMPARE(pagedBackend.icloudPhotosPageSize(), 60);
+        QCOMPARE(pagedBackend.icloudPhotosPageCount(), 3);
+        QVERIFY(pagedBackend.icloudPhotosHasMore());
+        QVERIFY(pagedBackend.icloudPhotos().first().toMap().value(QStringLiteral("previewUrl")).toString().contains(QStringLiteral("height=360")));
+
+        // Next page -> page 1 (offset 60)
+        pagedBackend.nextIcloudPhotosPage();
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosPage(), 1, 1500);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().first().toMap().value(QStringLiteral("guid")).toString(),
+                                  QStringLiteral("plib:PHOTO-GUID-60"), 1500);
+        QCOMPARE(pagedBackend.icloudPhotos().size(), 60);
+        QVERIFY(pagedBackend.icloudPhotosHasMore());
+
+        // Load more -> appends page 2 (30 remaining items, total in list = 90 starting at page 1, hasMore = false)
+        pagedBackend.loadMoreIcloudPhotos();
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().size(), 90, 1500);
+        QCOMPARE(pagedBackend.icloudPhotosPage(), 1);
+        QVERIFY(!pagedBackend.icloudPhotosHasMore());
+
+        // Prev page -> page 0
+        pagedBackend.prevIcloudPhotosPage();
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosPage(), 0, 1500);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().size(), 60, 1500);
+
+        // Change page size -> 24 per page (150 total => 7 pages)
+        pagedBackend.setIcloudPhotosPageSize(24);
+        QCOMPARE(pagedBackend.icloudPhotosPageSize(), 24);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().size(), 24, 1500);
+        QCOMPARE(pagedBackend.icloudPhotosPageCount(), 7);
+        QCOMPARE(pagedBackend.icloudPhotosPage(), 0);
+
+        // Observe async syncIcloudPhotos() job polling through running -> completed (refreshes collection to 152) and running -> failed
+        pagedBackend.syncIcloudPhotos();
+        QVERIFY(pagedBackend.icloudPhotosSyncing());
+        QTRY_VERIFY_WITH_TIMEOUT(!pagedBackend.icloudPhotosSyncing(), 2500);
+        QVERIFY(syncPollCount >= 1);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosTotal(), 152, 1500);
+
+        syncShouldFail = true;
+        pagedBackend.syncIcloudPhotos();
+        QVERIFY(pagedBackend.icloudPhotosSyncing());
+        QTRY_VERIFY_WITH_TIMEOUT(!pagedBackend.icloudPhotosSyncing(), 2500);
+        QVERIFY(syncPollCount >= 1);
+
+        if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
+        if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);
+    }
+
+    void copyImageToClipboardAndPasteRoundtrip() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend backend(false);
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_clip.json")));
+
+        QImage srcImg(2400, 1800, QImage::Format_RGBA8888);
+        srcImg.fill(QColor(30, 144, 255));
+        const QString imgPath = tempDir.filePath(QStringLiteral("sample_photo.jpg"));
+        QVERIFY(srcImg.save(imgPath, "JPG", 90));
+
+        const QString fileUrl = QUrl::fromLocalFile(imgPath).toString();
+        QElapsedTimer timer;
+        timer.start();
+        QVERIFY(backend.copyImageToClipboard(fileUrl, QStringLiteral("att-img-001")));
+        const qint64 copyElapsedMs = timer.elapsed();
+        QVERIFY2(copyElapsedMs < 50, qPrintable(QStringLiteral("copyImageToClipboard took %1ms on GUI thread").arg(copyElapsedMs)));
+
+        // Calling copyToClipboard with placeholder "📷 Photo" must NOT overwrite the copied image
+        backend.copyToClipboard(QStringLiteral("📷 Photo"), QStringLiteral("message"));
+
+        timer.restart();
+        const QString pastedPath = backend.pasteClipboardImageToTempFile();
+        const qint64 pasteElapsedMs = timer.elapsed();
+        QVERIFY2(pasteElapsedMs < 50, qPrintable(QStringLiteral("pasteClipboardImageToTempFile took %1ms on GUI thread").arg(pasteElapsedMs)));
+        QVERIFY(!pastedPath.isEmpty());
+        QVERIFY(QFileInfo::exists(pastedPath));
+        QImageReader pastedReader(pastedPath);
+        QVERIFY(pastedReader.canRead());
+        QCOMPARE(pastedReader.size(), QSize(2400, 1800));
+
+        // Copying real text clears the staged image so normal text copy works as expected
+        backend.copyToClipboard(QStringLiteral("Hello world text"), QStringLiteral("message"));
+        if (QClipboard *cb = QGuiApplication::clipboard()) {
+            QCOMPARE(cb->text(), QStringLiteral("Hello world text"));
+        }
+        QCOMPARE(backend.pasteClipboardImageToTempFile(), QString());
     }
 
 };
