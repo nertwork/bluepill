@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BluePill Headless macOS Relay Server (`bluepill-server` v1.1.0)
+BluePill Headless macOS Relay Server (`bluepill-server` v1.2.0)
 Zero-Electron, single-file Python 3 stdlib relay for Apple Messages (`chat.db`),
 macOS Contacts (`AddressBook-v22.abcddb`), Pinned Chats (`com.apple.messages.pinning.plist`),
 Engine.IO v4 / Socket.IO v4 push events, and Direct SSH JSON-RPC (`stdio`) mode.
@@ -50,7 +50,7 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 APPLE_EPOCH_OFFSET_SEC = 978307200
 APPLE_EPOCH_OFFSET_MS = 978307200000
 
@@ -5155,7 +5155,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill Web UI</span>
-      <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.1.0 · Zero-Electron macOS Relay</span>
+      <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.2.0 · Zero-Electron macOS Relay</span>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <button onclick="openNotesModal()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;display:flex;align-items:center;gap:4px;">📝 Notes</button>
@@ -7460,7 +7460,7 @@ def run_status_or_doctor(engine: BluePillEngine, mode: str, as_json: bool) -> in
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="bluepill-server",
-        description="BluePill Headless macOS Relay Server + Web UI (v1.1.0)",
+        description="BluePill Headless macOS Relay Server + Web UI (v1.2.0)",
     )
     parser.add_argument(
         "command",

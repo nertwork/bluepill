@@ -2,6 +2,22 @@
 
 All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this file.
 
+## [1.2.0] - 2026-11-13
+
+### Added
+- **iCloud Hub Read/Write Notes & Pop-Out Modal:** Full HTML and plain-text editor with automatic debounced saving, rich attachment viewing/downloads, and an interactive full-screen Pop Out modal (`Pop Out` / `Pop In`).
+- **Paginated & Full-Screen Photos, Notes & Calendar:** Enhanced navigation with custom items-per-page selectors (`24 / 60 / 120`), custom scrollbars, page navigator, and `⛶ Full Screen` presentation across macOS Photos.app gallery, Apple Notes, and Apple Calendar.
+- **Customizable Notifications & 6 Audio Ding Presets (`⚙ Settings` / `Ctrl+,`):**
+  - Six built-in synthesized `.wav` presets: `Classic Chime`, `Crystal Ding`, `Tri-Tone Marimba`, `Soft Pop`, `Glass Ping`, and `System Tone`.
+  - In-app `🔊 Preview Ding` and `🔔 Test Alert` controls.
+  - Active chat focus muting (`notificationMuteWhenActive`).
+  - Startup baseline sync state (`m_initialSyncComplete`, `m_startupTimestamp`, `m_startupHighestRowId`, `notifiedMessageGuids`) to eliminate spurious startup or historical sound alerts.
+- **Top-Left Connection Dot & Status Pill:** Real-time visual indicator turning **Red (`Disconnected`)** immediately when offline and **Green (`Connected`)** when online.
+- **Darker Emerald RCS Sent Bubbles (`#1B5E3A`):** Vivid contrast and WCAG AA legibility for sent RCS messages against dark backgrounds.
+- **Sub-Millisecond Image Copy & Paste:** Non-blocking async clipboard image copy (`<0.5ms`) via `QThreadPool` PNG compression and zero-copy Wayland clipboard paste.
+- **Scheme-Less SMS Linkification:** Robust linkification for SMS shortlinks and bare domain URLs (`bit.ly`, `attn.tv`).
+- **Comprehensive Unit Testing:** Expanded test suite with **66 offscreen unit tests** passing in CI.
+
 ## [1.1.0] - 2026-11-11
 
 ### Added

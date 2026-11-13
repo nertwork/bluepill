@@ -1,14 +1,14 @@
 class Bluepill < Formula
   desc "Headless zero-Electron macOS iMessage, SMS & RCS relay daemon + Web UI for BluePill"
   homepage "https://github.com/nertwork/bluepill"
-  url "https://github.com/nertwork/bluepill/archive/refs/tags/v1.1.0.tar.gz"
+  url "https://github.com/nertwork/bluepill/archive/refs/tags/v1.2.0.tar.gz"
   sha256 "a1b8ca5fc70427071f0b2146b1417aaf95ea035deff738f89c25470c1e5263aa"
-  version "1.1.0"
+  version "1.2.0"
   license "MIT"
   head "https://github.com/nertwork/bluepill.git", branch: "main"
 
   bottle do
-    root_url "https://github.com/nertwork/bluepill/releases/download/v1.1.0"
+    root_url "https://github.com/nertwork/bluepill/releases/download/v1.2.0"
     sha256 cellar: :any_skip_relocation, all: "a1b8ca5fc70427071f0b2146b1417aaf95ea035deff738f89c25470c1e5263aa"
   end
 
@@ -52,7 +52,7 @@ class Bluepill < Formula
   end
 
   test do
-    assert_match "bluepill-server 1.1.0", shell_output("#{bin}/bluepill-server --version")
+    assert_match "bluepill-server 1.2.0", shell_output("#{bin}/bluepill-server --version")
     help_out = shell_output("#{bin}/bluepill-server --help")
     if help_out.include?("preflight")
       assert_match "\"status\":", shell_output("#{bin}/bluepill-server preflight --no-fix")

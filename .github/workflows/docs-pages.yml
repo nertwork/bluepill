@@ -1,0 +1,58 @@
+name: Documentation Sync (gh-pages)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - "README.md"
+      - "AGENTS.md"
+      - "CHANGELOG.md"
+      - ".github/workflows/docs-pages.yml"
+      - ".github/scripts/sync_gh_pages.py"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-docs:
+    name: Sync Docs to GitHub Pages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Markdown Dependency
+        run: |
+          python3 -m pip install --upgrade pip markdown
+
+      - name: Checkout gh-pages Branch
+        run: |
+          git fetch origin gh-pages
+          git worktree add /tmp/gh-pages origin/gh-pages
+
+      - name: Synchronize Documentation & Convert to HTML
+        run: |
+          python3 .github/scripts/sync_gh_pages.py /tmp/gh-pages
+
+      - name: Commit and Push to gh-pages
+        run: |
+          cd /tmp/gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "docs: auto-sync documentation and assets from main [skip ci]"
+            git push origin gh-pages
+          else
+            echo "No documentation changes detected on gh-pages."
+          fi

@@ -4,33 +4,140 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  release-arch-pkg:
-    name: Build & Attach Arch Linux Package
+  build-and-release:
+    name: Build Packages & Publish Release
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
     steps:
       - name: Install Arch Linux Dependencies
         run: |
-          pacman -Syu --noconfirm base-devel git qt6-base qt6-declarative qt6-svg qt6-wayland libnotify libheif imagemagick ttf-dejavu
+          pacman -Syu --noconfirm base-devel git cmake ninja qt6-base qt6-declarative qt6-svg qt6-wayland libnotify libheif imagemagick ttf-dejavu python tar gzip curl jq openssh
 
       - name: Checkout Tag
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Build & Run Unit Tests
+      - name: Extract Version
+        id: vars
+        run: |
+          if [ -n "${GITHUB_REF_NAME}" ] && [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER=$(grep -m1 "project(bluepill VERSION" CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')
+          fi
+          echo "version=${VER}" >> $GITHUB_OUTPUT
+          echo "Building BluePill version: ${VER}"
+
+      - name: Build & Run Unit Tests (makepkg)
         run: |
           useradd -m builder
           chown -R builder:builder .
           su builder -c "cd pkgbuild && makepkg -fs --noconfirm"
           ls -lh pkgbuild/*.pkg.tar.zst
 
-      - name: Upload Arch Package to GitHub Release
-        uses: softprops/action-gh-release@v3
+      - name: Build Homebrew Universal Bottles
+        run: |
+          VER="${{ steps.vars.outputs.version }}"
+          BOTTLE_DIR="/tmp/bottle-build/bluepill/${VER}"
+          mkdir -p "${BOTTLE_DIR}/bin"
+
+          install -m 755 server/bluepill_server.py "${BOTTLE_DIR}/bin/bluepill-server"
+          ln -s bluepill-server "${BOTTLE_DIR}/bin/imsgd"
+          [ -f LICENSE ] && cp LICENSE "${BOTTLE_DIR}/"
+          [ -f README.md ] && cp README.md "${BOTTLE_DIR}/"
+
+          cat <<EOF > "${BOTTLE_DIR}/INSTALL_RECEIPT.json"
+          {
+            "homebrew_version": "4.2.0",
+            "used_options": [],
+            "unused_options": [],
+            "built_as_bottle": true,
+            "poured_from_bottle": false,
+            "installed_as_dependency": false,
+            "installed_on_request": true,
+            "changed_files": null,
+            "time": $(date +%s),
+            "source_modified_time": $(date +%s),
+            "source": {
+              "spec": "stable",
+              "versions": {
+                "stable": "${VER}",
+                "version_scheme": 0
+              }
+            }
+          }
+          EOF
+
+          cd /tmp/bottle-build
+          tar -czf "${GITHUB_WORKSPACE}/bluepill-${VER}.all.bottle.tar.gz" bluepill/
+          cp "${GITHUB_WORKSPACE}/bluepill-${VER}.all.bottle.tar.gz" "${GITHUB_WORKSPACE}/bluepill--${VER}.all.bottle.tar.gz"
+          cd "${GITHUB_WORKSPACE}"
+
+      - name: Generate SHA256 Checksums
+        run: |
+          mkdir -p dist
+          cp pkgbuild/*.pkg.tar.zst dist/
+          cp bluepill-*.all.bottle.tar.gz dist/
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
         with:
-          files: pkgbuild/*.pkg.tar.zst
+          files: |
+            dist/*
           generate_release_notes: true
+
+      - name: Optional Sync to Homebrew Tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "::notice ::HOMEBREW_TAP_TOKEN not configured. Skipping automated Homebrew Tap commit."
+            exit 0
+          fi
+          echo "Automated Homebrew Tap push enabled via token."
+          git clone https://x-access-token:${TAP_TOKEN}@github.com/nertwork/homebrew-tap.git /tmp/gh-homebrew-tap
+          cp Formula/bluepill.rb /tmp/gh-homebrew-tap/Formula/bluepill.rb
+          cd /tmp/gh-homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/bluepill.rb
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "feat(bluepill): update formula to v${{ steps.vars.outputs.version }}"
+            git push origin main
+          fi
+
+      - name: Optional Sync to AUR
+        env:
+          AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "${AUR_KEY}" ]; then
+            echo "::notice ::AUR_SSH_PRIVATE_KEY not configured. Skipping automated AUR commit."
+            exit 0
+          fi
+          echo "Automated AUR push enabled via SSH key."
+          mkdir -p ~/.ssh
+          echo "${AUR_KEY}" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/bluepill.git /tmp/aur-bluepill
+          cp pkgbuild/PKGBUILD /tmp/aur-bluepill/PKGBUILD
+          cp pkgbuild/.SRCINFO /tmp/aur-bluepill/.SRCINFO
+          cd /tmp/aur-bluepill
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "chore(release): bump to v${{ steps.vars.outputs.version }}"
+            GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master
+          fi
