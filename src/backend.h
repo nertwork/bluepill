@@ -247,6 +247,7 @@ public:
     Q_INVOKABLE void refreshAll();
     Q_INVOKABLE void selectChat(const QString &chatGuid);
     Q_INVOKABLE bool isSameConversation(const QString &guidA, const QString &guidB) const;
+    Q_INVOKABLE QString resolveCanonicalChatGuid(const QString &chatGuid) const;
     Q_INVOKABLE void selectNextChat();
     Q_INVOKABLE void selectPrevChat();
     Q_INVOKABLE void markChatRead(const QString &chatGuid);
@@ -479,7 +480,6 @@ private:
     void fetchLinkPreview(const QString &msgGuid, const QString &url);
     void processIncomingMessages(const QJsonArray &messagesArray, bool isInitialLoad);
     void recordChatGroupMetadata(const QJsonObject &chatObj);
-    QString resolveCanonicalChatGuid(const QString &chatGuid) const;
     QString resolveActiveSendChatGuid(const QString &chatGuid) const;
     QString computeGroupMergeKey(const ChatEntry &entry) const;
     void unifySiblingChats(bool *selectedMigrated = nullptr, bool *chatsMerged = nullptr);

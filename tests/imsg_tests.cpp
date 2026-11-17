@@ -4772,6 +4772,32 @@ private slots:
             }
         }
         QVERIFY(foundUnifiedUnread);
+
+        // Verify marking a fresh un-consolidated sibling unread preserves qint64 unread override after unification
+        const QString preUnreadSib = QStringLiteral("RCS;+;chat_pre_unread_sib");
+        QJsonObject preSibObj{
+            {QStringLiteral("guid"), preUnreadSib},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("chat_pre_unread_sib")},
+            {QStringLiteral("displayName"), QStringLiteral("Weekend Hike Crew")},
+            {QStringLiteral("originalGroupId"), sharedOrigGroupId},
+            {QStringLiteral("originalROWID"), 100},
+            {QStringLiteral("style"), 43}
+        };
+        b.markChatRead(activeRcsGuid);
+        b.ingestChatsMetadataForTest(QJsonArray{preSibObj});
+        b.markChatUnread(preUnreadSib);
+        b.ingestChatsMetadataForTest(QJsonArray{cStale, cActive, cSms, preSibObj, cOther, cDm, unkeyedA, unkeyedB});
+        QVERIFY(b.isSameConversation(preUnreadSib, activeRcsGuid));
+        QCOMPARE(b.resolveCanonicalChatGuid(preUnreadSib), b.resolveCanonicalChatGuid(activeRcsGuid));
+        const QString winnerGuid = b.resolveCanonicalChatGuid(activeRcsGuid);
+        bool preSibUnreadPreserved = false;
+        for (const QVariant &cv : b.chats()) {
+            const QVariantMap cm = cv.toMap();
+            if (cm.value(QStringLiteral("guid")).toString() == winnerGuid) {
+                preSibUnreadPreserved = cm.value(QStringLiteral("unreadCount")).toInt() >= 1;
+            }
+        }
+        QVERIFY(preSibUnreadPreserved);
     }
 
     void testAsyncDeliveryFailureSurfacing() {

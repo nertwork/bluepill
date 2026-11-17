@@ -3569,7 +3569,7 @@ void Backend::unifySiblingChats(bool *selectedMigrated, bool *chatsMerged) {
                 m_readWatermarks[winner.guid] = qMax(m_readWatermarks.value(winner.guid, 0), sibWm);
             }
             if (m_unreadOverrides.contains(sib)) {
-                const int sibUnread = m_unreadOverrides.take(sib);
+                const qint64 sibUnread = m_unreadOverrides.take(sib);
                 m_unreadOverrides[winner.guid] = qMax(m_unreadOverrides.value(winner.guid, 0), sibUnread);
             }
             if (m_localReadMutationTimeMs.contains(sib)) {

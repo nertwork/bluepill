@@ -1586,12 +1586,19 @@ class BluePillEngine:
                 ).fetchall()
                 base_set = {k for k in (self._norm_handle_key(str(r["address"] or "")) for r in base_parts) if k}
                 if len(base_set) >= 2:
+                    cand_preds = [
+                        "LOWER(TRIM(c.display_name)) = LOWER(?)",
+                        "(c.guid LIKE 'RCS;+;%' OR c.guid LIKE 'SMS;+;%' )",
+                    ]
+                    if "original_group_id" in cols:
+                        cand_preds.append("COALESCE(TRIM(c.original_group_id), '') = ''")
+                    if "group_id" in cols:
+                        cand_preds.append("COALESCE(TRIM(c.group_id), '') = ''")
                     cand_rows = conn.execute(
-                        """
+                        f"""
                         SELECT c.ROWID AS rowid
                         FROM chat c
-                        WHERE LOWER(TRIM(c.display_name)) = LOWER(?)
-                          AND (c.guid LIKE 'RCS;+;%' OR c.guid LIKE 'SMS;+;%' OR c.style = 43)
+                        WHERE {" AND ".join(cand_preds)}
                         """,
                         (disp,),
                     ).fetchall()
@@ -7965,9 +7972,18 @@ def run_selftest(engine: BluePillEngine) -> int:
         finally:
             sconn3.close()
         assert test_eng._resolve_active_send_chat_guid("RCS;+;chat_err_rcs") == "SMS;+;chat_ok_sms"
+        # Keyed group sharing name + participants with unkeyed group must NOT merge into unkeyed sibling lookup
+        sconn4 = sqlite3.connect(split_db)
+        try:
+            sconn4.execute("INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, is_archived, group_id, original_group_id) VALUES (6003, 'RCS;+;keyed_same_name', 'keyed_same_name', 'RCS', 'OverlapTest', 43, 0, 'grp_only_k', 'OGID_ONLY_K');")
+            sconn4.execute("INSERT INTO chat_handle_join VALUES (6003, 1), (6003, 2), (6003, 3);")
+            sconn4.commit()
+        finally:
+            sconn4.close()
+        assert test_eng._resolve_active_send_chat_guid("RCS;+;unkeyed_a") == "RCS;+;unkeyed_a", "Unkeyed fallback must not absorb keyed group"
         all_after = test_eng.query_chats(limit=50, offset=0)
         unkeyed_guids = {c["guid"] for c in all_after if c.get("displayName") == "OverlapTest"}
-        assert unkeyed_guids == {"RCS;+;unkeyed_a", "RCS;+;unkeyed_b"}, f"Unkeyed groups with distinct members wrongly merged: {all_after}"
+        assert unkeyed_guids == {"RCS;+;unkeyed_a", "RCS;+;unkeyed_b", "RCS;+;keyed_same_name"}, f"Unkeyed/keyed groups wrongly merged: {all_after}"
     finally:
         srv.shutdown()
         srv.server_close()

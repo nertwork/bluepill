@@ -18,7 +18,7 @@ jobs:
     steps:
       - name: Install Arch Linux Dependencies
         run: |
-          pacman -Syu --noconfirm base-devel git cmake ninja qt6-base qt6-declarative qt6-svg qt6-wayland libnotify libheif imagemagick ttf-dejavu python tar gzip curl jq openssh
+          pacman -Syu --noconfirm base-devel git cmake ninja qt6-base qt6-declarative qt6-svg qt6-wayland libnotify libheif imagemagick ttf-dejavu python tar gzip curl jq openssh ruby
 
       - name: Checkout Tag
         uses: actions/checkout@v4
@@ -107,7 +107,10 @@ jobs:
           fi
           VER="${{ steps.vars.outputs.version }}"
           SRC_URL="https://github.com/nertwork/bluepill/archive/refs/tags/v${VER}.tar.gz"
-          SRC_SHA=$(curl -fsSL "${SRC_URL}" | sha256sum | awk '{print $1}')
+          SRC_TMP="/tmp/bluepill-v${VER}.tar.gz"
+          curl -fsSL "${SRC_URL}" -o "${SRC_TMP}"
+          SRC_SHA=$(sha256sum "${SRC_TMP}" | awk '{print $1}')
+          rm -f "${SRC_TMP}"
           BOTTLE_SHA=$(grep "bluepill-${VER}.all.bottle.tar.gz" dist/SHA256SUMS.txt | awk '{print $1}')
           if [ -z "${SRC_SHA}" ] || [ -z "${BOTTLE_SHA}" ]; then
             echo "::error ::Missing release checksum(s): src=${SRC_SHA} bottle=${BOTTLE_SHA}"
