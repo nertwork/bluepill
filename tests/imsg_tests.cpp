@@ -4732,6 +4732,46 @@ private slots:
         };
         b.ingestMessagesForTest(QJsonArray{dmMsg}, false);
         QCOMPARE(win->property("replyTargetGuid").toString(), QStringLiteral("rcs-msg-active-2"));
+
+        // Verify unkeyed groups with identical displayName but distinct participant sets ({101,102,103} vs {101,102,104}) stay separate
+        QJsonObject unkeyedA{
+            {QStringLiteral("guid"), QStringLiteral("RCS;+;chat_unkeyed_1")},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("chat_unkeyed_1")},
+            {QStringLiteral("displayName"), QStringLiteral("Weekend")},
+            {QStringLiteral("style"), 43},
+            {QStringLiteral("participants"), QJsonArray{
+                QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550101")}},
+                QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550102")}},
+                QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550103")}}
+            }}
+        };
+        QJsonObject unkeyedB{
+            {QStringLiteral("guid"), QStringLiteral("RCS;+;chat_unkeyed_2")},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("chat_unkeyed_2")},
+            {QStringLiteral("displayName"), QStringLiteral("Weekend")},
+            {QStringLiteral("style"), 43},
+            {QStringLiteral("participants"), QJsonArray{
+                QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550101")}},
+                QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550102")}},
+                QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550104")}}
+            }}
+        };
+        b.ingestChatsMetadataForTest(QJsonArray{cStale, cActive, cSms, cOther, cDm, unkeyedA, unkeyedB});
+        QVERIFY(!b.isSameConversation(QStringLiteral("RCS;+;chat_unkeyed_1"), QStringLiteral("RCS;+;chat_unkeyed_2")));
+        QCOMPARE(b.chats().size(), 5);
+
+        // Verify markChatUnread clears canonical watermark and does not resurrect stale sibling watermark on re-unification
+        b.markChatRead(staleRcsGuid);
+        b.markChatUnread(activeRcsGuid);
+        b.ingestChatsMetadataForTest(QJsonArray{cStale, cActive, cSms, cOther, cDm, unkeyedA, unkeyedB});
+        bool foundUnifiedUnread = false;
+        for (const QVariant &cv : b.chats()) {
+            const QVariantMap cm = cv.toMap();
+            if (b.isSameConversation(cm.value(QStringLiteral("guid")).toString(), activeRcsGuid)) {
+                foundUnifiedUnread = cm.value(QStringLiteral("unreadCount")).toInt() >= 1;
+            }
+        }
+        QVERIFY(foundUnifiedUnread);
     }
 
     void testAsyncDeliveryFailureSurfacing() {

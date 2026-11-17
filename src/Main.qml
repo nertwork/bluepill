@@ -524,6 +524,26 @@ ApplicationWindow {
         }
     }
 
+    function resolveSavedDraftForChat(chatGuid) {
+        if (!chatGuid || chatGuid.length === 0) return ""
+        var drafts = root.chatDrafts || ({})
+        if (drafts[chatGuid] !== undefined && drafts[chatGuid].length > 0) {
+            return drafts[chatGuid]
+        }
+        var keys = Object.keys(drafts)
+        for (var i = 0; i < keys.length; ++i) {
+            var k = keys[i]
+            if (k !== "" && k !== chatGuid && drafts[k] !== undefined && drafts[k].length > 0 && backend.isSameConversation(k, chatGuid)) {
+                var val = drafts[k]
+                drafts[chatGuid] = val
+                delete drafts[k]
+                root.chatDrafts = drafts
+                return val
+            }
+        }
+        return (drafts[chatGuid] !== undefined) ? drafts[chatGuid] : ""
+    }
+
     Component.onCompleted: {
         var initialGuid = backend.selectedChatGuid || ""
         if (initialGuid.length > 0) {
@@ -533,7 +553,7 @@ ApplicationWindow {
         var currentGuid = backend.selectedChatGuid || ""
         if (currentGuid.length > 0) {
             root.lastDraftChatGuid = currentGuid
-            var savedDraft = (root.chatDrafts && root.chatDrafts[currentGuid] !== undefined) ? root.chatDrafts[currentGuid] : ""
+            var savedDraft = root.resolveSavedDraftForChat(currentGuid)
             if (savedDraft.length > 0 && composerInput.text !== savedDraft) {
                 composerInput.text = savedDraft
             }
@@ -558,17 +578,20 @@ ApplicationWindow {
             }
             if (root.lastDraftChatGuid !== "" && root.lastDraftChatGuid !== newGuid) {
                 var drafts = root.chatDrafts || ({})
+                var canonPrev = backend.resolveCanonicalChatGuid(root.lastDraftChatGuid) || root.lastDraftChatGuid
                 if (sameConv && composerInput.text !== "") {
                     drafts[newGuid] = composerInput.text
-                    delete drafts[root.lastDraftChatGuid]
+                    if (drafts[root.lastDraftChatGuid] !== undefined) delete drafts[root.lastDraftChatGuid]
+                    if (canonPrev !== newGuid && drafts[canonPrev] !== undefined) delete drafts[canonPrev]
                 } else {
-                    drafts[root.lastDraftChatGuid] = composerInput.text
+                    drafts[canonPrev] = composerInput.text
+                    if (canonPrev !== root.lastDraftChatGuid && drafts[root.lastDraftChatGuid] !== undefined) delete drafts[root.lastDraftChatGuid]
                 }
                 root.chatDrafts = drafts
             }
             if (root.lastDraftChatGuid !== newGuid) {
                 root.lastDraftChatGuid = newGuid
-                var savedDraft = (root.chatDrafts && newGuid !== "" && root.chatDrafts[newGuid] !== undefined) ? root.chatDrafts[newGuid] : ""
+                var savedDraft = root.resolveSavedDraftForChat(newGuid)
                 if (composerInput.text !== savedDraft) {
                     composerInput.text = savedDraft
                 }

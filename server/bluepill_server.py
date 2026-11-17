@@ -1066,24 +1066,25 @@ class BluePillEngine:
             """,
             tracked_ids,
         ).fetchall()
-        changed_ids: List[int] = []
-        for r in rows:
-            rid = int(r["ROWID"])
-            cur_err = int(r["error"] or 0)
-            cur_sent = bool(r["is_sent"])
-            cur_deliv = bool(r["is_delivered"])
-            cur_read = int(r["date_read"] or 0)
-            with self._tracked_outgoing_lock:
+        pending_updates: List[Tuple[int, Tuple[int, bool, bool, int, float], bool]] = []
+        with self._tracked_outgoing_lock:
+            for r in rows:
+                rid = int(r["ROWID"])
+                cur_err = int(r["error"] or 0)
+                cur_sent = bool(r["is_sent"])
+                cur_deliv = bool(r["is_delivered"])
+                cur_read = int(r["date_read"] or 0)
                 prev = self._tracked_outgoing.get(rid)
                 if not prev:
                     continue
-                if (cur_err, cur_sent, cur_deliv, cur_read) != prev[:4]:
-                    changed_ids.append(rid)
-                    self._tracked_outgoing[rid] = (cur_err, cur_sent, cur_deliv, cur_read, prev[4])
-                if cur_err != 0 or cur_read > 0:
+                next_state = (cur_err, cur_sent, cur_deliv, cur_read, prev[4])
+                should_remove = (cur_err != 0 or cur_read > 0)
+                if next_state[:4] != prev[:4]:
+                    pending_updates.append((rid, next_state, should_remove))
+                elif should_remove:
                     self._tracked_outgoing.pop(rid, None)
 
-        for rid in changed_ids:
+        for rid, next_state, should_remove in pending_updates:
             try:
                 updated_msgs = self.query_messages(
                     {
@@ -1102,6 +1103,11 @@ class BluePillEngine:
                         )
                         self.broadcast_socketio("message-send-error", um)
                     self.broadcast_socketio("updated-message", um)
+                with self._tracked_outgoing_lock:
+                    if should_remove:
+                        self._tracked_outgoing.pop(rid, None)
+                    elif rid in self._tracked_outgoing:
+                        self._tracked_outgoing[rid] = next_state
             except Exception as exc:
                 self.logger.warning("[wal] failed broadcasting update for rowid=%d: %s", rid, exc)
 
@@ -1498,7 +1504,21 @@ class BluePillEngine:
             return set()
 
     @staticmethod
-    def _chat_merge_key(chat_row: Any) -> str:
+    def _norm_handle_key(addr: str) -> str:
+        s = (addr or "").strip()
+        if not s:
+            return ""
+        if "@" not in s and any(ch.isdigit() for ch in s):
+            digits = re.sub(r"\D", "", s)
+            return digits[-10:] if len(digits) >= 10 else digits
+        return s.lower()
+
+    @classmethod
+    def _chat_merge_key(
+        cls,
+        chat_row: Any,
+        participant_addrs: Optional[List[str]] = None,
+    ) -> str:
         style = int(chat_row["style"] if "style" in chat_row.keys() else 45 or 45)
         guid = str(chat_row["guid"] or "")
         is_group = (style == 43) or (";+;" in guid)
@@ -1510,6 +1530,13 @@ class BluePillEngine:
         gid = str(chat_row["group_id"] or "").strip() if "group_id" in chat_row.keys() else ""
         if gid:
             return f"grp:{gid}"
+        # Fallback for unkeyed RCS/SMS groups: require matching non-empty display_name AND exact normalized participant set (>=2)
+        if guid.startswith(("RCS;+;", "SMS;+;")):
+            disp = str(chat_row["display_name"] or "").strip() if "display_name" in chat_row.keys() else ""
+            if disp and participant_addrs:
+                norm_set = {k for k in (cls._norm_handle_key(a) for a in participant_addrs) if k}
+                if len(norm_set) >= 2:
+                    return f"nameparts:{disp.lower()}:{','.join(sorted(norm_set))}"
         return ""
 
     def _get_sibling_chat_rows(self, conn: sqlite3.Connection, chat_guid: str) -> List[sqlite3.Row]:
@@ -1522,7 +1549,7 @@ class BluePillEngine:
         base = conn.execute(
             f"""
             SELECT c.ROWID AS rowid, c.guid AS guid, c.style AS style, c.service_name AS service_name,
-                   c.is_archived AS is_archived, {gid_expr}, {ogid_expr}
+                   c.display_name AS display_name, c.is_archived AS is_archived, {gid_expr}, {ogid_expr}
             FROM chat c
             WHERE c.guid = ?
             LIMIT 1
@@ -1545,6 +1572,48 @@ class BluePillEngine:
         elif gid and "group_id" in cols:
             where_parts.append("(c.group_id = ? AND (c.style = 43 OR c.guid LIKE '%;+;%'))")
             params.append(gid)
+        elif cg.startswith(("RCS;+;", "SMS;+;")):
+            disp = str(base["display_name"] or "").strip()
+            if disp:
+                base_parts = conn.execute(
+                    """
+                    SELECT h.id AS address
+                    FROM chat_handle_join chj
+                    JOIN handle h ON h.ROWID = chj.handle_id
+                    WHERE chj.chat_id = ?
+                    """,
+                    (int(base["rowid"]),),
+                ).fetchall()
+                base_set = {k for k in (self._norm_handle_key(str(r["address"] or "")) for r in base_parts) if k}
+                if len(base_set) >= 2:
+                    cand_rows = conn.execute(
+                        """
+                        SELECT c.ROWID AS rowid
+                        FROM chat c
+                        WHERE LOWER(TRIM(c.display_name)) = LOWER(?)
+                          AND (c.guid LIKE 'RCS;+;%' OR c.guid LIKE 'SMS;+;%' OR c.style = 43)
+                        """,
+                        (disp,),
+                    ).fetchall()
+                    matched_ids: List[int] = []
+                    for cr in cand_rows:
+                        crid = int(cr["rowid"])
+                        cparts = conn.execute(
+                            """
+                            SELECT h.id AS address
+                            FROM chat_handle_join chj
+                            JOIN handle h ON h.ROWID = chj.handle_id
+                            WHERE chj.chat_id = ?
+                            """,
+                            (crid,),
+                        ).fetchall()
+                        cset = {k for k in (self._norm_handle_key(str(r["address"] or "")) for r in cparts) if k}
+                        if cset == base_set:
+                            matched_ids.append(crid)
+                    if matched_ids:
+                        ph = ",".join("?" for _ in matched_ids)
+                        where_parts.append(f"c.ROWID IN ({ph})")
+                        params.extend(matched_ids)
         rows = conn.execute(
             f"""
             SELECT c.ROWID AS rowid, c.guid AS guid, c.style AS style, c.service_name AS service_name,
@@ -1559,8 +1628,8 @@ class BluePillEngine:
             WHERE {" OR ".join(where_parts)}
             GROUP BY c.ROWID
             ORDER BY c.is_archived ASC,
-                     CASE WHEN c.guid LIKE 'SMS;%' THEN 0 ELSE 1 END DESC,
                      CASE WHEN COALESCE(last_out_error, 0) = 0 THEN 1 ELSE 0 END DESC,
+                     CASE WHEN c.guid LIKE 'SMS;%' THEN 0 ELSE 1 END DESC,
                      COALESCE(MAX(cmj.message_date), 0) DESC,
                      c.ROWID DESC
             """,
@@ -1653,8 +1722,9 @@ class BluePillEngine:
 
             fetch_limit = max(1, min(int(limit), 1000))
             fetch_offset = max(0, int(offset))
-            raw_limit = fetch_limit if chat_guid else min(2000, max(fetch_limit * 3, fetch_limit + fetch_offset + 200))
-            raw_offset = 0 if not chat_guid else fetch_offset
+            # Fetch all sibling rows before applying targeted limit so consolidation never truncates siblings
+            raw_limit = max(50, len(expanded_guids), fetch_limit) if chat_guid else min(2000, max(fetch_limit * 3, fetch_limit + fetch_offset + 200))
+            raw_offset = 0
 
             sql = f"""
                 SELECT
@@ -1684,7 +1754,7 @@ class BluePillEngine:
             chat_ids = [int(r["rowid"]) for r in rows]
             participants_by_chat: Dict[int, List[Dict[str, Any]]] = {}
 
-            if with_participants and chat_ids:
+            if (with_participants or any((str(r["guid"] or "").startswith(("RCS;+;", "SMS;+;"))) for r in rows)) and chat_ids:
                 placeholders = ",".join("?" for _ in chat_ids)
                 p_rows = conn.execute(
                     f"""
@@ -1718,6 +1788,15 @@ class BluePillEngine:
                     continue
                 last_read_ms = apple_ts_to_epoch_ms(r["last_read_message_timestamp"])
                 last_msg_ms = apple_ts_to_epoch_ms(r["last_message_date"])
+                row_parts = (
+                    [{"address": a, "service": r["service_name"] or "iMessage"} for a in self.group_participants_override[guid]]
+                    if guid in self.group_participants_override
+                    else participants_by_chat.get(cid, [])
+                )
+                merge_key = self._chat_merge_key(
+                    r,
+                    participant_addrs=[str(p.get("address") or "") for p in row_parts],
+                )
                 raw_entries.append(
                     {
                         "originalROWID": cid,
@@ -1733,12 +1812,8 @@ class BluePillEngine:
                         "lastReadMessageTimestamp": last_read_ms,
                         "lastMessageDate": last_msg_ms,
                         "properties": [],
-                        "participants": (
-                            [{"address": a, "service": r["service_name"] or "iMessage"} for a in self.group_participants_override[guid]]
-                            if guid in self.group_participants_override
-                            else participants_by_chat.get(cid, [])
-                        ),
-                        "_mergeKey": self._chat_merge_key(r),
+                        "participants": row_parts if with_participants else [],
+                        "_mergeKey": merge_key,
                     }
                 )
 
@@ -2603,7 +2678,7 @@ class BluePillEngine:
 
         effective_selected_guid = selected_guid
         effective_part_index = part_index
-        if effective_selected_guid and requested_chat_guid and chat_guid != requested_chat_guid:
+        if effective_selected_guid:
             if not self._message_exists_in_chat(effective_selected_guid, chat_guid):
                 self.logger.info(
                     "[send_text] cross-sibling reply normalized (selectedMessageGuid=%s not in %s)",
@@ -2668,9 +2743,13 @@ class BluePillEngine:
                 settle_deadline = time.time() + 0.35
                 while time.time() < settle_deadline:
                     time.sleep(0.07)
-                    refreshed = self.query_messages(
-                        {"limit": 1, "where": [{"statement": "message.ROWID = :rid", "args": {"rid": rid}}]}
-                    )
+                    try:
+                        refreshed = self.query_messages(
+                            {"limit": 1, "where": [{"statement": "message.ROWID = :rid", "args": {"rid": rid}}]}
+                        )
+                    except Exception as exc:
+                        self.logger.warning("[send_text] settle refresh skipped rowid=%d: %s", rid, exc)
+                        break
                     if refreshed:
                         db_msg = refreshed[0]
                         db_msg["tempGuid"] = temp_guid
@@ -2896,6 +2975,7 @@ class BluePillEngine:
                     ag = str(att.get("guid") or "")
                     if ag:
                         self._outbound_attachments[ag] = (abs_file_path, mime_type)
+            self._register_tracked_outgoing(db_msg)
             self.logger.info(
                 "[send_attachment] chat=%s tempGuid=%s file=%s bytes=%d method=%s guid=%s rowid=%s elapsed_ms=%d",
                 chat_guid,
@@ -2907,7 +2987,11 @@ class BluePillEngine:
                 db_msg.get("originalROWID"),
                 elapsed_ms,
             )
-            self.broadcast_socketio("new-message", db_msg)
+            if int(db_msg.get("error") or 0) != 0:
+                self.broadcast_socketio("message-send-error", db_msg)
+                self.broadcast_socketio("updated-message", db_msg)
+            else:
+                self.broadcast_socketio("new-message", db_msg)
             return db_msg
 
         if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
@@ -7821,13 +7905,18 @@ def run_selftest(engine: BluePillEngine) -> int:
         assert set(unified_chats[0]["siblingChatGuids"]) == {"RCS;+;chat111111", "RCS;+;chat222222"}
         assert test_eng._resolve_active_send_chat_guid("RCS;+;chat111111") == "RCS;+;chat222222"
 
+        # Single-chat query with limit=1 must still return full consolidated sibling list
+        single_chat = test_eng.query_chats(limit=1, chat_guid="RCS;+;chat111111")
+        assert len(single_chat) == 1 and set(single_chat[0]["siblingChatGuids"]) == {"RCS;+;chat111111", "RCS;+;chat222222"}
+
         msgs_via_stale = test_eng.query_messages({"chatGuid": "RCS;+;chat111111", "limit": 50})
         guids_seen = [m["guid"] for m in msgs_via_stale]
         assert len(guids_seen) == 4 and len(set(guids_seen)) == 4, f"Expected 4 deduplicated sibling messages, got {guids_seen}"
 
-        # Track pending outgoing ROWID 13, mutate it to error=4 in DB, and assert _poll_tracked_outgoing_updates emits events
+        # Track pending outgoing ROWID 13; simulate transient query failure -> must remain retryable, then succeed on next poll
         emitted_events: List[Tuple[str, Any]] = []
         orig_emit = test_eng.broadcast_socketio
+        orig_qm = test_eng.query_messages
         test_eng.broadcast_socketio = lambda ev, payload: emitted_events.append((ev, payload))
         try:
             test_eng._register_tracked_outgoing(
@@ -7838,13 +7927,47 @@ def run_selftest(engine: BluePillEngine) -> int:
                 sconn2.row_factory = sqlite3.Row
                 sconn2.execute("UPDATE message SET error = 4 WHERE ROWID = 13;")
                 sconn2.commit()
+
+                def _fail_once(_body):
+                    raise RuntimeError("transient sqlite lock")
+
+                test_eng.query_messages = _fail_once
                 test_eng._poll_tracked_outgoing_updates(sconn2)
+                assert 13 in test_eng._tracked_outgoing, "Failed broadcast must keep ROWID retryable"
+                assert not emitted_events
+
+                test_eng.query_messages = orig_qm
+                test_eng._poll_tracked_outgoing_updates(sconn2)
+                assert 13 not in test_eng._tracked_outgoing
             finally:
                 sconn2.close()
             ev_names = [e[0] for e in emitted_events]
             assert "updated-message" in ev_names and "message-send-error" in ev_names, f"Missing failure socket events: {emitted_events}"
         finally:
+            test_eng.query_messages = orig_qm
             test_eng.broadcast_socketio = orig_emit
+
+        # Verify healthy SMS sibling beats failed RCS sibling & unkeyed groups only merge on exact participant match
+        sconn3 = sqlite3.connect(split_db)
+        try:
+            sconn3.execute("INSERT INTO handle (ROWID, id, service) VALUES (4, '+15555550104', 'RCS');")
+            sconn3.execute("INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, is_archived, group_id, original_group_id) VALUES (5001, 'RCS;+;chat_err_rcs', 'chat_err_rcs', 'RCS', 'Health Rank Crew', 43, 0, '', 'OGID_HEALTH');")
+            sconn3.execute("INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, is_archived, group_id, original_group_id) VALUES (5002, 'SMS;+;chat_ok_sms', 'chat_ok_sms', 'SMS', 'Health Rank Crew', 43, 0, '', 'OGID_HEALTH');")
+            sconn3.execute("INSERT INTO chat_handle_join VALUES (5001, 1), (5001, 2), (5002, 1), (5002, 2);")
+            sconn3.execute("INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, is_sent, error, date) VALUES (20, 'm-rcs-fail', 'Fail', 0, 1, 0, 4, ?);", (base_ns + 5_000_000_000,))
+            sconn3.execute("INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, is_sent, error, date) VALUES (21, 'm-sms-ok', 'Ok', 0, 1, 1, 0, ?);", (base_ns + 4_500_000_000,))
+            sconn3.execute("INSERT INTO chat_message_join VALUES (5001, 20, ?), (5002, 21, ?);", (base_ns + 5_000_000_000, base_ns + 4_500_000_000))
+            # Two unkeyed groups sharing name "OverlapTest" with differing membership ({1,2,3} vs {1,2,4}) -> must NOT merge
+            sconn3.execute("INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, is_archived, group_id, original_group_id) VALUES (6001, 'RCS;+;unkeyed_a', 'unkeyed_a', 'RCS', 'OverlapTest', 43, 0, '', '');")
+            sconn3.execute("INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, is_archived, group_id, original_group_id) VALUES (6002, 'RCS;+;unkeyed_b', 'unkeyed_b', 'RCS', 'OverlapTest', 43, 0, '', '');")
+            sconn3.execute("INSERT INTO chat_handle_join VALUES (6001, 1), (6001, 2), (6001, 3), (6002, 1), (6002, 2), (6002, 4);")
+            sconn3.commit()
+        finally:
+            sconn3.close()
+        assert test_eng._resolve_active_send_chat_guid("RCS;+;chat_err_rcs") == "SMS;+;chat_ok_sms"
+        all_after = test_eng.query_chats(limit=50, offset=0)
+        unkeyed_guids = {c["guid"] for c in all_after if c.get("displayName") == "OverlapTest"}
+        assert unkeyed_guids == {"RCS;+;unkeyed_a", "RCS;+;unkeyed_b"}, f"Unkeyed groups with distinct members wrongly merged: {all_after}"
     finally:
         srv.shutdown()
         srv.server_close()

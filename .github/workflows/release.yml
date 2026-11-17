@@ -105,15 +105,40 @@ jobs:
             echo "::notice ::HOMEBREW_TAP_TOKEN not configured. Skipping automated Homebrew Tap commit."
             exit 0
           fi
-          echo "Automated Homebrew Tap push enabled via token."
+          VER="${{ steps.vars.outputs.version }}"
+          SRC_URL="https://github.com/nertwork/bluepill/archive/refs/tags/v${VER}.tar.gz"
+          SRC_SHA=$(curl -fsSL "${SRC_URL}" | sha256sum | awk '{print $1}')
+          BOTTLE_SHA=$(grep "bluepill-${VER}.all.bottle.tar.gz" dist/SHA256SUMS.txt | awk '{print $1}')
+          if [ -z "${SRC_SHA}" ] || [ -z "${BOTTLE_SHA}" ]; then
+            echo "::error ::Missing release checksum(s): src=${SRC_SHA} bottle=${BOTTLE_SHA}"
+            exit 1
+          fi
+          echo "Computed release checksums for v${VER}: src=${SRC_SHA} bottle=${BOTTLE_SHA}"
           git clone https://x-access-token:${TAP_TOKEN}@github.com/nertwork/homebrew-tap.git /tmp/gh-homebrew-tap
           cp Formula/bluepill.rb /tmp/gh-homebrew-tap/Formula/bluepill.rb
+          VER="${VER}" SRC_URL="${SRC_URL}" SRC_SHA="${SRC_SHA}" BOTTLE_SHA="${BOTTLE_SHA}" python3 - <<'PY'
+          import os, pathlib, re
+          ver = os.environ["VER"]
+          src_url = os.environ["SRC_URL"]
+          src_sha = os.environ["SRC_SHA"]
+          bottle_sha = os.environ["BOTTLE_SHA"]
+          p = pathlib.Path("/tmp/gh-homebrew-tap/Formula/bluepill.rb")
+          txt = p.read_text(encoding="utf-8")
+          txt = re.sub(r'url "https://github\.com/nertwork/bluepill/archive/refs/tags/v[^"]+\.tar\.gz"', f'url "{src_url}"', txt, count=1)
+          txt = re.sub(r'sha256 "[0-9a-f]{64}"', f'sha256 "{src_sha}"', txt, count=1)
+          txt = re.sub(r'version "[^"]+"', f'version "{ver}"', txt, count=1)
+          txt = re.sub(r'root_url "https://github\.com/nertwork/bluepill/releases/download/v[^"]+"', f'root_url "https://github.com/nertwork/bluepill/releases/download/v{ver}"', txt, count=1)
+          txt = re.sub(r'sha256 cellar: :any_skip_relocation, all: "[0-9a-f]{64}"', f'sha256 cellar: :any_skip_relocation, all: "{bottle_sha}"', txt, count=1)
+          txt = re.sub(r'assert_match "bluepill-server [^"]+"', f'assert_match "bluepill-server {ver}"', txt, count=1)
+          p.write_text(txt, encoding="utf-8")
+          PY
+          ruby -c /tmp/gh-homebrew-tap/Formula/bluepill.rb
           cd /tmp/gh-homebrew-tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/bluepill.rb
           if ! git diff-index --quiet HEAD; then
-            git commit -m "feat(bluepill): update formula to v${{ steps.vars.outputs.version }}"
+            git commit -m "feat(bluepill): update formula to v${VER}"
             git push origin main
           fi
 

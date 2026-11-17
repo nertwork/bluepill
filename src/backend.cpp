@@ -3444,7 +3444,7 @@ void Backend::unifySiblingChats(bool *selectedMigrated, bool *chatsMerged) {
         }
     }
 
-    // Fallback: unify unkeyed RCS/SMS group chats sharing non-empty displayName and >=50% participant overlap
+    // Fallback: unify unkeyed RCS/SMS group chats sharing non-empty displayName and exact normalized participant set
     std::vector<QSet<QString>> normSets(n);
     for (int i = 0; i < n; ++i) {
         QSet<QString> s;
@@ -3465,12 +3465,7 @@ void Backend::unifySiblingChats(bool *selectedMigrated, bool *chatsMerged) {
             const bool isRcsSmsJ = m_chats[j].guid.startsWith(QStringLiteral("RCS;+;")) || m_chats[j].guid.startsWith(QStringLiteral("SMS;+;"));
             if (!isRcsSmsJ || dispI.compare(dispJ, Qt::CaseInsensitive) != 0 || normSets[j].size() < 2) continue;
             if (!computeGroupMergeKey(m_chats[j]).isEmpty()) continue;
-            int overlap = 0;
-            for (const QString &nh : normSets[i]) {
-                if (normSets[j].contains(nh)) ++overlap;
-            }
-            const int minSz = qMin(static_cast<int>(normSets[i].size()), static_cast<int>(normSets[j].size()));
-            if (overlap >= 2 && overlap * 2 >= minSz) {
+            if (normSets[i] == normSets[j]) {
                 unite(i, j);
             }
         }
@@ -3570,13 +3565,16 @@ void Backend::unifySiblingChats(bool *selectedMigrated, bool *chatsMerged) {
             if (sib.isEmpty() || sib == winner.guid) continue;
             m_canonicalChatAliases.insert(sib, winner.guid);
             if (m_readWatermarks.contains(sib)) {
-                m_readWatermarks[winner.guid] = qMax(m_readWatermarks.value(winner.guid, 0), m_readWatermarks.value(sib, 0));
+                const qint64 sibWm = m_readWatermarks.take(sib);
+                m_readWatermarks[winner.guid] = qMax(m_readWatermarks.value(winner.guid, 0), sibWm);
             }
             if (m_unreadOverrides.contains(sib)) {
-                m_unreadOverrides[winner.guid] = qMax(m_unreadOverrides.value(winner.guid, 0), m_unreadOverrides.value(sib, 0));
+                const int sibUnread = m_unreadOverrides.take(sib);
+                m_unreadOverrides[winner.guid] = qMax(m_unreadOverrides.value(winner.guid, 0), sibUnread);
             }
             if (m_localReadMutationTimeMs.contains(sib)) {
-                m_localReadMutationTimeMs[winner.guid] = qMax(m_localReadMutationTimeMs.value(winner.guid, 0), m_localReadMutationTimeMs.value(sib, 0));
+                const qint64 sibMut = m_localReadMutationTimeMs.take(sib);
+                m_localReadMutationTimeMs[winner.guid] = qMax(m_localReadMutationTimeMs.value(winner.guid, 0), sibMut);
             }
             if (m_chatMessagesCache.contains(sib)) {
                 const auto sibMsgs = m_chatMessagesCache.take(sib);
