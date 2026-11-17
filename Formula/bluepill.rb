@@ -52,7 +52,7 @@ class Bluepill < Formula
   end
 
   test do
-    assert_match "bluepill-server 1.2.0", shell_output("#{bin}/bluepill-server --version")
+    assert_match "bluepill-server 1.2.1", shell_output("#{bin}/bluepill-server --version")
     help_out = shell_output("#{bin}/bluepill-server --help")
     if help_out.include?("preflight")
       assert_match "\"status\":", shell_output("#{bin}/bluepill-server preflight --no-fix")
