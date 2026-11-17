@@ -154,18 +154,40 @@ jobs:
             exit 0
           fi
           echo "Automated AUR push enabled via SSH key."
+          VER="${{ steps.vars.outputs.version }}"
+          SRC_URL="https://github.com/nertwork/bluepill/archive/refs/tags/v${VER}.tar.gz"
+          SRC_TMP="/tmp/bluepill-aur-v${VER}.tar.gz"
+          curl -fsSL "${SRC_URL}" -o "${SRC_TMP}"
+          SRC_SHA=$(sha256sum "${SRC_TMP}" | awk '{print $1}')
+          rm -f "${SRC_TMP}"
+          if [ -z "${SRC_SHA}" ]; then
+            echo "::error ::Failed to compute v${VER} archive checksum for AUR PKGBUILD"
+            exit 1
+          fi
           mkdir -p ~/.ssh
           echo "${AUR_KEY}" > ~/.ssh/aur_key
           chmod 600 ~/.ssh/aur_key
           ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
           GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/bluepill.git /tmp/aur-bluepill
-          cp pkgbuild/PKGBUILD /tmp/aur-bluepill/PKGBUILD
-          cp pkgbuild/.SRCINFO /tmp/aur-bluepill/.SRCINFO
+          cp pkgbuild/PKGBUILD.aur /tmp/aur-bluepill/PKGBUILD
+          VER="${VER}" SRC_SHA="${SRC_SHA}" python3 - <<'PY'
+          import os, pathlib, re
+          ver = os.environ["VER"]
+          sha = os.environ["SRC_SHA"]
+          p = pathlib.Path("/tmp/aur-bluepill/PKGBUILD")
+          txt = p.read_text(encoding="utf-8")
+          txt = re.sub(r'^pkgver=.*$', f'pkgver={ver}', txt, count=1, flags=re.M)
+          txt = re.sub(r'^pkgrel=.*$', 'pkgrel=1', txt, count=1, flags=re.M)
+          txt = re.sub(r"^sha256sums=\('[^']+'\)", f"sha256sums=('{sha}')", txt, count=1, flags=re.M)
+          p.write_text(txt, encoding="utf-8")
+          PY
+          chown -R builder:builder /tmp/aur-bluepill
+          su builder -c "cd /tmp/aur-bluepill && makepkg --printsrcinfo > .SRCINFO"
           cd /tmp/aur-bluepill
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add PKGBUILD .SRCINFO
           if ! git diff-index --quiet HEAD; then
-            git commit -m "chore(release): bump to v${{ steps.vars.outputs.version }}"
+            git commit -m "chore(release): bump to v${VER}"
             GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master
           fi

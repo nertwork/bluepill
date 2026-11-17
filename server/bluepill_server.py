@@ -1586,22 +1586,50 @@ class BluePillEngine:
                 ).fetchall()
                 base_set = {k for k in (self._norm_handle_key(str(r["address"] or "")) for r in base_parts) if k}
                 if len(base_set) >= 2:
-                    cand_preds = [
-                        "LOWER(TRIM(c.display_name)) = LOWER(?)",
-                        "(c.guid LIKE 'RCS;+;%' OR c.guid LIKE 'SMS;+;%' )",
-                    ]
-                    if "original_group_id" in cols:
-                        cand_preds.append("COALESCE(TRIM(c.original_group_id), '') = ''")
-                    if "group_id" in cols:
-                        cand_preds.append("COALESCE(TRIM(c.group_id), '') = ''")
-                    cand_rows = conn.execute(
-                        f"""
-                        SELECT c.ROWID AS rowid
-                        FROM chat c
-                        WHERE {" AND ".join(cand_preds)}
-                        """,
-                        (disp,),
-                    ).fetchall()
+                    if "original_group_id" in cols and "group_id" in cols:
+                        cand_rows = conn.execute(
+                            """
+                            SELECT c.ROWID AS rowid
+                            FROM chat c
+                            WHERE LOWER(TRIM(c.display_name)) = LOWER(?)
+                              AND (c.guid LIKE 'RCS;+;%' OR c.guid LIKE 'SMS;+;%' )
+                              AND COALESCE(TRIM(c.original_group_id), '') = ''
+                              AND COALESCE(TRIM(c.group_id), '') = ''
+                            """,
+                            (disp,),
+                        ).fetchall()
+                    elif "original_group_id" in cols:
+                        cand_rows = conn.execute(
+                            """
+                            SELECT c.ROWID AS rowid
+                            FROM chat c
+                            WHERE LOWER(TRIM(c.display_name)) = LOWER(?)
+                              AND (c.guid LIKE 'RCS;+;%' OR c.guid LIKE 'SMS;+;%' )
+                              AND COALESCE(TRIM(c.original_group_id), '') = ''
+                            """,
+                            (disp,),
+                        ).fetchall()
+                    elif "group_id" in cols:
+                        cand_rows = conn.execute(
+                            """
+                            SELECT c.ROWID AS rowid
+                            FROM chat c
+                            WHERE LOWER(TRIM(c.display_name)) = LOWER(?)
+                              AND (c.guid LIKE 'RCS;+;%' OR c.guid LIKE 'SMS;+;%' )
+                              AND COALESCE(TRIM(c.group_id), '') = ''
+                            """,
+                            (disp,),
+                        ).fetchall()
+                    else:
+                        cand_rows = conn.execute(
+                            """
+                            SELECT c.ROWID AS rowid
+                            FROM chat c
+                            WHERE LOWER(TRIM(c.display_name)) = LOWER(?)
+                              AND (c.guid LIKE 'RCS;+;%' OR c.guid LIKE 'SMS;+;%' )
+                            """,
+                            (disp,),
+                        ).fetchall()
                     matched_ids: List[int] = []
                     for cr in cand_rows:
                         crid = int(cr["rowid"])

@@ -4775,18 +4775,38 @@ private slots:
 
         // Verify marking a fresh un-consolidated sibling unread preserves qint64 unread override after unification
         const QString preUnreadSib = QStringLiteral("RCS;+;chat_pre_unread_sib");
-        QJsonObject preSibObj{
+        const qint64 futureTs = QDateTime::currentMSecsSinceEpoch() + 60000;
+        QJsonObject preSibUnkeyed{
             {QStringLiteral("guid"), preUnreadSib},
             {QStringLiteral("chatIdentifier"), QStringLiteral("chat_pre_unread_sib")},
             {QStringLiteral("displayName"), QStringLiteral("Weekend Hike Crew")},
-            {QStringLiteral("originalGroupId"), sharedOrigGroupId},
             {QStringLiteral("originalROWID"), 100},
             {QStringLiteral("style"), 43}
         };
+        QJsonObject preSibKeyed = preSibUnkeyed;
+        preSibKeyed.insert(QStringLiteral("originalGroupId"), sharedOrigGroupId);
+        QJsonObject preSibMsg{
+            {QStringLiteral("guid"), QStringLiteral("rcs-msg-pre-unread-1")},
+            {QStringLiteral("text"), QStringLiteral("Unread ping before unification")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("isRead"), true},
+            {QStringLiteral("dateRead"), futureTs},
+            {QStringLiteral("dateCreated"), futureTs},
+            {QStringLiteral("chats"), QJsonArray{preSibUnkeyed}}
+        };
+        QJsonObject cActiveWinMsg{
+            {QStringLiteral("guid"), QStringLiteral("rcs-msg-active-win-1")},
+            {QStringLiteral("text"), QStringLiteral("Latest active message")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("dateCreated"), futureTs + 1000},
+            {QStringLiteral("chats"), QJsonArray{cActive}}
+        };
         b.markChatRead(activeRcsGuid);
-        b.ingestChatsMetadataForTest(QJsonArray{preSibObj});
+        b.ingestChatsMetadataForTest(QJsonArray{cStale, cActive, cSms, preSibUnkeyed, cOther, cDm, unkeyedA, unkeyedB});
+        b.ingestMessagesForTest(QJsonArray{preSibMsg, cActiveWinMsg}, false);
+        QVERIFY(!b.isSameConversation(preUnreadSib, activeRcsGuid));
         b.markChatUnread(preUnreadSib);
-        b.ingestChatsMetadataForTest(QJsonArray{cStale, cActive, cSms, preSibObj, cOther, cDm, unkeyedA, unkeyedB});
+        b.ingestChatsMetadataForTest(QJsonArray{cStale, cActive, cSms, preSibKeyed, cOther, cDm, unkeyedA, unkeyedB});
         QVERIFY(b.isSameConversation(preUnreadSib, activeRcsGuid));
         QCOMPARE(b.resolveCanonicalChatGuid(preUnreadSib), b.resolveCanonicalChatGuid(activeRcsGuid));
         const QString winnerGuid = b.resolveCanonicalChatGuid(activeRcsGuid);
