@@ -183,6 +183,7 @@ jobs:
           PY
           chown -R builder:builder /tmp/aur-bluepill
           su builder -c "cd /tmp/aur-bluepill && makepkg --printsrcinfo > .SRCINFO"
+          chown -R root:root /tmp/aur-bluepill
           cd /tmp/aur-bluepill
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
