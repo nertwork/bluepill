@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BluePill Headless macOS Relay Server (`bluepill-server` v1.2.0)
+BluePill Headless macOS Relay Server (`bluepill-server` v1.2.1)
 Zero-Electron, single-file Python 3 stdlib relay for Apple Messages (`chat.db`),
 macOS Contacts (`AddressBook-v22.abcddb`), Pinned Chats (`com.apple.messages.pinning.plist`),
 Engine.IO v4 / Socket.IO v4 push events, and Direct SSH JSON-RPC (`stdio`) mode.
@@ -50,7 +50,7 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 APPLE_EPOCH_OFFSET_SEC = 978307200
 APPLE_EPOCH_OFFSET_MS = 978307200000
 
@@ -469,6 +469,9 @@ class BluePillEngine:
         self._cancelled_scheduled_ids: set[str] = set()
         self._inflight_scheduled_ids: set[str] = set()
         self._sent_history: List[Dict[str, Any]] = []
+        self._tracked_outgoing_lock = threading.Lock()
+        # rowid -> (error, is_sent, is_delivered, date_read, track_until_ts)
+        self._tracked_outgoing: Dict[int, Tuple[int, bool, bool, int, float]] = {}
         self._load_deleted_state()
         self._load_chat_state()
         self._load_scheduled_messages()
@@ -1027,6 +1030,81 @@ class BluePillEngine:
         t = threading.Thread(target=self._wal_poll_loop, daemon=True)
         t.start()
 
+    def _register_tracked_outgoing(self, msg: Dict[str, Any], ttl_s: float = 180.0) -> None:
+        try:
+            rowid = int(msg.get("originalROWID") or 0)
+        except (TypeError, ValueError):
+            return
+        if rowid <= 0 or not msg.get("isFromMe"):
+            return
+        state = (
+            int(msg.get("error") or 0),
+            bool(msg.get("isSent")),
+            bool(msg.get("isDelivered")),
+            int(msg.get("dateRead") or 0),
+            time.time() + ttl_s,
+        )
+        with self._tracked_outgoing_lock:
+            self._tracked_outgoing[rowid] = state
+
+    def _poll_tracked_outgoing_updates(self, conn: sqlite3.Connection) -> None:
+        now = time.time()
+        with self._tracked_outgoing_lock:
+            expired = [rid for rid, st in self._tracked_outgoing.items() if now > st[4]]
+            for rid in expired:
+                self._tracked_outgoing.pop(rid, None)
+            tracked_ids = list(self._tracked_outgoing.keys())
+        if not tracked_ids:
+            return
+
+        placeholders = ",".join("?" for _ in tracked_ids)
+        rows = conn.execute(
+            f"""
+            SELECT ROWID, error, is_sent, is_delivered, date_read
+            FROM message
+            WHERE ROWID IN ({placeholders})
+            """,
+            tracked_ids,
+        ).fetchall()
+        changed_ids: List[int] = []
+        for r in rows:
+            rid = int(r["ROWID"])
+            cur_err = int(r["error"] or 0)
+            cur_sent = bool(r["is_sent"])
+            cur_deliv = bool(r["is_delivered"])
+            cur_read = int(r["date_read"] or 0)
+            with self._tracked_outgoing_lock:
+                prev = self._tracked_outgoing.get(rid)
+                if not prev:
+                    continue
+                if (cur_err, cur_sent, cur_deliv, cur_read) != prev[:4]:
+                    changed_ids.append(rid)
+                    self._tracked_outgoing[rid] = (cur_err, cur_sent, cur_deliv, cur_read, prev[4])
+                if cur_err != 0 or cur_read > 0:
+                    self._tracked_outgoing.pop(rid, None)
+
+        for rid in changed_ids:
+            try:
+                updated_msgs = self.query_messages(
+                    {
+                        "limit": 1,
+                        "where": [{"statement": "message.ROWID = :rid", "args": {"rid": rid}}],
+                    }
+                )
+                for um in updated_msgs:
+                    err_code = int(um.get("error") or 0)
+                    if err_code != 0:
+                        self.logger.warning(
+                            "[wal] delivery failure detected rowid=%d guid=%s error=%d",
+                            rid,
+                            um.get("guid") or "",
+                            err_code,
+                        )
+                        self.broadcast_socketio("message-send-error", um)
+                    self.broadcast_socketio("updated-message", um)
+            except Exception as exc:
+                self.logger.warning("[wal] failed broadcasting update for rowid=%d: %s", rid, exc)
+
     def _wal_poll_loop(self) -> None:
         while not self._stop_event.is_set():
             time.sleep(1.0)
@@ -1034,9 +1112,12 @@ class BluePillEngine:
                 continue
             try:
                 conn = self._open_chat_db()
-                row = conn.execute("SELECT COALESCE(MAX(ROWID), 0) FROM message;").fetchone()
-                cur_max = int(row[0] or 0) if row else 0
-                conn.close()
+                try:
+                    row = conn.execute("SELECT COALESCE(MAX(ROWID), 0) FROM message;").fetchone()
+                    cur_max = int(row[0] or 0) if row else 0
+                    self._poll_tracked_outgoing_updates(conn)
+                finally:
+                    conn.close()
                 if self._last_max_rowid == 0:
                     self._last_max_rowid = cur_max
                     continue
@@ -1051,6 +1132,8 @@ class BluePillEngine:
                     for m in reversed(new_msgs):
                         if int(m.get("originalROWID") or 0) <= prev_max:
                             continue
+                        if m.get("isFromMe") and int(m.get("error") or 0) == 0 and not m.get("isDelivered"):
+                            self._register_tracked_outgoing(m)
                         self.broadcast_socketio("new-message", m)
                         emitted += 1
                     if emitted > 0:
@@ -1407,6 +1490,141 @@ class BluePillEngine:
                     )
         return [p for p in pins if p.get("guid") not in self.deleted_chat_guids]
 
+    @staticmethod
+    def _chat_table_cols(conn: sqlite3.Connection) -> set[str]:
+        try:
+            return {str(row[1]) for row in conn.execute("PRAGMA table_info(chat);").fetchall()}
+        except sqlite3.Error:
+            return set()
+
+    @staticmethod
+    def _chat_merge_key(chat_row: Any) -> str:
+        style = int(chat_row["style"] if "style" in chat_row.keys() else 45 or 45)
+        guid = str(chat_row["guid"] or "")
+        is_group = (style == 43) or (";+;" in guid)
+        if not is_group:
+            return ""
+        ogid = str(chat_row["original_group_id"] or "").strip() if "original_group_id" in chat_row.keys() else ""
+        if ogid:
+            return f"orig:{ogid}"
+        gid = str(chat_row["group_id"] or "").strip() if "group_id" in chat_row.keys() else ""
+        if gid:
+            return f"grp:{gid}"
+        return ""
+
+    def _get_sibling_chat_rows(self, conn: sqlite3.Connection, chat_guid: str) -> List[sqlite3.Row]:
+        cg = (chat_guid or "").strip()
+        if not cg:
+            return []
+        cols = self._chat_table_cols(conn)
+        ogid_expr = "c.original_group_id AS original_group_id" if "original_group_id" in cols else "'' AS original_group_id"
+        gid_expr = "c.group_id AS group_id" if "group_id" in cols else "'' AS group_id"
+        base = conn.execute(
+            f"""
+            SELECT c.ROWID AS rowid, c.guid AS guid, c.style AS style, c.service_name AS service_name,
+                   c.is_archived AS is_archived, {gid_expr}, {ogid_expr}
+            FROM chat c
+            WHERE c.guid = ?
+            LIMIT 1
+            """,
+            (cg,),
+        ).fetchone()
+        if not base:
+            return []
+        style = int(base["style"] or 45)
+        is_group = (style == 43) or (";+;" in cg)
+        if not is_group:
+            return [base]
+        ogid = str(base["original_group_id"] or "").strip()
+        gid = str(base["group_id"] or "").strip()
+        where_parts: List[str] = ["c.guid = ?"]
+        params: List[Any] = [cg]
+        if ogid and "original_group_id" in cols:
+            where_parts.append("(c.original_group_id = ? AND (c.style = 43 OR c.guid LIKE '%;+;%'))")
+            params.append(ogid)
+        elif gid and "group_id" in cols:
+            where_parts.append("(c.group_id = ? AND (c.style = 43 OR c.guid LIKE '%;+;%'))")
+            params.append(gid)
+        rows = conn.execute(
+            f"""
+            SELECT c.ROWID AS rowid, c.guid AS guid, c.style AS style, c.service_name AS service_name,
+                   c.is_archived AS is_archived, {gid_expr}, {ogid_expr},
+                   COALESCE(MAX(cmj.message_date), 0) AS last_message_date,
+                   (SELECT m2.error FROM chat_message_join cmj2
+                    JOIN message m2 ON m2.ROWID = cmj2.message_id
+                    WHERE cmj2.chat_id = c.ROWID AND m2.is_from_me = 1
+                    ORDER BY m2.ROWID DESC LIMIT 1) AS last_out_error
+            FROM chat c
+            LEFT JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+            WHERE {" OR ".join(where_parts)}
+            GROUP BY c.ROWID
+            ORDER BY c.is_archived ASC,
+                     CASE WHEN c.guid LIKE 'SMS;%' THEN 0 ELSE 1 END DESC,
+                     CASE WHEN COALESCE(last_out_error, 0) = 0 THEN 1 ELSE 0 END DESC,
+                     COALESCE(MAX(cmj.message_date), 0) DESC,
+                     c.ROWID DESC
+            """,
+            params,
+        ).fetchall()
+        return rows or [base]
+
+    def _resolve_active_send_chat_guid(self, chat_guid: str) -> str:
+        cg = (chat_guid or "").strip()
+        if not cg or not os.path.exists(self.db_path):
+            return cg
+        try:
+            conn = self._open_chat_db()
+            try:
+                siblings = self._get_sibling_chat_rows(conn, cg)
+                if siblings:
+                    best = str(siblings[0]["guid"] or "").strip()
+                    if best:
+                        return best
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        return cg
+
+    def _expand_chat_guids_for_query(self, conn: sqlite3.Connection, chat_guid: str) -> List[str]:
+        cg = (chat_guid or "").strip()
+        if not cg:
+            return []
+        try:
+            siblings = self._get_sibling_chat_rows(conn, cg)
+            guids = [str(r["guid"] or "").strip() for r in siblings if str(r["guid"] or "").strip()]
+            if guids:
+                return guids
+        except Exception:
+            pass
+        return [cg]
+
+    def _message_exists_in_chat(self, msg_guid: str, chat_guid: str) -> bool:
+        mg = (msg_guid or "").strip()
+        cg = (chat_guid or "").strip()
+        if not mg or not cg or not os.path.exists(self.db_path):
+            return True
+        norm_mg = mg.split("/", 1)[-1] if "/" in mg else mg
+        try:
+            conn = self._open_chat_db()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM message m
+                    JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                    JOIN chat c ON c.ROWID = cmj.chat_id
+                    WHERE c.guid = ? AND (m.guid = ? OR m.guid = ?)
+                    LIMIT 1
+                    """,
+                    (cg, mg, norm_mg),
+                ).fetchone()
+                return row is not None
+            finally:
+                conn.close()
+        except Exception:
+            return True
+
     def query_chats(
         self,
         limit: int = 250,
@@ -1416,11 +1634,27 @@ class BluePillEngine:
     ) -> List[Dict[str, Any]]:
         conn = self._open_chat_db()
         try:
+            cols = self._chat_table_cols(conn)
+            ogid_select = "c.original_group_id AS original_group_id" if "original_group_id" in cols else "'' AS original_group_id"
+            gid_select = "c.group_id AS group_id" if "group_id" in cols else "'' AS group_id"
+
             params: List[Any] = []
             where_sql = ""
+            expanded_guids: List[str] = []
             if chat_guid:
-                where_sql = "WHERE c.guid = ?"
-                params.append(chat_guid)
+                expanded_guids = self._expand_chat_guids_for_query(conn, chat_guid)
+                if len(expanded_guids) > 1:
+                    ph = ",".join("?" for _ in expanded_guids)
+                    where_sql = f"WHERE c.guid IN ({ph})"
+                    params.extend(expanded_guids)
+                else:
+                    where_sql = "WHERE c.guid = ?"
+                    params.append(chat_guid)
+
+            fetch_limit = max(1, min(int(limit), 1000))
+            fetch_offset = max(0, int(offset))
+            raw_limit = fetch_limit if chat_guid else min(2000, max(fetch_limit * 3, fetch_limit + fetch_offset + 200))
+            raw_offset = 0 if not chat_guid else fetch_offset
 
             sql = f"""
                 SELECT
@@ -1431,7 +1665,8 @@ class BluePillEngine:
                     c.service_name AS service_name,
                     c.display_name AS display_name,
                     c.is_archived AS is_archived,
-                    c.group_id AS group_id,
+                    {gid_select},
+                    {ogid_select},
                     c.last_read_message_timestamp AS last_read_message_timestamp,
                     MAX(cmj.message_date) AS last_message_date
                 FROM chat c
@@ -1441,7 +1676,7 @@ class BluePillEngine:
                 ORDER BY COALESCE(MAX(cmj.message_date), 0) DESC, c.ROWID DESC
                 LIMIT ? OFFSET ?
             """
-            params.extend([max(1, min(int(limit), 1000)), max(0, int(offset))])
+            params.extend([raw_limit, raw_offset])
             rows = conn.execute(sql, params).fetchall()
             if not rows:
                 return []
@@ -1475,14 +1710,15 @@ class BluePillEngine:
 
             pinned_guids = {p["guid"] for p in self.query_pinned_chats()}
 
-            result: List[Dict[str, Any]] = []
+            raw_entries: List[Dict[str, Any]] = []
             for r in rows:
                 cid = int(r["rowid"])
                 guid = r["guid"] or ""
                 if guid in self.deleted_chat_guids:
                     continue
                 last_read_ms = apple_ts_to_epoch_ms(r["last_read_message_timestamp"])
-                result.append(
+                last_msg_ms = apple_ts_to_epoch_ms(r["last_message_date"])
+                raw_entries.append(
                     {
                         "originalROWID": cid,
                         "guid": guid,
@@ -1493,16 +1729,104 @@ class BluePillEngine:
                         "isMuted": guid in self.muted_chat_guids,
                         "displayName": self.chat_display_names_override.get(guid, r["display_name"] or ""),
                         "groupId": r["group_id"] or "",
+                        "originalGroupId": r["original_group_id"] or "",
                         "lastReadMessageTimestamp": last_read_ms,
+                        "lastMessageDate": last_msg_ms,
                         "properties": [],
                         "participants": (
                             [{"address": a, "service": r["service_name"] or "iMessage"} for a in self.group_participants_override[guid]]
                             if guid in self.group_participants_override
                             else participants_by_chat.get(cid, [])
                         ),
+                        "_mergeKey": self._chat_merge_key(r),
                     }
                 )
-            return result
+
+            if not raw_entries:
+                return []
+
+            # Unify sibling group chats sharing originalGroupId / groupId so RCS/SMS session splits appear as one chat
+            buckets: Dict[str, List[Dict[str, Any]]] = {}
+            order_keys: List[str] = []
+            for item in raw_entries:
+                mk = item.pop("_mergeKey", "")
+                key = mk if mk else f"single:{item['guid']}"
+                if key not in buckets:
+                    buckets[key] = []
+                    order_keys.append(key)
+                buckets[key].append(item)
+
+            unified: List[Dict[str, Any]] = []
+            for key in order_keys:
+                group_items = buckets[key]
+                if len(group_items) == 1:
+                    only = group_items[0]
+                    only["siblingChatGuids"] = [only["guid"]]
+                    unified.append(only)
+                    continue
+
+                def _canon_rank(c: Dict[str, Any]) -> Tuple[int, int, int, int]:
+                    g = str(c.get("guid") or "")
+                    svc_score = 0 if g.startswith("SMS;") else 1
+                    return (
+                        0 if c.get("isArchived") else 1,
+                        svc_score,
+                        int(c.get("lastMessageDate") or 0),
+                        int(c.get("originalROWID") or 0),
+                    )
+
+                ranked = sorted(group_items, key=_canon_rank, reverse=True)
+                best = dict(ranked[0])
+                if chat_guid and any(c.get("guid") == chat_guid for c in ranked):
+                    requested_item = next(c for c in ranked if c.get("guid") == chat_guid)
+                    # Keep canonical metadata from requested chat when explicitly addressed by GUID, while exposing sibling list + activeTarget
+                    best = dict(requested_item)
+                    best["activeSendChatGuid"] = ranked[0]["guid"]
+
+                sibling_guids = [str(c.get("guid") or "") for c in ranked if c.get("guid")]
+                best["siblingChatGuids"] = sibling_guids
+                best.setdefault("activeSendChatGuid", ranked[0]["guid"])
+                best["isArchived"] = all(bool(c.get("isArchived")) for c in ranked)
+                best["isPinned"] = any(bool(c.get("isPinned")) for c in ranked)
+                best["isMuted"] = any(bool(c.get("isMuted")) for c in ranked)
+                best["lastReadMessageTimestamp"] = max(int(c.get("lastReadMessageTimestamp") or 0) for c in ranked)
+                best["lastMessageDate"] = max(int(c.get("lastMessageDate") or 0) for c in ranked)
+                if not str(best.get("displayName") or "").strip():
+                    for c in ranked:
+                        dn = str(c.get("displayName") or "").strip()
+                        if dn:
+                            best["displayName"] = dn
+                            break
+                if not str(best.get("originalGroupId") or "").strip():
+                    for c in ranked:
+                        og = str(c.get("originalGroupId") or "").strip()
+                        if og:
+                            best["originalGroupId"] = og
+                            break
+                if not str(best.get("groupId") or "").strip():
+                    for c in ranked:
+                        gi = str(c.get("groupId") or "").strip()
+                        if gi:
+                            best["groupId"] = gi
+                            break
+
+                merged_parts: List[Dict[str, Any]] = []
+                seen_addr: set[str] = set()
+                for c in ranked:
+                    for p in c.get("participants") or []:
+                        addr = str(p.get("address") or "").strip()
+                        norm_addr = re.sub(r"\D", "", addr)[-10:] if ("@" not in addr and any(ch.isdigit() for ch in addr)) else addr.lower()
+                        dedup_k = norm_addr or addr.lower()
+                        if dedup_k and dedup_k not in seen_addr:
+                            seen_addr.add(dedup_k)
+                            merged_parts.append(p)
+                best["participants"] = merged_parts
+                unified.append(best)
+
+            if chat_guid:
+                return unified[:1]
+            unified.sort(key=lambda c: (int(c.get("lastMessageDate") or 0), int(c.get("originalROWID") or 0)), reverse=True)
+            return unified[fetch_offset : fetch_offset + fetch_limit]
         finally:
             conn.close()
 
@@ -1515,10 +1839,14 @@ class BluePillEngine:
         placeholders = ",".join("?" for _ in msg_ids)
 
         chats_by_msg: Dict[int, List[Dict[str, Any]]] = {}
+        chat_cols = self._chat_table_cols(conn)
+        c_gid_expr = "c.group_id AS group_id" if "group_id" in chat_cols else "'' AS group_id"
+        c_ogid_expr = "c.original_group_id AS original_group_id" if "original_group_id" in chat_cols else "'' AS original_group_id"
         c_rows = conn.execute(
             f"""
             SELECT cmj.message_id, c.ROWID AS chat_rowid, c.guid, c.chat_identifier,
-                   c.display_name, c.style, c.is_archived, c.last_read_message_timestamp
+                   c.display_name, c.style, c.is_archived, c.last_read_message_timestamp,
+                   {c_gid_expr}, {c_ogid_expr}
             FROM chat_message_join cmj
             JOIN chat c ON c.ROWID = cmj.chat_id
             WHERE cmj.message_id IN ({placeholders})
@@ -1533,6 +1861,8 @@ class BluePillEngine:
                     "guid": cr["guid"] or "",
                     "chatIdentifier": cr["chat_identifier"] or "",
                     "displayName": cr["display_name"] or "",
+                    "groupId": cr["group_id"] or "",
+                    "originalGroupId": cr["original_group_id"] or "",
                     "style": int(cr["style"] or 45),
                     "isArchived": bool(cr["is_archived"]),
                     "lastReadMessageTimestamp": apple_ts_to_epoch_ms(cr["last_read_message_timestamp"]),
@@ -1713,8 +2043,14 @@ class BluePillEngine:
 
             if chat_guid:
                 join_chat = True
-                clauses.append("chat.guid = ?")
-                params.append(chat_guid)
+                expanded = self._expand_chat_guids_for_query(conn, chat_guid)
+                if len(expanded) > 1:
+                    ph = ",".join("?" for _ in expanded)
+                    clauses.append(f"chat.guid IN ({ph})")
+                    params.extend(expanded)
+                else:
+                    clauses.append("chat.guid = ?")
+                    params.append(chat_guid)
 
             if after_ms > 0:
                 clauses.append("message.date >= ?")
@@ -1751,6 +2087,13 @@ class BluePillEngine:
                             sp.strip(),
                         )
                         if m and m.group(1) in allowed_cols and m.group(3) in args:
+                            if m.group(1) == "chat.guid" and m.group(2) == "=":
+                                expanded_w = self._expand_chat_guids_for_query(conn, str(args[m.group(3)]))
+                                if len(expanded_w) > 1:
+                                    ph = ",".join("?" for _ in expanded_w)
+                                    clauses.append(f"chat.guid IN ({ph})")
+                                    params.extend(expanded_w)
+                                    continue
                             clauses.append(f"{allowed_cols[m.group(1)]} {m.group(2)} ?")
                             params.append(args[m.group(3)])
 
@@ -1818,12 +2161,14 @@ class BluePillEngine:
                 ]
             )
 
+            group_by_sql = "GROUP BY message.ROWID" if join_chat else ""
             sql = f"""
                 SELECT {", ".join(select_exprs)}
                 FROM message
                 LEFT JOIN handle h ON h.ROWID = message.handle_id
                 {join_sql}
                 {where_sql}
+                {group_by_sql}
                 ORDER BY message.date {sort_dir}, message.ROWID {sort_dir}
                 LIMIT ? OFFSET ?
             """
@@ -2140,22 +2485,27 @@ class BluePillEngine:
                     if sock in self._helper_clients:
                         self._helper_clients.remove(sock)
         identifier = ""
+        helper_err = ""
         if sent and wait_timeout > 0:
             ev.wait(timeout=wait_timeout)
             with self._tx_lock:
                 res = self._tx_results.pop(tx_id, {})
                 self._tx_events.pop(tx_id, None)
             identifier = str(res.get("identifier") or res.get("guid") or "").strip()
+            helper_err = str(res.get("error") or "").strip()
+            if helper_err and not identifier:
+                sent = False
         else:
             with self._tx_lock:
                 self._tx_events.pop(tx_id, None)
                 self._tx_results.pop(tx_id, None)
         self.logger.info(
-            "[helper] action=%s tx=%s sent=%s identifier=%s",
+            "[helper] action=%s tx=%s sent=%s identifier=%s error=%s",
             action,
             tx_id[:8],
             sent,
             identifier or "-",
+            helper_err or "-",
         )
         return sent, identifier
 
@@ -2188,6 +2538,16 @@ class BluePillEngine:
     ) -> Optional[Dict[str, Any]]:
         if not os.path.exists(self.db_path):
             return None
+        allowed_guids: set[str] = {chat_guid} if chat_guid else set()
+        if chat_guid:
+            try:
+                conn_exp = self._open_chat_db()
+                try:
+                    allowed_guids.update(self._expand_chat_guids_for_query(conn_exp, chat_guid))
+                finally:
+                    conn_exp.close()
+            except Exception:
+                pass
         deadline = time.time() + timeout_s
         best_candidate: Optional[Dict[str, Any]] = None
         while time.time() < deadline:
@@ -2204,7 +2564,7 @@ class BluePillEngine:
                         pass
                     else:
                         m_chats = m.get("chats") or []
-                        if chat_guid and m_chats and not any(c.get("guid") == chat_guid for c in m_chats):
+                        if allowed_guids and m_chats and not any(c.get("guid") in allowed_guids for c in m_chats):
                             continue
                         if expected_text and str(m.get("text") or "").strip() != expected_text.strip():
                             if not require_attachment:
@@ -2225,7 +2585,14 @@ class BluePillEngine:
 
     def send_text(self, body: Dict[str, Any]) -> Dict[str, Any]:
         t0 = time.time()
-        chat_guid = (body.get("chatGuid") or "").strip()
+        requested_chat_guid = (body.get("chatGuid") or "").strip()
+        chat_guid = self._resolve_active_send_chat_guid(requested_chat_guid)
+        if requested_chat_guid and chat_guid != requested_chat_guid:
+            self.logger.info(
+                "[send_text] routed superseded chat=%s -> active_sibling=%s",
+                requested_chat_guid,
+                chat_guid,
+            )
         message = (body.get("message") or "").strip()
         temp_guid = (body.get("tempGuid") or f"temp-{uuid.uuid4()}").strip()
         effect_id = (body.get("effectId") or "").strip()
@@ -2233,6 +2600,18 @@ class BluePillEngine:
         selected_guid = (body.get("selectedMessageGuid") or "").strip()
         part_index = int(body.get("partIndex", 0) or 0)
         method_req = (body.get("method") or "private-api").strip().lower()
+
+        effective_selected_guid = selected_guid
+        effective_part_index = part_index
+        if effective_selected_guid and requested_chat_guid and chat_guid != requested_chat_guid:
+            if not self._message_exists_in_chat(effective_selected_guid, chat_guid):
+                self.logger.info(
+                    "[send_text] cross-sibling reply normalized (selectedMessageGuid=%s not in %s)",
+                    effective_selected_guid,
+                    chat_guid,
+                )
+                effective_selected_guid = ""
+                effective_part_index = 0
 
         pre_max_rowid = self._get_max_message_rowid()
         sent = False
@@ -2254,8 +2633,8 @@ class BluePillEngine:
                     "message": message,
                     "subject": subject,
                     "effectId": effect_id,
-                    "selectedMessageGuid": selected_guid,
-                    "partIndex": part_index,
+                    "selectedMessageGuid": effective_selected_guid,
+                    "partIndex": effective_part_index,
                     "ddScan": 1,
                 },
                 wait_timeout=0.8,
@@ -2282,6 +2661,22 @@ class BluePillEngine:
             require_attachment=False,
             timeout_s=2.5 if (sent and os.path.exists(self.db_path)) else 0.05,
         )
+        # Brief settle window if chat.db row just inserted with isSent=0,error=0 so immediate carrier rejections surface synchronously
+        if db_msg is not None and os.path.exists(self.db_path):
+            rid = int(db_msg.get("originalROWID") or 0)
+            if rid > 0 and int(db_msg.get("error") or 0) == 0 and not db_msg.get("isSent"):
+                settle_deadline = time.time() + 0.35
+                while time.time() < settle_deadline:
+                    time.sleep(0.07)
+                    refreshed = self.query_messages(
+                        {"limit": 1, "where": [{"statement": "message.ROWID = :rid", "args": {"rid": rid}}]}
+                    )
+                    if refreshed:
+                        db_msg = refreshed[0]
+                        db_msg["tempGuid"] = temp_guid
+                        if int(db_msg.get("error") or 0) != 0 or db_msg.get("isSent") or db_msg.get("isDelivered"):
+                            break
+
         elapsed_ms = int((time.time() - t0) * 1000)
         if db_msg is not None:
             db_msg["tempGuid"] = temp_guid
@@ -2293,16 +2688,23 @@ class BluePillEngine:
                 if not db_msg.get("expressiveSendStyleId"):
                     db_msg["expressiveSendStyleId"] = effect_id
                 self._save_chat_state()
+            self._register_tracked_outgoing(db_msg)
             self.logger.info(
-                "[send_text] chat=%s tempGuid=%s method=%s guid=%s rowid=%s elapsed_ms=%d",
+                "[send_text] chat=%s tempGuid=%s method=%s guid=%s rowid=%s error=%s isSent=%s elapsed_ms=%d",
                 chat_guid,
                 temp_guid,
                 used_method,
                 db_msg.get("guid"),
                 db_msg.get("originalROWID"),
+                db_msg.get("error"),
+                db_msg.get("isSent"),
                 elapsed_ms,
             )
-            self.broadcast_socketio("new-message", db_msg)
+            if int(db_msg.get("error") or 0) != 0:
+                self.broadcast_socketio("message-send-error", db_msg)
+                self.broadcast_socketio("updated-message", db_msg)
+            else:
+                self.broadcast_socketio("new-message", db_msg)
             return db_msg
 
         if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
@@ -2344,8 +2746,8 @@ class BluePillEngine:
             "isDelivered": bool(sent),
             "isSent": True,
             "expressiveSendStyleId": effect_id,
-            "threadOriginatorGuid": selected_guid,
-            "service": "SMS" if chat_guid.startswith("SMS;") else "iMessage",
+            "threadOriginatorGuid": effective_selected_guid,
+            "service": "RCS" if chat_guid.startswith("RCS;") else ("SMS" if chat_guid.startswith("SMS;") else "iMessage"),
         }
         self.logger.info(
             "[send_text] synthetic fallback chat=%s tempGuid=%s method=%s guid=%s elapsed_ms=%d",
@@ -2363,7 +2765,8 @@ class BluePillEngine:
 
     def send_attachment(self, fields: Dict[str, Any]) -> Dict[str, Any]:
         t0 = time.time()
-        chat_guid = str(fields.get("chatGuid") or "").strip()
+        requested_chat_guid = str(fields.get("chatGuid") or "").strip()
+        chat_guid = self._resolve_active_send_chat_guid(requested_chat_guid)
         temp_guid = str(fields.get("tempGuid") or f"temp-att-{uuid.uuid4()}").strip()
         raw_name = str(fields.get("name") or "attachment.png").strip()
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(raw_name)) or "attachment.png"
@@ -2541,7 +2944,7 @@ class BluePillEngine:
             "isRead": True,
             "isDelivered": bool(sent or sys.platform != "darwin"),
             "isSent": True,
-            "service": "SMS" if chat_guid.startswith("SMS;") else "iMessage",
+            "service": "RCS" if chat_guid.startswith("RCS;") else ("SMS" if chat_guid.startswith("SMS;") else "iMessage"),
         }
         self.logger.info(
             "[send_attachment] synthetic fallback chat=%s tempGuid=%s file=%s bytes=%d method=%s guid=%s elapsed_ms=%d",
@@ -2557,7 +2960,8 @@ class BluePillEngine:
         return msg_obj
 
     def send_reaction(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        chat_guid = (body.get("chatGuid") or "").strip()
+        requested_chat_guid = (body.get("chatGuid") or "").strip()
+        chat_guid = self._resolve_active_send_chat_guid(requested_chat_guid)
         selected_guid = (body.get("selectedMessageGuid") or "").strip()
         reaction = (body.get("reaction") or "love").strip()
         part_index = int(body.get("partIndex", 0) or 0)
@@ -2576,10 +2980,15 @@ class BluePillEngine:
             "-emphasize": 3004,
             "-question": 3005,
         }
+        target_react_chat = chat_guid
+        if requested_chat_guid and chat_guid != requested_chat_guid and selected_guid:
+            if not self._message_exists_in_chat(selected_guid, chat_guid) and self._message_exists_in_chat(selected_guid, requested_chat_guid):
+                # Reactions bind to the specific chat row containing selectedMessageGuid
+                target_react_chat = requested_chat_guid
         self._send_helper_payload(
             "send-reaction",
             {
-                "chatGuid": chat_guid,
+                "chatGuid": target_react_chat,
                 "selectedMessageGuid": selected_guid,
                 "reactionType": reaction,
                 "partIndex": part_index,
@@ -2588,7 +2997,7 @@ class BluePillEngine:
         now_ms = int(time.time() * 1000)
         return {
             "guid": f"react-{uuid.uuid4()}",
-            "chats": [{"guid": chat_guid}],
+            "chats": [{"guid": target_react_chat}],
             "associatedMessageGuid": f"p:{part_index}/{selected_guid}",
             "associatedMessageType": reaction_codes.get(reaction, 2000),
             "isFromMe": True,
@@ -2623,11 +3032,22 @@ class BluePillEngine:
         return {"guid": msg_guid, "text": "", "dateRetracted": now_ms}
 
     def mark_chat_read(self, chat_guid: str, read: bool = True) -> Dict[str, Any]:
-        self._send_helper_payload(
-            "mark-chat-read" if read else "mark-chat-unread",
-            {"chatGuid": chat_guid},
-        )
-        return {"chatGuid": chat_guid, "read": read}
+        guids_to_mark = [chat_guid]
+        if os.path.exists(self.db_path):
+            try:
+                conn = self._open_chat_db()
+                try:
+                    expanded = self._expand_chat_guids_for_query(conn, chat_guid)
+                    if expanded:
+                        guids_to_mark = expanded
+                finally:
+                    conn.close()
+            except Exception:
+                pass
+        action = "mark-chat-read" if read else "mark-chat-unread"
+        for cg in guids_to_mark:
+            self._send_helper_payload(action, {"chatGuid": cg})
+        return {"chatGuid": chat_guid, "read": read, "siblingChatGuids": guids_to_mark}
 
     def delete_chat(self, chat_guid: str) -> Dict[str, Any]:
         cg = (chat_guid or "").strip()
@@ -3019,9 +3439,16 @@ class BluePillEngine:
                 try:
                     params: List[Any] = [f"%{q}%"]
                     chat_clause = ""
+                    expanded_cg: List[str] = []
                     if cg:
-                        chat_clause = " AND EXISTS (SELECT 1 FROM chat_message_join cmj JOIN chat c ON c.ROWID = cmj.chat_id WHERE cmj.message_id = message.ROWID AND c.guid = ?)"
-                        params.append(cg)
+                        expanded_cg = self._expand_chat_guids_for_query(conn, cg)
+                        if len(expanded_cg) > 1:
+                            ph = ",".join("?" for _ in expanded_cg)
+                            chat_clause = f" AND EXISTS (SELECT 1 FROM chat_message_join cmj JOIN chat c ON c.ROWID = cmj.chat_id WHERE cmj.message_id = message.ROWID AND c.guid IN ({ph}))"
+                            params.extend(expanded_cg)
+                        else:
+                            chat_clause = " AND EXISTS (SELECT 1 FROM chat_message_join cmj JOIN chat c ON c.ROWID = cmj.chat_id WHERE cmj.message_id = message.ROWID AND c.guid = ?)"
+                            params.append(cg)
                     params.append(lim)
                     rows = conn.execute(
                         f"""
@@ -5155,7 +5582,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill Web UI</span>
-      <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.2.0 · Zero-Electron macOS Relay</span>
+      <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.2.1 · Zero-Electron macOS Relay</span>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <button onclick="openNotesModal()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;display:flex;align-items:center;gap:4px;">📝 Notes</button>
@@ -7355,6 +7782,69 @@ def run_selftest(engine: BluePillEngine) -> int:
         assert any(e.get("id") == "evt-near-249" for e in snap_with_far), "250th in-window event must not be displaced"
         far_entry = next((e for e in snap_with_far if e.get("id") == "evt-far-future-conflict"), None)
         assert far_entry is not None and far_entry.get("outsideWindow") is True
+
+        # Verify split RCS group chats sharing original_group_id unify cleanly, deduplicate cross-joined messages,
+        # route sends away from failed superseded sibling, and emit updated-message/message-send-error on async error=4
+        split_db = os.path.join(test_eng._config_dir, "split_rcs_test.db")
+        sconn = sqlite3.connect(split_db)
+        try:
+            sconn.executescript(
+                """
+                CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, service_name TEXT DEFAULT 'RCS', display_name TEXT, style INTEGER, is_archived INTEGER DEFAULT 0, group_id TEXT, original_group_id TEXT, room_name TEXT DEFAULT '', last_read_message_timestamp INTEGER DEFAULT 0);
+                CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT DEFAULT 'RCS', country TEXT DEFAULT 'us');
+                CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+                CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB, subject TEXT DEFAULT '', handle_id INTEGER DEFAULT 0, service TEXT DEFAULT 'RCS', is_from_me INTEGER DEFAULT 0, is_read INTEGER DEFAULT 0, is_sent INTEGER DEFAULT 0, is_delivered INTEGER DEFAULT 0, is_archive INTEGER DEFAULT 0, is_audio_message INTEGER DEFAULT 0, item_type INTEGER DEFAULT 0, error INTEGER DEFAULT 0, date INTEGER DEFAULT 0, date_read INTEGER DEFAULT 0, date_delivered INTEGER DEFAULT 0, date_edited INTEGER DEFAULT 0, date_retracted INTEGER DEFAULT 0, group_title TEXT DEFAULT '', group_action_type INTEGER DEFAULT 0, associated_message_guid TEXT DEFAULT '', associated_message_type INTEGER DEFAULT 0, associated_message_emoji TEXT DEFAULT '', expressive_send_style_id TEXT DEFAULT '', reply_to_guid TEXT DEFAULT '', thread_originator_guid TEXT DEFAULT '', thread_originator_part TEXT DEFAULT '', has_dd_results INTEGER DEFAULT 0, was_delivered_quietly INTEGER DEFAULT 0, did_notify_recipient INTEGER DEFAULT 0, cache_roomnames TEXT DEFAULT '');
+                CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER, message_date INTEGER);
+                CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, guid TEXT, original_guid TEXT, created_date INTEGER DEFAULT 0, filename TEXT, uti TEXT, mime_type TEXT, total_bytes INTEGER, transfer_state INTEGER, transfer_name TEXT, is_outgoing INTEGER, hide_attachment INTEGER, is_sticker INTEGER);
+                CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+                """
+            )
+            sconn.execute("INSERT INTO handle (ROWID, id, service) VALUES (1, '+15555550101', 'RCS'), (2, '+15555550102', 'RCS'), (3, '+15555550103', 'RCS');")
+            sconn.execute("INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, is_archived, group_id, original_group_id) VALUES (3882, 'RCS;+;chat111111', 'chat111111', 'RCS', 'Weekend Hike Crew', 43, 0, 'grp_stale', 'OGID_SHARED_1');")
+            sconn.execute("INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, is_archived, group_id, original_group_id) VALUES (4050, 'RCS;+;chat222222', 'chat222222', 'RCS', 'Weekend Hike Crew', 43, 0, 'grp_active', 'OGID_SHARED_1');")
+            sconn.execute("INSERT INTO chat_handle_join VALUES (3882, 1), (3882, 2), (4050, 1), (4050, 2), (4050, 3);")
+            # Apple CoreData ns (approx 2026): base + 1s, +2s, +3s
+            base_ns = 785000000000000000
+            sconn.execute("INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, is_read, is_sent, is_delivered, item_type, error, date, date_read, date_delivered) VALUES (10, 'msg-stale-err', 'Failed stale reply', 0, 1, 1, 0, 0, 0, 4, ?, 0, 0);", (base_ns + 1_000_000_000,))
+            sconn.execute("INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, is_read, is_sent, is_delivered, item_type, error, date, date_read, date_delivered) VALUES (11, 'msg-active-ok', 'Active session reply', 3, 0, 1, 1, 1, 0, 0, ?, 0, 0);", (base_ns + 2_000_000_000,))
+            sconn.execute("INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, is_read, is_sent, is_delivered, item_type, error, date, date_read, date_delivered) VALUES (12, 'msg-joined-both', 'Shared across both', 2, 0, 1, 1, 1, 0, 0, ?, 0, 0);", (base_ns + 3_000_000_000,))
+            sconn.execute("INSERT INTO message (ROWID, guid, text, handle_id, is_from_me, is_read, is_sent, is_delivered, item_type, error, date, date_read, date_delivered) VALUES (13, 'msg-pending-track', 'Tracking async delivery', 0, 1, 1, 0, 0, 0, 0, ?, 0, 0);", (base_ns + 4_000_000_000,))
+            sconn.execute("INSERT INTO chat_message_join VALUES (3882, 10, ?), (4050, 11, ?), (3882, 12, ?), (4050, 12, ?), (4050, 13, ?);", (base_ns + 1_000_000_000, base_ns + 2_000_000_000, base_ns + 3_000_000_000, base_ns + 3_000_000_000, base_ns + 4_000_000_000))
+            sconn.commit()
+        finally:
+            sconn.close()
+
+        test_eng.db_path = split_db
+        unified_chats = test_eng.query_chats(limit=50, offset=0)
+        assert len(unified_chats) == 1, f"Expected 1 unified RCS chat, got {len(unified_chats)}: {unified_chats}"
+        assert unified_chats[0]["originalGroupId"] == "OGID_SHARED_1"
+        assert set(unified_chats[0]["siblingChatGuids"]) == {"RCS;+;chat111111", "RCS;+;chat222222"}
+        assert test_eng._resolve_active_send_chat_guid("RCS;+;chat111111") == "RCS;+;chat222222"
+
+        msgs_via_stale = test_eng.query_messages({"chatGuid": "RCS;+;chat111111", "limit": 50})
+        guids_seen = [m["guid"] for m in msgs_via_stale]
+        assert len(guids_seen) == 4 and len(set(guids_seen)) == 4, f"Expected 4 deduplicated sibling messages, got {guids_seen}"
+
+        # Track pending outgoing ROWID 13, mutate it to error=4 in DB, and assert _poll_tracked_outgoing_updates emits events
+        emitted_events: List[Tuple[str, Any]] = []
+        orig_emit = test_eng.broadcast_socketio
+        test_eng.broadcast_socketio = lambda ev, payload: emitted_events.append((ev, payload))
+        try:
+            test_eng._register_tracked_outgoing(
+                {"originalROWID": 13, "isFromMe": True, "isSent": False, "isDelivered": False, "error": 0, "dateRead": 0}
+            )
+            sconn2 = sqlite3.connect(split_db)
+            try:
+                sconn2.row_factory = sqlite3.Row
+                sconn2.execute("UPDATE message SET error = 4 WHERE ROWID = 13;")
+                sconn2.commit()
+                test_eng._poll_tracked_outgoing_updates(sconn2)
+            finally:
+                sconn2.close()
+            ev_names = [e[0] for e in emitted_events]
+            assert "updated-message" in ev_names and "message-send-error" in ev_names, f"Missing failure socket events: {emitted_events}"
+        finally:
+            test_eng.broadcast_socketio = orig_emit
     finally:
         srv.shutdown()
         srv.server_close()
@@ -7460,7 +7950,7 @@ def run_status_or_doctor(engine: BluePillEngine, mode: str, as_json: bool) -> in
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="bluepill-server",
-        description="BluePill Headless macOS Relay Server + Web UI (v1.2.0)",
+        description="BluePill Headless macOS Relay Server + Web UI (v1.2.1)",
     )
     parser.add_argument(
         "command",

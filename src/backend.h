@@ -21,6 +21,9 @@ struct ChatEntry {
     QString guid;
     QString chatIdentifier;
     QString displayName;
+    QString originalGroupId;
+    QString groupId;
+    QStringList siblingGuids;
     QString title;
     QString subtitle;
     QString service;
@@ -30,8 +33,10 @@ struct ChatEntry {
     QString lastMessagePreview;
     QString relativeTime;
     qint64 lastMessageDate = 0;
+    qint64 originalRowId = 0;
     int unreadCount = 0;
     bool isGroup = false;
+    bool isArchived = false;
     QStringList participantHandles;
 };
 
@@ -241,6 +246,7 @@ public:
     Q_INVOKABLE void setFilterMode(const QString &mode);
     Q_INVOKABLE void refreshAll();
     Q_INVOKABLE void selectChat(const QString &chatGuid);
+    Q_INVOKABLE bool isSameConversation(const QString &guidA, const QString &guidB) const;
     Q_INVOKABLE void selectNextChat();
     Q_INVOKABLE void selectPrevChat();
     Q_INVOKABLE void markChatRead(const QString &chatGuid);
@@ -398,6 +404,8 @@ public:
     void pollDeltaForTest() { pollDelta(); }
     void startSocketIoForTest() { startSocketIoClient(); }
     QString socketSid() const { return m_socketSid; }
+    QString resolveCanonicalChatGuidForTest(const QString &chatGuid) const { return resolveCanonicalChatGuid(chatGuid); }
+    QString resolveActiveSendChatGuidForTest(const QString &chatGuid) const { return resolveActiveSendChatGuid(chatGuid); }
 
     // Headless CLI entrypoints
     int runCliStatus(bool asJson);
@@ -470,6 +478,12 @@ private:
     void pumpAttachmentDownloadQueue();
     void fetchLinkPreview(const QString &msgGuid, const QString &url);
     void processIncomingMessages(const QJsonArray &messagesArray, bool isInitialLoad);
+    void recordChatGroupMetadata(const QJsonObject &chatObj);
+    QString resolveCanonicalChatGuid(const QString &chatGuid) const;
+    QString resolveActiveSendChatGuid(const QString &chatGuid) const;
+    QString computeGroupMergeKey(const ChatEntry &entry) const;
+    void unifySiblingChats(bool *selectedMigrated = nullptr, bool *chatsMerged = nullptr);
+    void checkPendingDeliveryStatuses();
     void rebuildChatPresentation(ChatEntry &entry) const;
     void sortChats();
     bool shouldNotifyForIncomingMessage(const QJsonObject &m, const QString &chatGuid, qint64 dateCreated, qint64 rowId) const;
@@ -543,6 +557,12 @@ private:
     QSet<QString> m_fetchedChatParticipantGuids;
     QHash<QString, QString> m_chatDisplayNames;
     QHash<QString, int> m_chatStyles;
+    QHash<QString, QString> m_chatOriginalGroupIds;
+    QHash<QString, QString> m_chatGroupIds;
+    QHash<QString, QString> m_canonicalChatAliases;
+    QHash<QString, QStringList> m_chatSiblingGuids;
+    QHash<QString, QString> m_chatPreferredSendGuids;
+    QHash<QString, QString> m_pendingDeliveryMessages;
     QHash<QString, QString> m_attachmentPaths;
     QHash<QString, QString> m_recentOutboundEffects;
     QHash<QString, QHash<QString, QJsonObject>> m_chatMessagesCache;

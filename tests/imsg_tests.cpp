@@ -4591,6 +4591,195 @@ private slots:
         }
     }
 
+    void testRcsGroupSiblingUnificationAndActiveSendRouting() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_unify.json")));
+
+        const QString staleRcsGuid = QStringLiteral("RCS;+;chat111111111111111111");
+        const QString activeRcsGuid = QStringLiteral("RCS;+;chat222222222222222222");
+        const QString smsLegacyGuid = QStringLiteral("SMS;+;chat333333333333333333");
+        const QString otherGroupGuid = QStringLiteral("RCS;+;chat999999999999999999");
+        const QString dmGuid = QStringLiteral("RCS;-;+15555550110");
+        const QString sharedOrigGroupId = QStringLiteral("31443445000000000000000000000001");
+
+        QJsonObject cStale{
+            {QStringLiteral("guid"), staleRcsGuid},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("chat111111111111111111")},
+            {QStringLiteral("displayName"), QStringLiteral("Weekend Hike Crew")},
+            {QStringLiteral("style"), 43},
+            {QStringLiteral("originalGroupId"), sharedOrigGroupId},
+            {QStringLiteral("groupId"), QStringLiteral("grp-stale-1")},
+            {QStringLiteral("originalROWID"), 3882},
+            {QStringLiteral("isArchived"), false},
+            {QStringLiteral("participants"), QJsonArray{
+                QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550101")}},
+                QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550102")}}
+            }}
+        };
+        QJsonObject cActive{
+            {QStringLiteral("guid"), activeRcsGuid},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("chat222222222222222222")},
+            {QStringLiteral("displayName"), QStringLiteral("Weekend Hike Crew")},
+            {QStringLiteral("style"), 43},
+            {QStringLiteral("originalGroupId"), sharedOrigGroupId},
+            {QStringLiteral("groupId"), QStringLiteral("grp-active-2")},
+            {QStringLiteral("originalROWID"), 4050},
+            {QStringLiteral("isArchived"), false},
+            {QStringLiteral("participants"), QJsonArray{
+                QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550101")}},
+                QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550102")}},
+                QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550103")}}
+            }}
+        };
+        QJsonObject cSms{
+            {QStringLiteral("guid"), smsLegacyGuid},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("chat333333333333333333")},
+            {QStringLiteral("displayName"), QStringLiteral("Weekend Hike Crew")},
+            {QStringLiteral("style"), 43},
+            {QStringLiteral("originalGroupId"), sharedOrigGroupId},
+            {QStringLiteral("originalROWID"), 2500},
+            {QStringLiteral("isArchived"), true}
+        };
+        QJsonObject cOther{
+            {QStringLiteral("guid"), otherGroupGuid},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("chat999999999999999999")},
+            {QStringLiteral("displayName"), QStringLiteral("Book Club")},
+            {QStringLiteral("style"), 43},
+            {QStringLiteral("originalGroupId"), QStringLiteral("OTHER_OGID_999")},
+            {QStringLiteral("originalROWID"), 4100}
+        };
+        QJsonObject cDm{
+            {QStringLiteral("guid"), dmGuid},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("+15555550110")},
+            {QStringLiteral("style"), 45},
+            {QStringLiteral("originalROWID"), 4105}
+        };
+
+        b.ingestChatsMetadataForTest(QJsonArray{cStale, cActive, cSms, cOther, cDm});
+        // 3 sibling chats sharing originalGroupId must unify into 1 entry + Book Club + DM = 3 total
+        QCOMPARE(b.chats().size(), 3);
+        QVERIFY(b.isSameConversation(staleRcsGuid, activeRcsGuid));
+        QVERIFY(b.isSameConversation(smsLegacyGuid, activeRcsGuid));
+        QVERIFY(!b.isSameConversation(activeRcsGuid, otherGroupGuid));
+
+        // Message present on stale sibling, failed send on stale sibling, newer message on active sibling, and one cross-joined message
+        QJsonObject msgOldOnStale{
+            {QStringLiteral("guid"), QStringLiteral("rcs-msg-stale-1")},
+            {QStringLiteral("text"), QStringLiteral("Meet at trailhead at 8")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), 1794300000000LL},
+            {QStringLiteral("handle"), QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550101")}}},
+            {QStringLiteral("chats"), QJsonArray{cStale}}
+        };
+        QJsonObject msgFailedOnStale{
+            {QStringLiteral("guid"), QStringLiteral("rcs-msg-failed-on-stale")},
+            {QStringLiteral("text"), QStringLiteral("Unsent failed reply")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), false},
+            {QStringLiteral("error"), 4},
+            {QStringLiteral("dateCreated"), 1794300100000LL},
+            {QStringLiteral("chats"), QJsonArray{cStale}}
+        };
+        QJsonObject msgOnActive{
+            {QStringLiteral("guid"), QStringLiteral("rcs-msg-active-2")},
+            {QStringLiteral("text"), QStringLiteral("Sounds great, bringing water")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), 1794300200000LL},
+            {QStringLiteral("handle"), QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550103")}}},
+            {QStringLiteral("chats"), QJsonArray{cActive}}
+        };
+        // Same message linked to both stale and active siblings in chat_message_join
+        QJsonObject msgJoinedBoth{
+            {QStringLiteral("guid"), QStringLiteral("rcs-msg-joined-both")},
+            {QStringLiteral("text"), QStringLiteral("Pinned parking map")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), 1794300300000LL},
+            {QStringLiteral("handle"), QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550102")}}},
+            {QStringLiteral("chats"), QJsonArray{cStale, cActive}}
+        };
+
+        b.ingestMessagesForTest(QJsonArray{msgOldOnStale, msgFailedOnStale, msgOnActive, msgJoinedBoth}, false);
+        QCOMPARE(b.chats().size(), 3);
+
+        // Selecting via stale sibling GUID resolves to unified conversation containing all 4 unique messages (deduped!)
+        b.selectChat(staleRcsGuid);
+        QCOMPARE(b.messages().size(), 4);
+        QCOMPARE(b.resolveActiveSendChatGuidForTest(staleRcsGuid), activeRcsGuid);
+
+        // Load QML and verify replyTargetGuid is NOT wiped when background chat updates arrive for another chat
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QQuickWindow *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win != nullptr);
+        win->setProperty("replyTargetGuid", QStringLiteral("rcs-msg-active-2"));
+        win->setProperty("replyTargetSender", QStringLiteral("Participant"));
+        win->setProperty("replyTargetText", QStringLiteral("Sounds great, bringing water"));
+
+        QJsonObject dmMsg{
+            {QStringLiteral("guid"), QStringLiteral("dm-msg-bg-1")},
+            {QStringLiteral("text"), QStringLiteral("Background ping in other chat")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), 1794300400000LL},
+            {QStringLiteral("chats"), QJsonArray{cDm}}
+        };
+        b.ingestMessagesForTest(QJsonArray{dmMsg}, false);
+        QCOMPARE(win->property("replyTargetGuid").toString(), QStringLiteral("rcs-msg-active-2"));
+    }
+
+    void testAsyncDeliveryFailureSurfacing() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_err.json")));
+
+        const QString chatGuid = QStringLiteral("RCS;+;chat777777777777777777");
+        QJsonObject chatObj{
+            {QStringLiteral("guid"), chatGuid},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("chat777777777777777777")},
+            {QStringLiteral("displayName"), QStringLiteral("RCS Thread Test")},
+            {QStringLiteral("style"), 43}
+        };
+
+        // Initial queued outgoing RCS reply (isSent=false, isDelivered=false, error=0)
+        QJsonObject pendingReply{
+            {QStringLiteral("guid"), QStringLiteral("rcs-pending-reply-1")},
+            {QStringLiteral("text"), QStringLiteral("Count me in!")},
+            {QStringLiteral("threadOriginatorGuid"), QStringLiteral("p:0/parent-guid-1")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), false},
+            {QStringLiteral("isDelivered"), false},
+            {QStringLiteral("error"), 0},
+            {QStringLiteral("dateCreated"), 1794350000000LL},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        b.ingestMessagesForTest(QJsonArray{pendingReply}, false);
+        b.selectChat(chatGuid);
+        QCOMPARE(b.messages().size(), 1);
+        QCOMPARE(b.messages().first().toMap().value(QStringLiteral("isFailed")).toBool(), false);
+        QCOMPARE(b.messages().first().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sending..."));
+
+        // Async carrier delivery failure arrives (is_sent=0, error=4) via updated-message / pollDelta
+        QSignalSpy toastSpy(&b, &Backend::toastMessage);
+        QJsonObject failedUpdate = pendingReply;
+        failedUpdate.insert(QStringLiteral("error"), 4);
+        b.ingestMessagesForTest(QJsonArray{failedUpdate}, false);
+
+        QCOMPARE(b.messages().size(), 1);
+        const QVariantMap msgVm = b.messages().first().toMap();
+        QCOMPARE(msgVm.value(QStringLiteral("isFailed")).toBool(), true);
+        QCOMPARE(msgVm.value(QStringLiteral("errorCode")).toInt(), 4);
+        QCOMPARE(msgVm.value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
+        QVERIFY(!toastSpy.isEmpty());
+    }
+
 };
 
 QTEST_MAIN(ImsgTests)

@@ -2,6 +2,15 @@
 
 All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this file.
 
+## [1.2.1] - 2026-11-16
+
+### Fixed
+- **Unified Split RCS/SMS Group Threads (`original_group_id`):** Merged sibling `RCS;+;`, `SMS;+;`, and `iMessage;+;` `chat` rows sharing `original_group_id` (or matching non-empty group display names with overlapping participants) across both `bluepill-server` (`server/bluepill_server.py`) and the Qt6 client (`src/backend.cpp`), while strictly isolating 1:1 (`style=45`) threads.
+- **Active Outbound Session Routing:** Exposed sibling metadata (`originalGroupId`, `siblingGuids`, `activeSendChatGuid`) and automatically routed outbound text messages, inline replies, attachments, tapback reactions, and read-state updates to the active RCS session row instead of superseded sibling sessions.
+- **Async Outgoing Delivery Error Tracking:** Monitored outgoing `chat.db` rows for post-commit `error`, `is_sent`, and `is_delivered` changes (`updated-message` + `message-send-error`), stopped prematurely marking optimistic outbound messages as `"Delivered"`, and surfaced carrier/RCS send failures (`⚠ Not Delivered` + toast) without resending failed messages.
+- **Preserved Reply Target Across Canonical/Background Sync:** Guarded `onSelectedChatChanged` in `src/Main.qml` with `backend.isSameConversation(...)` so canonical sibling refreshes never clear `replyTargetGuid` or active message drafts.
+- **Packaging & CI Alignment:** Synchronized `v1.2.1` metadata across CMake, `bluepill-server`, Arch `PKGBUILD` / AUR `.SRCINFO`, and `Formula/bluepill.rb`, and updated `.github/workflows/ai-pr-review.yml` to report dynamic QtTest counts.
+
 ## [1.2.0] - 2026-11-13
 
 ### Added

@@ -17,6 +17,9 @@
 #include <QImageWriter>
 #include <cmath>
 #include <cstdint>
+#include <numeric>
+#include <tuple>
+#include <vector>
 
 static QString cleanIcloudNoteBody(const QString &title, const QString &body) {
     QString cleanTitle = title;
@@ -882,6 +885,19 @@ void Backend::flushMessagesCacheNow(bool async) const {
             chatMetaObj.insert(QStringLiteral("chatIdentifier"), ce.chatIdentifier);
             chatMetaObj.insert(QStringLiteral("displayName"), ce.displayName);
             chatMetaObj.insert(QStringLiteral("style"), ce.isGroup ? 43 : 45);
+            if (!ce.originalGroupId.isEmpty()) {
+                chatMetaObj.insert(QStringLiteral("originalGroupId"), ce.originalGroupId);
+            }
+            if (!ce.groupId.isEmpty()) {
+                chatMetaObj.insert(QStringLiteral("groupId"), ce.groupId);
+            }
+            if (!ce.siblingGuids.isEmpty()) {
+                QJsonArray sibArr;
+                for (const QString &sg : ce.siblingGuids) {
+                    sibArr.append(sg);
+                }
+                chatMetaObj.insert(QStringLiteral("siblingChatGuids"), sibArr);
+            }
             QJsonArray partsArr;
             for (const QString &h : ce.participantHandles) {
                 QJsonObject pObj;
@@ -948,6 +964,15 @@ void Backend::flushMessagesCacheNow(bool async) const {
                     }
                     if (chatMetaObj.contains(QStringLiteral("style"))) {
                         firstChat.insert(QStringLiteral("style"), chatMetaObj.value(QStringLiteral("style")));
+                    }
+                    if (!chatMetaObj.value(QStringLiteral("originalGroupId")).toString().isEmpty()) {
+                        firstChat.insert(QStringLiteral("originalGroupId"), chatMetaObj.value(QStringLiteral("originalGroupId")));
+                    }
+                    if (!chatMetaObj.value(QStringLiteral("groupId")).toString().isEmpty()) {
+                        firstChat.insert(QStringLiteral("groupId"), chatMetaObj.value(QStringLiteral("groupId")));
+                    }
+                    if (chatMetaObj.contains(QStringLiteral("siblingChatGuids"))) {
+                        firstChat.insert(QStringLiteral("siblingChatGuids"), chatMetaObj.value(QStringLiteral("siblingChatGuids")));
                     }
                     chatsArr[0] = firstChat;
                     m.insert(QStringLiteral("chats"), chatsArr);
@@ -2277,6 +2302,21 @@ void Backend::handleSocketIoPayload(const QByteArray &rawPayload) {
                 }
                 shouldTriggerDeltaPoll = true;
                 shouldTriggerUnreadCheck = true;
+            } else if (eventName == QStringLiteral("message-send-error")) {
+                if (eventData.isObject()) {
+                    QJsonObject errObj = eventData.toObject();
+                    if (errObj.value(QStringLiteral("message")).isObject()) {
+                        errObj = errObj.value(QStringLiteral("message")).toObject();
+                    }
+                    if (!errObj.value(QStringLiteral("guid")).toString().isEmpty()) {
+                        processIncomingMessages(QJsonArray{errObj}, false);
+                        saveMessagesCache();
+                    } else {
+                        const int ec = eventData.toObject().value(QStringLiteral("error")).toInt(4);
+                        emit toastMessage(QStringLiteral("⚠ Message failed to deliver (error %1)").arg(ec));
+                    }
+                }
+                shouldTriggerDeltaPoll = true;
             } else if (eventName == QStringLiteral("chat-read-status-changed") ||
                        eventName == QStringLiteral("group-name-change") ||
                        eventName == QStringLiteral("participant-added") ||
@@ -2497,13 +2537,18 @@ void Backend::fetchMissingGroupParticipants() {
 void Backend::processChatsMetadata(const QJsonArray &arr) {
     bool chatsAddedOrModified = false;
     bool watermarksChanged = false;
+    const QString prevSelectedSig = m_selectedChatGuid + QLatin1Char('|') + selectedChatTitle() + QLatin1Char('|') +
+                                    selectedChatSubtitle() + QLatin1Char('|') + QString::number(selectedChatUnreadCount()) +
+                                    QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(','));
 
     for (const QJsonValue &v : arr) {
         const QJsonObject c = v.toObject();
-        const QString guid = c.value(QStringLiteral("guid")).toString();
-        if (guid.isEmpty()) continue;
-        if (m_deletedChatTimestamps.contains(guid)) {
-            const qint64 deletedAt = m_deletedChatTimestamps.value(guid, 0);
+        const QString rawGuid = c.value(QStringLiteral("guid")).toString().trimmed();
+        if (rawGuid.isEmpty()) continue;
+        recordChatGroupMetadata(c);
+        const QString guid = resolveCanonicalChatGuid(rawGuid);
+        if (m_deletedChatTimestamps.contains(guid) || m_deletedChatTimestamps.contains(rawGuid)) {
+            const qint64 deletedAt = qMax(m_deletedChatTimestamps.value(guid, 0), m_deletedChatTimestamps.value(rawGuid, 0));
             const qint64 chatWm = extractChatReadWatermark(c, m_chatMessagesCache.value(guid));
             if (chatWm <= deletedAt && !m_chatMessagesCache.contains(guid)) {
                 continue;
@@ -2512,7 +2557,10 @@ void Backend::processChatsMetadata(const QJsonArray &arr) {
 
         const QString disp = c.value(QStringLiteral("displayName")).toString().trimmed();
         if (!disp.isEmpty()) m_chatDisplayNames.insert(guid, disp);
-        m_chatStyles.insert(guid, c.value(QStringLiteral("style")).toInt());
+        if (c.contains(QStringLiteral("style"))) {
+            const int st = c.value(QStringLiteral("style")).toInt(0);
+            if (st > 0) m_chatStyles.insert(guid, st);
+        }
 
         QStringList handles;
         const QJsonArray parts = c.value(QStringLiteral("participants")).toArray();
@@ -2543,16 +2591,39 @@ void Backend::processChatsMetadata(const QJsonArray &arr) {
 
         int existingIdx = -1;
         for (int i = 0; i < m_chats.size(); ++i) {
-            if (m_chats[i].guid == guid) {
+            if (m_chats[i].guid == guid || m_chats[i].guid == rawGuid || m_chats[i].siblingGuids.contains(rawGuid)) {
                 existingIdx = i;
                 break;
             }
+        }
+
+        const QString origGrpId = c.value(QStringLiteral("originalGroupId")).toString().trimmed();
+        const QString grpId = c.value(QStringLiteral("groupId")).toString().trimmed();
+        const qint64 origRowId = c.value(QStringLiteral("originalROWID")).toVariant().toLongLong();
+        const bool isArchived = c.value(QStringLiteral("isArchived")).toBool(false);
+        const QString activeTarget = c.value(QStringLiteral("activeSendChatGuid")).toString().trimmed();
+        if (!activeTarget.isEmpty()) {
+            m_chatPreferredSendGuids.insert(guid, activeTarget);
+        } else if (!rawGuid.isEmpty()) {
+            m_chatPreferredSendGuids.insert(guid, rawGuid);
         }
 
         if (existingIdx >= 0) {
             ChatEntry &entry = m_chats[existingIdx];
             if (!handles.isEmpty()) entry.participantHandles = handles;
             if (!disp.isEmpty()) entry.displayName = disp;
+            if (!origGrpId.isEmpty()) entry.originalGroupId = origGrpId;
+            if (!grpId.isEmpty()) entry.groupId = grpId;
+            if (origRowId > entry.originalRowId) entry.originalRowId = origRowId;
+            entry.isArchived = isArchived;
+            if (c.value(QStringLiteral("siblingChatGuids")).isArray()) {
+                for (const QJsonValue &sv : c.value(QStringLiteral("siblingChatGuids")).toArray()) {
+                    const QString sg = sv.toString().trimmed();
+                    if (!sg.isEmpty() && !entry.siblingGuids.contains(sg)) {
+                        entry.siblingGuids.append(sg);
+                    }
+                }
+            }
             if ((!recentLocalMutation || m_unreadOverrides.value(guid, 0) == 0) && m_chatMessagesCache.contains(guid)) {
                 int count = 0;
                 const qint64 wm = m_readWatermarks.value(guid, 0);
@@ -2578,8 +2649,21 @@ void Backend::processChatsMetadata(const QJsonArray &arr) {
             entry.guid = guid;
             entry.chatIdentifier = c.value(QStringLiteral("chatIdentifier")).toString();
             entry.displayName = disp;
+            entry.originalGroupId = origGrpId;
+            entry.groupId = grpId;
+            entry.originalRowId = origRowId;
+            entry.isArchived = isArchived;
+            if (c.value(QStringLiteral("siblingChatGuids")).isArray()) {
+                for (const QJsonValue &sv : c.value(QStringLiteral("siblingChatGuids")).toArray()) {
+                    const QString sg = sv.toString().trimmed();
+                    if (!sg.isEmpty() && !entry.siblingGuids.contains(sg)) {
+                        entry.siblingGuids.append(sg);
+                    }
+                }
+            }
+            if (!entry.siblingGuids.contains(guid)) entry.siblingGuids.append(guid);
             const int style = c.value(QStringLiteral("style")).toInt(m_chatStyles.value(guid, 45));
-            entry.isGroup = (style == 43) || entry.chatIdentifier.startsWith(QStringLiteral("chat"));
+            entry.isGroup = (style == 43) || entry.chatIdentifier.startsWith(QStringLiteral("chat")) || guid.contains(QStringLiteral(";+;"));
             entry.participantHandles = handles;
             if (entry.participantHandles.isEmpty() && !entry.isGroup && !entry.chatIdentifier.isEmpty()) {
                 entry.participantHandles.append(entry.chatIdentifier);
@@ -2595,6 +2679,13 @@ void Backend::processChatsMetadata(const QJsonArray &arr) {
         }
     }
 
+    bool selectedMigrated = false;
+    bool chatsMerged = false;
+    unifySiblingChats(&selectedMigrated, &chatsMerged);
+    if (chatsMerged) {
+        chatsAddedOrModified = true;
+    }
+
     if (watermarksChanged) {
         saveAppState();
     }
@@ -2602,7 +2693,15 @@ void Backend::processChatsMetadata(const QJsonArray &arr) {
     if (chatsAddedOrModified) {
         sortChats();
         emit chatsChanged();
-        emit selectedChatChanged();
+        const QString nextSelectedSig = m_selectedChatGuid + QLatin1Char('|') + selectedChatTitle() + QLatin1Char('|') +
+                                        selectedChatSubtitle() + QLatin1Char('|') + QString::number(selectedChatUnreadCount()) +
+                                        QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(','));
+        if (selectedMigrated || nextSelectedSig != prevSelectedSig) {
+            emit selectedChatChanged();
+        }
+        if (selectedMigrated && !m_selectedChatGuid.isEmpty()) {
+            rebuildSelectedChatMessages();
+        }
     }
 }
 
@@ -2783,7 +2882,9 @@ void Backend::reconcileServerUnreadMessages(const QJsonArray &unreadMessages) {
 
         for (const QJsonValue &cv : chatsArr) {
             const QJsonObject cObj = cv.toObject();
-            const QString cg = cObj.value(QStringLiteral("guid")).toString();
+            recordChatGroupMetadata(cObj);
+            const QString rawCg = cObj.value(QStringLiteral("guid")).toString().trimmed();
+            const QString cg = resolveCanonicalChatGuid(rawCg);
             if (cg.isEmpty()) continue;
             const bool recentLocalMut = (m_localReadMutationTimeMs.value(cg, 0) > nowMs - 15000);
             const qint64 chatWm = m_readWatermarks.value(cg, 0);
@@ -2795,7 +2896,7 @@ void Backend::reconcileServerUnreadMessages(const QJsonArray &unreadMessages) {
 
             int chatIdx = -1;
             for (int i = 0; i < m_chats.size(); ++i) {
-                if (m_chats[i].guid == cg) {
+                if (m_chats[i].guid == cg || m_chats[i].guid == rawCg || m_chats[i].siblingGuids.contains(rawCg)) {
                     chatIdx = i;
                     break;
                 }
@@ -2952,7 +3053,9 @@ void Backend::reconcileServerUnreadMessages(const QJsonArray &unreadMessages) {
     if (chatsModified) {
         sortChats();
         emit chatsChanged();
-        emit selectedChatChanged();
+        if (!m_selectedChatGuid.isEmpty()) {
+            emit selectedChatChanged();
+        }
     }
     if (selectedChatUpdated && !m_selectedChatGuid.isEmpty()) {
         rebuildSelectedChatMessages();
@@ -3000,6 +3103,9 @@ void Backend::pollDelta() {
         if (!m_selectedChatGuid.isEmpty() && !m_activeMessagesReply && !m_loadingOlderMessages) {
             loadChatMessages(m_selectedChatGuid);
         }
+    }
+    if (!m_pendingDeliveryMessages.isEmpty()) {
+        checkPendingDeliveryStatuses();
     }
 
     // Use a 1-hour (3,600,000 ms) lookback window relative to min(nowMs, m_lastMessageTimestamp)
@@ -3079,11 +3185,506 @@ void Backend::ingestMessagesForTest(const QJsonArray &messagesArray, bool isInit
     }
 }
 
+bool Backend::isSameConversation(const QString &guidA, const QString &guidB) const {
+    const QString a = guidA.trimmed();
+    const QString b = guidB.trimmed();
+    if (a.isEmpty() || b.isEmpty()) return false;
+    if (a == b) return true;
+
+    const QString canonA = resolveCanonicalChatGuid(a);
+    const QString canonB = resolveCanonicalChatGuid(b);
+    if (canonA == canonB) return true;
+
+    if (m_chatSiblingGuids.value(canonA).contains(b) || m_chatSiblingGuids.value(canonA).contains(canonB) ||
+        m_chatSiblingGuids.value(canonB).contains(a) || m_chatSiblingGuids.value(canonB).contains(canonA)) {
+        return true;
+    }
+
+    const QString ogA = m_chatOriginalGroupIds.value(canonA, m_chatOriginalGroupIds.value(a));
+    const QString ogB = m_chatOriginalGroupIds.value(canonB, m_chatOriginalGroupIds.value(b));
+    if (!ogA.isEmpty() && ogA == ogB) return true;
+
+    const QString gA = m_chatGroupIds.value(canonA, m_chatGroupIds.value(a));
+    const QString gB = m_chatGroupIds.value(canonB, m_chatGroupIds.value(b));
+    if (!gA.isEmpty() && gA == gB) return true;
+
+    return false;
+}
+
+QString Backend::resolveCanonicalChatGuid(const QString &chatGuid) const {
+    QString cur = chatGuid.trimmed();
+    if (cur.isEmpty()) return cur;
+    for (int hop = 0; hop < 8; ++hop) {
+        const QString next = m_canonicalChatAliases.value(cur);
+        if (next.isEmpty() || next == cur) {
+            break;
+        }
+        cur = next;
+    }
+    return cur;
+}
+
+void Backend::recordChatGroupMetadata(const QJsonObject &chatObj) {
+    const QString rawGuid = chatObj.value(QStringLiteral("guid")).toString().trimmed();
+    if (rawGuid.isEmpty()) return;
+
+    const QString disp = chatObj.value(QStringLiteral("displayName")).toString().trimmed();
+    if (!disp.isEmpty()) {
+        m_chatDisplayNames.insert(rawGuid, disp);
+    }
+    if (chatObj.contains(QStringLiteral("style"))) {
+        const int st = chatObj.value(QStringLiteral("style")).toInt(0);
+        if (st > 0) m_chatStyles.insert(rawGuid, st);
+    }
+
+    QString origGrpId = chatObj.value(QStringLiteral("originalGroupId")).toString().trimmed();
+    if (origGrpId.isEmpty()) {
+        origGrpId = chatObj.value(QStringLiteral("original_group_id")).toString().trimmed();
+    }
+    if (!origGrpId.isEmpty()) {
+        m_chatOriginalGroupIds.insert(rawGuid, origGrpId);
+    }
+
+    QString grpId = chatObj.value(QStringLiteral("groupId")).toString().trimmed();
+    if (grpId.isEmpty()) {
+        grpId = chatObj.value(QStringLiteral("group_id")).toString().trimmed();
+    }
+    if (!grpId.isEmpty()) {
+        m_chatGroupIds.insert(rawGuid, grpId);
+    }
+
+    const QJsonArray parts = chatObj.value(QStringLiteral("participants")).toArray();
+    if (!parts.isEmpty()) {
+        QStringList handles;
+        for (const QJsonValue &pv : parts) {
+            const QString addr = pv.toObject().value(QStringLiteral("address")).toString().trimmed();
+            if (!addr.isEmpty()) handles.append(addr);
+        }
+        if (!handles.isEmpty()) {
+            m_chatParticipants.insert(rawGuid, handles);
+        }
+    }
+
+    const QString activeTarget = chatObj.value(QStringLiteral("activeSendChatGuid")).toString().trimmed();
+    if (!activeTarget.isEmpty()) {
+        m_chatPreferredSendGuids.insert(rawGuid, activeTarget);
+    }
+
+    QStringList sibs = m_chatSiblingGuids.value(rawGuid);
+    if (!sibs.contains(rawGuid)) sibs.append(rawGuid);
+    const QJsonArray sibArr = chatObj.value(QStringLiteral("siblingChatGuids")).toArray();
+    for (const QJsonValue &sv : sibArr) {
+        const QString sg = sv.toString().trimmed();
+        if (!sg.isEmpty() && !sibs.contains(sg)) {
+            sibs.append(sg);
+            if (!origGrpId.isEmpty() && m_chatOriginalGroupIds.value(sg).isEmpty()) {
+                m_chatOriginalGroupIds.insert(sg, origGrpId);
+            }
+            if (!grpId.isEmpty() && m_chatGroupIds.value(sg).isEmpty()) {
+                m_chatGroupIds.insert(sg, grpId);
+            }
+        }
+    }
+    m_chatSiblingGuids.insert(rawGuid, sibs);
+}
+
+QString Backend::computeGroupMergeKey(const ChatEntry &entry) const {
+    const QString g = entry.guid.trimmed();
+    if (g.isEmpty()) return QString();
+    const bool isGrp = entry.isGroup
+                       || g.contains(QStringLiteral(";+;"))
+                       || (m_chatStyles.value(g, 45) == 43)
+                       || entry.chatIdentifier.startsWith(QStringLiteral("chat"));
+    if (!isGrp) {
+        return QString();
+    }
+
+    QString origGrpId = entry.originalGroupId.trimmed();
+    if (origGrpId.isEmpty()) origGrpId = m_chatOriginalGroupIds.value(g).trimmed();
+    if (!origGrpId.isEmpty()) {
+        return QStringLiteral("ogid:") + origGrpId;
+    }
+
+    QString grpId = entry.groupId.trimmed();
+    if (grpId.isEmpty()) grpId = m_chatGroupIds.value(g).trimmed();
+    if (!grpId.isEmpty()) {
+        return QStringLiteral("gid:") + grpId;
+    }
+
+    return QString();
+}
+
+QString Backend::resolveActiveSendChatGuid(const QString &chatGuid) const {
+    const QString trimmed = chatGuid.trimmed();
+    if (trimmed.isEmpty()) return trimmed;
+    const QString canon = resolveCanonicalChatGuid(trimmed);
+
+    QStringList candidates;
+    auto addCand = [&candidates](const QString &cand) {
+        const QString c = cand.trimmed();
+        if (!c.isEmpty() && !candidates.contains(c)) candidates.append(c);
+    };
+
+    const QString pref = m_chatPreferredSendGuids.value(canon).trimmed();
+    addCand(pref);
+    addCand(canon);
+    for (const QString &sg : m_chatSiblingGuids.value(canon)) addCand(sg);
+    for (const ChatEntry &ce : m_chats) {
+        if (ce.guid == canon || ce.guid == trimmed || ce.siblingGuids.contains(canon) || ce.siblingGuids.contains(trimmed)) {
+            addCand(ce.guid);
+            for (const QString &sg : ce.siblingGuids) addCand(sg);
+            break;
+        }
+    }
+    if (candidates.size() <= 1) {
+        return pref.isEmpty() ? canon : pref;
+    }
+
+    struct CandStats {
+        qint64 latestAnyTs = 0;
+        qint64 latestOkTs = 0;
+        qint64 latestErrTs = 0;
+        int svcRank = 1;
+        bool isPref = false;
+    };
+    QHash<QString, CandStats> stats;
+    for (const QString &cand : candidates) {
+        CandStats cs;
+        cs.svcRank = cand.startsWith(QStringLiteral("RCS;")) ? 3 : (cand.startsWith(QStringLiteral("iMessage;")) ? 2 : 1);
+        cs.isPref = (cand == pref);
+        stats.insert(cand, cs);
+    }
+
+    auto inspectCache = [&](const QHash<QString, QJsonObject> &msgMap) {
+        for (auto it = msgMap.constBegin(); it != msgMap.constEnd(); ++it) {
+            const QJsonObject &m = it.value();
+            QString origCg = m.value(QStringLiteral("originalChatGuid")).toString().trimmed();
+            if (origCg.isEmpty()) {
+                const QJsonArray cArr = m.value(QStringLiteral("chats")).toArray();
+                if (!cArr.isEmpty()) origCg = cArr.first().toObject().value(QStringLiteral("guid")).toString().trimmed();
+            }
+            if (origCg.isEmpty() || !stats.contains(origCg)) continue;
+            CandStats &cs = stats[origCg];
+            const qint64 dc = m.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+            const bool fromMe = m.value(QStringLiteral("isFromMe")).toBool();
+            const int err = m.value(QStringLiteral("error")).toInt(0);
+            cs.latestAnyTs = qMax(cs.latestAnyTs, dc);
+            if (fromMe && err != 0) {
+                cs.latestErrTs = qMax(cs.latestErrTs, dc);
+            } else {
+                cs.latestOkTs = qMax(cs.latestOkTs, dc);
+            }
+        }
+    };
+    for (const QString &cand : candidates) {
+        if (m_chatMessagesCache.contains(cand)) {
+            inspectCache(m_chatMessagesCache.value(cand));
+        }
+    }
+
+    QString bestCand = candidates.first();
+    auto betterThan = [&](const QString &a, const QString &b) -> bool {
+        const CandStats &sa = stats[a];
+        const CandStats &sb = stats[b];
+        const bool aHealthy = (sa.latestErrTs == 0) || (sa.latestOkTs >= sa.latestErrTs);
+        const bool bHealthy = (sb.latestErrTs == 0) || (sb.latestOkTs >= sb.latestErrTs);
+        if (aHealthy != bHealthy) return aHealthy;
+        if (sa.isPref != sb.isPref && sa.isPref && (sb.latestOkTs <= sa.latestAnyTs || sa.latestAnyTs == 0)) return true;
+        if (sa.isPref != sb.isPref && sb.isPref && (sa.latestOkTs <= sb.latestAnyTs || sb.latestAnyTs == 0)) return false;
+        if (sa.latestOkTs != sb.latestOkTs) return sa.latestOkTs > sb.latestOkTs;
+        if (sa.svcRank != sb.svcRank) return sa.svcRank > sb.svcRank;
+        return sa.latestAnyTs > sb.latestAnyTs;
+    };
+    for (int i = 1; i < candidates.size(); ++i) {
+        if (betterThan(candidates[i], bestCand)) {
+            bestCand = candidates[i];
+        }
+    }
+    return bestCand;
+}
+
+void Backend::unifySiblingChats(bool *selectedMigrated, bool *chatsMerged) {
+    if (selectedMigrated) *selectedMigrated = false;
+    if (chatsMerged) *chatsMerged = false;
+    const int n = static_cast<int>(m_chats.size());
+    if (n == 0) return;
+
+    QList<int> parent(n);
+    std::iota(parent.begin(), parent.end(), 0);
+    auto findRoot = [&](int x) {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        return x;
+    };
+    auto unite = [&](int a, int b) {
+        const int ra = findRoot(a);
+        const int rb = findRoot(b);
+        if (ra != rb) parent[rb] = ra;
+    };
+
+    QHash<QString, int> keyOwner;
+    for (int i = 0; i < n; ++i) {
+        const QString mk = computeGroupMergeKey(m_chats[i]);
+        if (!mk.isEmpty()) {
+            if (keyOwner.contains(mk)) {
+                unite(keyOwner.value(mk), i);
+            } else {
+                keyOwner.insert(mk, i);
+            }
+        }
+        const QString gi = m_chats[i].guid;
+        for (int j = i + 1; j < n; ++j) {
+            const QString gj = m_chats[j].guid;
+            if (m_chats[i].siblingGuids.contains(gj) || m_chats[j].siblingGuids.contains(gi) ||
+                m_chatSiblingGuids.value(gi).contains(gj) || m_chatSiblingGuids.value(gj).contains(gi)) {
+                unite(i, j);
+            }
+        }
+    }
+
+    // Fallback: unify unkeyed RCS/SMS group chats sharing non-empty displayName and >=50% participant overlap
+    std::vector<QSet<QString>> normSets(n);
+    for (int i = 0; i < n; ++i) {
+        QSet<QString> s;
+        for (const QString &h : m_chats[i].participantHandles) {
+            const QString nh = normalizeHandle(h);
+            if (!nh.isEmpty()) s.insert(nh);
+        }
+        normSets[i] = s;
+    }
+    for (int i = 0; i < n; ++i) {
+        const QString dispI = m_chats[i].displayName.trimmed();
+        const bool isRcsSmsI = m_chats[i].guid.startsWith(QStringLiteral("RCS;+;")) || m_chats[i].guid.startsWith(QStringLiteral("SMS;+;"));
+        if (!isRcsSmsI || dispI.isEmpty() || normSets[i].size() < 2) continue;
+        if (!computeGroupMergeKey(m_chats[i]).isEmpty()) continue;
+        for (int j = i + 1; j < n; ++j) {
+            if (findRoot(i) == findRoot(j)) continue;
+            const QString dispJ = m_chats[j].displayName.trimmed();
+            const bool isRcsSmsJ = m_chats[j].guid.startsWith(QStringLiteral("RCS;+;")) || m_chats[j].guid.startsWith(QStringLiteral("SMS;+;"));
+            if (!isRcsSmsJ || dispI.compare(dispJ, Qt::CaseInsensitive) != 0 || normSets[j].size() < 2) continue;
+            if (!computeGroupMergeKey(m_chats[j]).isEmpty()) continue;
+            int overlap = 0;
+            for (const QString &nh : normSets[i]) {
+                if (normSets[j].contains(nh)) ++overlap;
+            }
+            const int minSz = qMin(static_cast<int>(normSets[i].size()), static_cast<int>(normSets[j].size()));
+            if (overlap >= 2 && overlap * 2 >= minSz) {
+                unite(i, j);
+            }
+        }
+    }
+
+    QHash<int, QList<int>> buckets;
+    QList<int> bucketOrder;
+    for (int i = 0; i < n; ++i) {
+        const int r = findRoot(i);
+        if (!buckets.contains(r)) bucketOrder.append(r);
+        buckets[r].append(i);
+    }
+
+    auto chatScore = [this](const ChatEntry &c) -> std::tuple<int, int, qint64, qint64, int> {
+        const int archivedScore = c.isArchived ? 0 : 1;
+        const int svcScore = c.guid.startsWith(QStringLiteral("RCS;")) ? 3 : (c.guid.startsWith(QStringLiteral("iMessage;")) ? 2 : 1);
+        const qint64 dateScore = c.lastMessageDate;
+        const qint64 rowScore = c.originalRowId;
+        const int selectedTie = (c.guid == m_selectedChatGuid) ? 1 : 0;
+        return std::make_tuple(archivedScore, svcScore, dateScore, rowScore, selectedTie);
+    };
+
+    QList<ChatEntry> mergedList;
+    mergedList.reserve(bucketOrder.size());
+
+    for (int root : bucketOrder) {
+        const QList<int> &idxs = buckets[root];
+        int bestPos = idxs.first();
+        for (int idx : idxs) {
+            if (chatScore(m_chats[idx]) > chatScore(m_chats[bestPos])) {
+                bestPos = idx;
+            }
+        }
+
+        ChatEntry winner = m_chats[bestPos];
+        QStringList allSibs = winner.siblingGuids;
+        if (!allSibs.contains(winner.guid)) allSibs.append(winner.guid);
+        for (const QString &sg : m_chatSiblingGuids.value(winner.guid)) {
+            if (!sg.isEmpty() && !allSibs.contains(sg)) allSibs.append(sg);
+        }
+
+        QSet<QString> seenNormHandles;
+        QStringList mergedHandles = winner.participantHandles;
+        for (const QString &h : mergedHandles) {
+            seenNormHandles.insert(normalizeHandle(h));
+        }
+
+        bool bucketHadPinned = m_pinnedChats.contains(winner.guid);
+        bool bucketHadMuted = m_mutedChats.contains(winner.guid);
+        bool anyCacheMoved = false;
+
+        for (int idx : idxs) {
+            const ChatEntry &other = m_chats[idx];
+            if (!other.guid.isEmpty() && !allSibs.contains(other.guid)) allSibs.append(other.guid);
+            for (const QString &sg : other.siblingGuids) {
+                if (!sg.isEmpty() && !allSibs.contains(sg)) allSibs.append(sg);
+            }
+            for (const QString &sg : m_chatSiblingGuids.value(other.guid)) {
+                if (!sg.isEmpty() && !allSibs.contains(sg)) allSibs.append(sg);
+            }
+            if (winner.originalGroupId.isEmpty() && !other.originalGroupId.isEmpty()) winner.originalGroupId = other.originalGroupId;
+            if (winner.groupId.isEmpty() && !other.groupId.isEmpty()) winner.groupId = other.groupId;
+            if (winner.displayName.isEmpty() && !other.displayName.isEmpty()) winner.displayName = other.displayName;
+            if (other.originalRowId > winner.originalRowId) winner.originalRowId = other.originalRowId;
+            if (!other.isArchived) winner.isArchived = false;
+            if (m_pinnedChats.contains(other.guid)) bucketHadPinned = true;
+            if (m_mutedChats.contains(other.guid)) bucketHadMuted = true;
+            for (const QString &h : other.participantHandles) {
+                const QString nh = normalizeHandle(h);
+                if (!nh.isEmpty() && !seenNormHandles.contains(nh)) {
+                    seenNormHandles.insert(nh);
+                    mergedHandles.append(h);
+                }
+            }
+            if (other.lastMessageDate > winner.lastMessageDate && !other.lastMessagePreview.isEmpty()) {
+                winner.lastMessageDate = other.lastMessageDate;
+                winner.lastMessagePreview = other.lastMessagePreview;
+                winner.relativeTime = other.relativeTime;
+            }
+        }
+
+        if (idxs.size() > 1 && chatsMerged) {
+            *chatsMerged = true;
+        }
+        winner.siblingGuids = allSibs;
+        winner.participantHandles = mergedHandles;
+        if (!winner.originalGroupId.isEmpty()) m_chatOriginalGroupIds.insert(winner.guid, winner.originalGroupId);
+        if (!winner.groupId.isEmpty()) m_chatGroupIds.insert(winner.guid, winner.groupId);
+        if (!winner.displayName.isEmpty()) m_chatDisplayNames.insert(winner.guid, winner.displayName);
+        if (!mergedHandles.isEmpty()) m_chatParticipants.insert(winner.guid, mergedHandles);
+        m_chatSiblingGuids.insert(winner.guid, allSibs);
+
+        if (bucketHadPinned && !m_pinnedChats.contains(winner.guid)) m_pinnedChats.append(winner.guid);
+        if (bucketHadMuted) m_mutedChats.insert(winner.guid);
+
+        for (const QString &sib : allSibs) {
+            if (sib.isEmpty() || sib == winner.guid) continue;
+            m_canonicalChatAliases.insert(sib, winner.guid);
+            if (m_readWatermarks.contains(sib)) {
+                m_readWatermarks[winner.guid] = qMax(m_readWatermarks.value(winner.guid, 0), m_readWatermarks.value(sib, 0));
+            }
+            if (m_unreadOverrides.contains(sib)) {
+                m_unreadOverrides[winner.guid] = qMax(m_unreadOverrides.value(winner.guid, 0), m_unreadOverrides.value(sib, 0));
+            }
+            if (m_localReadMutationTimeMs.contains(sib)) {
+                m_localReadMutationTimeMs[winner.guid] = qMax(m_localReadMutationTimeMs.value(winner.guid, 0), m_localReadMutationTimeMs.value(sib, 0));
+            }
+            if (m_chatMessagesCache.contains(sib)) {
+                const auto sibMsgs = m_chatMessagesCache.take(sib);
+                for (auto it = sibMsgs.constBegin(); it != sibMsgs.constEnd(); ++it) {
+                    QJsonObject moved = it.value();
+                    if (moved.value(QStringLiteral("originalChatGuid")).toString().isEmpty()) {
+                        moved.insert(QStringLiteral("originalChatGuid"), sib);
+                    }
+                    cacheMessageForChat(winner.guid, moved);
+                }
+                anyCacheMoved = true;
+            }
+            if (sib == m_selectedChatGuid) {
+                m_selectedChatGuid = winner.guid;
+                if (selectedMigrated) *selectedMigrated = true;
+            }
+        }
+
+        if (anyCacheMoved || idxs.size() > 1) {
+            qint64 bestDate = winner.lastMessageDate;
+            QString bestPreview = winner.lastMessagePreview;
+            int unreadCount = 0;
+            const qint64 wm = m_readWatermarks.value(winner.guid, 0);
+            const qint64 uo = m_unreadOverrides.value(winner.guid, 0);
+            if (m_chatMessagesCache.contains(winner.guid)) {
+                const auto &chatMap = m_chatMessagesCache.value(winner.guid);
+                for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
+                    const QJsonObject &m = it.value();
+                    if (m_deletedMessageGuids.contains(it.key()) || isMessageDeletedOrRetracted(m)) continue;
+                    if (isMessageUnread(m, wm, uo)) ++unreadCount;
+                    const qint64 dc = m.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+                    QString prev = extractMessageText(m);
+                    const QString emoji = mapReactionEmoji(m.value(QStringLiteral("associatedMessageType")).toVariant().toString(), prev);
+                    if (!emoji.isEmpty()) prev = QStringLiteral("%1 Reacted to a message").arg(emoji);
+                    prev.replace(QLatin1Char('\n'), QLatin1Char(' '));
+                    if (!prev.isEmpty() && dc >= bestDate) {
+                        bestDate = dc;
+                        bestPreview = prev;
+                    }
+                }
+            }
+            winner.unreadCount = unreadCount;
+            if (bestDate > 1 && !bestPreview.isEmpty()) {
+                winner.lastMessageDate = bestDate;
+                winner.lastMessagePreview = bestPreview;
+                winner.relativeTime = formatRelativeTime(bestDate);
+            }
+        }
+
+        rebuildChatPresentation(winner);
+        mergedList.append(winner);
+    }
+
+    if (chatsMerged && *chatsMerged) {
+        m_chats = mergedList;
+    } else if (mergedList.size() == m_chats.size()) {
+        m_chats = mergedList;
+    }
+}
+
+void Backend::checkPendingDeliveryStatuses() {
+    if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty() || m_pendingDeliveryMessages.isEmpty()) {
+        return;
+    }
+    const QStringList guids = m_pendingDeliveryMessages.keys();
+    int dispatched = 0;
+    for (const QString &msgGuid : guids) {
+        if (msgGuid.isEmpty()) {
+            m_pendingDeliveryMessages.remove(msgGuid);
+            continue;
+        }
+        if (dispatched >= 5) break;
+        ++dispatched;
+
+        QJsonObject whereClause;
+        whereClause.insert(QStringLiteral("statement"), QStringLiteral("message.guid = :guid"));
+        whereClause.insert(QStringLiteral("args"), QJsonObject{{QStringLiteral("guid"), msgGuid}});
+
+        QJsonObject body;
+        body.insert(QStringLiteral("limit"), 5);
+        body.insert(QStringLiteral("offset"), 0);
+        body.insert(QStringLiteral("where"), QJsonArray{whereClause});
+        body.insert(QStringLiteral("with"), QJsonArray{QStringLiteral("chat"), QStringLiteral("handle")});
+
+        QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/message/query")),
+                                          QJsonDocument(body).toJson(QJsonDocument::Compact));
+        connect(reply, &QNetworkReply::finished, this, [this, reply, msgGuid]() {
+            reply->deleteLater();
+            if (reply->error() != QNetworkReply::NoError) return;
+            const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
+            if (!arr.isEmpty()) {
+                processIncomingMessages(arr, false);
+                saveMessagesCache();
+            } else {
+                m_pendingDeliveryMessages.remove(msgGuid);
+            }
+        });
+    }
+}
+
 void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isInitialLoad) {
     bool chatsModified = false;
     bool selectedChatUpdated = false;
     QSet<QString> affectedChatGuids;
     QList<QJsonObject> newIncomingMessages;
+    const QString prevSelectedSig = m_selectedChatGuid + QLatin1Char('|') + selectedChatTitle() + QLatin1Char('|') +
+                                    selectedChatSubtitle() + QLatin1Char('|') + QString::number(selectedChatUnreadCount()) +
+                                    QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(','));
 
     for (const QJsonValue &v : messagesArray) {
         QJsonObject m = v.toObject();
@@ -3096,7 +3697,8 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
             }
             const QJsonArray cArr = m.value(QStringLiteral("chats")).toArray();
             for (const QJsonValue &cv : cArr) {
-                const QString cg = cv.toObject().value(QStringLiteral("guid")).toString();
+                const QString rawCg = cv.toObject().value(QStringLiteral("guid")).toString();
+                const QString cg = resolveCanonicalChatGuid(rawCg);
                 if (!cg.isEmpty() && m_chatMessagesCache.contains(cg) && m_chatMessagesCache[cg].contains(msgGuid)) {
                     m_chatMessagesCache[cg].remove(msgGuid);
                     refreshChatPreviewFromCache(cg);
@@ -3106,6 +3708,7 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
                     }
                 }
             }
+            m_pendingDeliveryMessages.remove(msgGuid);
             continue;
         }
 
@@ -3142,6 +3745,10 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
         }
         if (chatsArr.isEmpty()) continue;
 
+        for (const QJsonValue &cv : chatsArr) {
+            recordChatGroupMetadata(cv.toObject());
+        }
+
         const qint64 rowId = m.value(QStringLiteral("originalROWID")).toVariant().toLongLong();
         if (rowId > 0 && rowId < 100000000LL && !msgGuid.startsWith(QStringLiteral("temp-")) && !msgGuid.startsWith(QStringLiteral("bp-")) && rowId > m_highestMessageRowId) {
             m_highestMessageRowId = rowId;
@@ -3161,30 +3768,62 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
         if (isInitialLoad && rowId > 0 && rowId < 100000000LL && !msgGuid.startsWith(QStringLiteral("temp-")) && !msgGuid.startsWith(QStringLiteral("bp-"))) {
             m_startupHighestRowId = qMax(m_startupHighestRowId, rowId);
         }
+
+        const int incomingErr = m.value(QStringLiteral("error")).toInt(0);
+        const bool incomingDelivered = m.value(QStringLiteral("isDelivered")).toBool(false) || (m.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0);
+        const bool incomingFromMe = m.value(QStringLiteral("isFromMe")).toBool(false);
+        bool notifiedSendError = false;
+
         for (const QJsonValue &cv : chatsArr) {
-            const QString cg = cv.toObject().value(QStringLiteral("guid")).toString();
+            const QString rawCg = cv.toObject().value(QStringLiteral("guid")).toString().trimmed();
+            const QString cg = resolveCanonicalChatGuid(rawCg);
             if (!cg.isEmpty()) {
                 bool msgChanged = !alreadySeen;
-                if (alreadySeen && m_chatMessagesCache.contains(cg) && m_chatMessagesCache.value(cg).contains(msgGuid)) {
+                int oldErr = 0;
+                if (m_chatMessagesCache.contains(cg) && m_chatMessagesCache.value(cg).contains(msgGuid)) {
                     const QJsonObject oldMsg = m_chatMessagesCache.value(cg).value(msgGuid);
+                    oldErr = oldMsg.value(QStringLiteral("error")).toInt(0);
                     if (oldMsg.value(QStringLiteral("text")).toString() != m.value(QStringLiteral("text")).toString() ||
                         oldMsg.value(QStringLiteral("attachments")).toArray() != m.value(QStringLiteral("attachments")).toArray() ||
                         oldMsg.value(QStringLiteral("reactions")).toArray() != m.value(QStringLiteral("reactions")).toArray() ||
                         oldMsg.value(QStringLiteral("isRead")).toBool() != m.value(QStringLiteral("isRead")).toBool() ||
-                        oldMsg.value(QStringLiteral("dateRead")).toVariant().toLongLong() != m.value(QStringLiteral("dateRead")).toVariant().toLongLong()) {
+                        oldMsg.value(QStringLiteral("dateRead")).toVariant().toLongLong() != m.value(QStringLiteral("dateRead")).toVariant().toLongLong() ||
+                        oldErr != incomingErr ||
+                        oldMsg.value(QStringLiteral("isSent")).toBool() != m.value(QStringLiteral("isSent")).toBool() ||
+                        oldMsg.value(QStringLiteral("isDelivered")).toBool() != m.value(QStringLiteral("isDelivered")).toBool() ||
+                        oldMsg.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() != m.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() ||
+                        oldMsg.value(QStringLiteral("dateEdited")).toVariant().toLongLong() != m.value(QStringLiteral("dateEdited")).toVariant().toLongLong() ||
+                        oldMsg.value(QStringLiteral("dateRetracted")).toVariant().toLongLong() != m.value(QStringLiteral("dateRetracted")).toVariant().toLongLong()) {
                         msgChanged = true;
                     }
                 }
-                cacheMessageForChat(cg, m);
+                if (!isInitialLoad && incomingFromMe && incomingErr != 0 && (oldErr == 0 || !alreadySeen) && !notifiedSendError) {
+                    notifiedSendError = true;
+                    emit toastMessage(QStringLiteral("⚠ Message failed to deliver (error %1)").arg(incomingErr));
+                }
+                QJsonObject enrichedMsg = m;
+                if (!rawCg.isEmpty() && enrichedMsg.value(QStringLiteral("originalChatGuid")).toString().isEmpty()) {
+                    enrichedMsg.insert(QStringLiteral("originalChatGuid"), rawCg);
+                }
+                cacheMessageForChat(cg, enrichedMsg);
                 affectedChatGuids.insert(cg);
-                if (cg == m_selectedChatGuid && msgChanged) {
+                if ((cg == m_selectedChatGuid || rawCg == m_selectedChatGuid) && msgChanged) {
                     selectedChatUpdated = true;
                 }
             }
         }
 
+        if (!msgGuid.isEmpty()) {
+            const qint64 nowPollMs = QDateTime::currentMSecsSinceEpoch();
+            const bool timedOut = (dateCreated > 0 && (nowPollMs - dateCreated) > 300000LL);
+            if (incomingErr != 0 || incomingDelivered || m.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0 || timedOut) {
+                m_pendingDeliveryMessages.remove(msgGuid);
+            }
+        }
+
         const QJsonObject chatObj = chatsArr.first().toObject();
-        const QString chatGuid = chatObj.value(QStringLiteral("guid")).toString();
+        const QString rawChatGuid = chatObj.value(QStringLiteral("guid")).toString().trimmed();
+        const QString chatGuid = resolveCanonicalChatGuid(rawChatGuid);
         if (chatGuid.isEmpty()) continue;
 
         const QString embeddedDisp = chatObj.value(QStringLiteral("displayName")).toString().trimmed();
@@ -3268,7 +3907,7 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
 
         int existingIdx = -1;
         for (int i = 0; i < m_chats.size(); ++i) {
-            if (m_chats[i].guid == chatGuid) {
+            if (m_chats[i].guid == chatGuid || m_chats[i].guid == rawChatGuid || m_chats[i].siblingGuids.contains(rawChatGuid)) {
                 existingIdx = i;
                 break;
             }
@@ -3282,8 +3921,13 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
             if (entry.displayName.isEmpty() && m_chatDisplayNames.contains(chatGuid)) {
                 entry.displayName = m_chatDisplayNames.value(chatGuid);
             }
+            entry.originalGroupId = m_chatOriginalGroupIds.value(chatGuid, m_chatOriginalGroupIds.value(rawChatGuid));
+            entry.groupId = m_chatGroupIds.value(chatGuid, m_chatGroupIds.value(rawChatGuid));
+            entry.siblingGuids = m_chatSiblingGuids.value(chatGuid);
+            if (!entry.siblingGuids.contains(chatGuid)) entry.siblingGuids.append(chatGuid);
+            if (!rawChatGuid.isEmpty() && !entry.siblingGuids.contains(rawChatGuid)) entry.siblingGuids.append(rawChatGuid);
             const int style = chatObj.value(QStringLiteral("style")).toInt(m_chatStyles.value(chatGuid, 45));
-            entry.isGroup = (style == 43) || entry.chatIdentifier.startsWith(QStringLiteral("chat"));
+            entry.isGroup = (style == 43) || entry.chatIdentifier.startsWith(QStringLiteral("chat")) || chatGuid.contains(QStringLiteral(";+;"));
             entry.participantHandles = m_chatParticipants.value(chatGuid);
             if (entry.participantHandles.isEmpty() && !entry.isGroup && !entry.chatIdentifier.isEmpty()) {
                 entry.participantHandles.append(entry.chatIdentifier);
@@ -3319,7 +3963,8 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
     }
 
     // Accurately reconcile unreadCount for affected chats directly from cached messages and watermark
-    for (const QString &cg : affectedChatGuids) {
+    for (const QString &rawCg : affectedChatGuids) {
+        const QString cg = resolveCanonicalChatGuid(rawCg);
         for (int i = 0; i < m_chats.size(); ++i) {
             if (m_chats[i].guid == cg) {
                 int count = 0;
@@ -3388,10 +4033,25 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
         }
     }
 
+    bool selectedMigrated = false;
+    bool chatsMerged = false;
+    unifySiblingChats(&selectedMigrated, &chatsMerged);
+    if (chatsMerged) {
+        chatsModified = true;
+        if (selectedMigrated) {
+            selectedChatUpdated = true;
+        }
+    }
+
     if (chatsModified) {
         sortChats();
         emit chatsChanged();
-        emit selectedChatChanged();
+        const QString nextSelectedSig = m_selectedChatGuid + QLatin1Char('|') + selectedChatTitle() + QLatin1Char('|') +
+                                        selectedChatSubtitle() + QLatin1Char('|') + QString::number(selectedChatUnreadCount()) +
+                                        QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(','));
+        if (selectedMigrated || nextSelectedSig != prevSelectedSig) {
+            emit selectedChatChanged();
+        }
     }
 
     fetchMissingGroupParticipants();
@@ -3762,17 +4422,18 @@ void Backend::selectChat(const QString &chatGuid) {
         clearSelectedChat();
         return;
     }
+    const QString resolvedGuid = resolveCanonicalChatGuid(chatGuid);
     m_stayOnHomePage = false;
-    m_selectedChatGuid = chatGuid;
-    m_unreadOverrides.remove(chatGuid);
+    m_selectedChatGuid = resolvedGuid;
+    m_unreadOverrides.remove(resolvedGuid);
 
     for (ChatEntry &c : m_chats) {
-        if (c.guid == chatGuid) {
-            m_readWatermarks[chatGuid] = qMax(m_readWatermarks.value(chatGuid, 0), c.lastMessageDate);
+        if (c.guid == resolvedGuid) {
+            m_readWatermarks[resolvedGuid] = qMax(m_readWatermarks.value(resolvedGuid, 0), c.lastMessageDate);
             saveAppState();
             if (c.unreadCount > 0) {
                 c.unreadCount = 0;
-                markChatRead(chatGuid);
+                markChatRead(resolvedGuid);
             }
             break;
         }
@@ -3789,24 +4450,24 @@ void Backend::selectChat(const QString &chatGuid) {
     }
 
     m_loadingOlderMessages = false;
-    if (m_chatMessagesCache.contains(chatGuid)) {
+    if (m_chatMessagesCache.contains(resolvedGuid)) {
         m_attachmentDownloadQueue.clear();
     }
     emit selectedChatChanged();
 
-    if (!m_demoMode || m_chatMessagesCache.contains(chatGuid)) {
+    if (!m_demoMode || m_chatMessagesCache.contains(resolvedGuid)) {
         rebuildSelectedChatMessages();
         prefetchRecentChatAttachments();
-    } else if (m_demoMode && m_demoChatMessages.contains(chatGuid)) {
+    } else if (m_demoMode && m_demoChatMessages.contains(resolvedGuid)) {
         emit aboutToChangeMessages();
-        m_messages = m_demoChatMessages.value(chatGuid);
+        m_messages = m_demoChatMessages.value(resolvedGuid);
         emit messagesChanged();
     }
     emit chatsChanged();
     emit olderMessagesChanged();
 
     if (!m_demoMode) {
-        loadChatMessages(chatGuid);
+        loadChatMessages(resolvedGuid);
     }
 }
 
@@ -4368,10 +5029,15 @@ QVariantList Backend::buildMessageListFromApi(
         if (isFromMe && guid == latestOutgoingGuid) {
             const qint64 dateRead = m.value(QStringLiteral("dateRead")).toVariant().toLongLong();
             const qint64 dateDelivered = m.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
+            const bool isDeliveredFlag = m.value(QStringLiteral("isDelivered")).toBool(false);
+            const bool hasIsSent = m.contains(QStringLiteral("isSent"));
+            const bool isSentFlag = m.value(QStringLiteral("isSent")).toBool(true);
             if (dateRead > 0) {
                 receiptText = QStringLiteral("Read ") + QDateTime::fromMSecsSinceEpoch(dateRead).toString(QStringLiteral("h:mm AP"));
-            } else if (dateDelivered > 0) {
+            } else if (dateDelivered > 0 || isDeliveredFlag) {
                 receiptText = QStringLiteral("Delivered");
+            } else if (hasIsSent && !isSentFlag) {
+                receiptText = QStringLiteral("Sending...");
             } else {
                 receiptText = QStringLiteral("Sent");
             }
@@ -4504,9 +5170,11 @@ QVariantList Backend::buildMessageListFromApi(
 
 void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &rawMsg) {
     if (chatGuid.isEmpty()) return;
+    const QString targetGuid = resolveCanonicalChatGuid(chatGuid);
     const QString msgGuid = rawMsg.value(QStringLiteral("guid")).toString();
     if (msgGuid.isEmpty()) return;
     const QJsonArray msgChats = rawMsg.value(QStringLiteral("chats")).toArray();
+    QString rawOrigChatGuid = rawMsg.value(QStringLiteral("originalChatGuid")).toString().trimmed();
     if (!msgChats.isEmpty()) {
         bool matchesTargetChat = false;
         bool hasAnyChatGuid = false;
@@ -4514,7 +5182,8 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
             const QString cg = cv.toObject().value(QStringLiteral("guid")).toString().trimmed();
             if (!cg.isEmpty()) {
                 hasAnyChatGuid = true;
-                if (cg == chatGuid) {
+                if (rawOrigChatGuid.isEmpty()) rawOrigChatGuid = cg;
+                if (cg == targetGuid || cg == chatGuid || resolveCanonicalChatGuid(cg) == targetGuid) {
                     matchesTargetChat = true;
                     break;
                 }
@@ -4525,13 +5194,16 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
         }
     }
     QJsonObject msg = rawMsg;
-    msg.insert(QStringLiteral("chatGuid"), chatGuid);
+    if (!rawOrigChatGuid.isEmpty()) {
+        msg.insert(QStringLiteral("originalChatGuid"), rawOrigChatGuid);
+    }
+    msg.insert(QStringLiteral("chatGuid"), targetGuid);
     if (m_deletedMessageGuids.contains(msgGuid) || isMessageDeletedOrRetracted(msg)) {
         if (isMessageDeletedOrRetracted(msg)) {
             m_deletedMessageGuids.insert(msgGuid);
         }
-        if (m_chatMessagesCache.contains(chatGuid)) {
-            m_chatMessagesCache[chatGuid].remove(msgGuid);
+        if (m_chatMessagesCache.contains(targetGuid)) {
+            m_chatMessagesCache[targetGuid].remove(msgGuid);
         }
         return;
     }
@@ -4549,7 +5221,7 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
         }
     }
 
-    auto &chatMap = m_chatMessagesCache[chatGuid];
+    auto &chatMap = m_chatMessagesCache[targetGuid];
     const bool isTempGuid = msgGuid.startsWith(QStringLiteral("temp-")) || msgGuid.startsWith(QStringLiteral("bp-"));
     const QString explicitTempGuid = msg.value(QStringLiteral("tempGuid")).toString().trimmed();
     const bool isFromMe = msg.value(QStringLiteral("isFromMe")).toBool();
@@ -4587,7 +5259,26 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
                 chatMap.remove(tk);
                 m_seenMessageGuids.remove(tk);
             }
-            if (chatGuid == m_selectedChatGuid) {
+            if (targetGuid == m_selectedChatGuid) {
+                const int msgErr = msg.value(QStringLiteral("error")).toInt(0);
+                const qint64 msgDateRead = msg.value(QStringLiteral("dateRead")).toVariant().toLongLong();
+                const qint64 msgDateDelivered = msg.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
+                const bool msgHasSent = msg.contains(QStringLiteral("isSent"));
+                const bool msgIsSent = msg.value(QStringLiteral("isSent")).toBool(false);
+                const bool msgHasDeliv = msg.contains(QStringLiteral("isDelivered"));
+                const bool msgIsDeliv = msg.value(QStringLiteral("isDelivered")).toBool(false) || (msgDateDelivered > 0);
+                QString computedReceipt = QStringLiteral("Delivered");
+                if (msgErr != 0) {
+                    computedReceipt = QStringLiteral("⚠ Not Delivered");
+                } else if (msgDateRead > 0) {
+                    computedReceipt = QStringLiteral("Read ") + QDateTime::fromMSecsSinceEpoch(msgDateRead).toString(QStringLiteral("h:mm AP"));
+                } else if (msgIsDeliv || (!msgHasSent && !msgHasDeliv)) {
+                    computedReceipt = QStringLiteral("Delivered");
+                } else if (msgIsSent) {
+                    computedReceipt = QStringLiteral("Sent");
+                } else {
+                    computedReceipt = QStringLiteral("Sending...");
+                }
                 for (int i = 0; i < m_messages.size(); ++i) {
                     QVariantMap vm = m_messages[i].toMap();
                     const QString vg = vm.value(QStringLiteral("guid")).toString();
@@ -4597,7 +5288,9 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
                          ((!incomingText.isEmpty() && vm.value(QStringLiteral("text")).toString().trimmed() == incomingText) ||
                           (incomingHasAtt && (vm.value(QStringLiteral("hasImageAttachment")).toBool() || vm.value(QStringLiteral("hasFileAttachment")).toBool()))))) {
                         vm.insert(QStringLiteral("guid"), msgGuid);
-                        vm.insert(QStringLiteral("receiptText"), QStringLiteral("Delivered"));
+                        vm.insert(QStringLiteral("receiptText"), computedReceipt);
+                        vm.insert(QStringLiteral("isFailed"), msgErr != 0);
+                        vm.insert(QStringLiteral("errorCode"), msgErr);
                         if (vm.value(QStringLiteral("expressiveSendStyleId")).toString().isEmpty() && m_recentOutboundEffects.contains(incomingText)) {
                             const QString effId = m_recentOutboundEffects.value(incomingText);
                             vm.insert(QStringLiteral("expressiveSendStyleId"), effId);
@@ -4633,7 +5326,7 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
         return;
     }
 
-    const bool recentLocalReadMut = (m_localReadMutationTimeMs.value(chatGuid, 0) > QDateTime::currentMSecsSinceEpoch() - 15000);
+    const bool recentLocalReadMut = (m_localReadMutationTimeMs.value(targetGuid, 0) > QDateTime::currentMSecsSinceEpoch() - 15000);
     QJsonObject merged = chatMap.value(msgGuid);
     for (auto it = msg.begin(); it != msg.end(); ++it) {
         if (it.key() == QStringLiteral("text")) {
@@ -5001,7 +5694,9 @@ void Backend::refreshChatPreviewFromCache(const QString &chatGuid) {
 
     sortChats();
     emit chatsChanged();
-    emit selectedChatChanged();
+    if (chatGuid == m_selectedChatGuid || resolveCanonicalChatGuid(chatGuid) == m_selectedChatGuid) {
+        emit selectedChatChanged();
+    }
 }
 
 void Backend::loadOlderMessages() {
@@ -5540,28 +6235,29 @@ void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
 
 void Backend::markChatRead(const QString &chatGuid) {
     if (chatGuid.isEmpty()) return;
-    m_localReadMutationTimeMs[chatGuid] = QDateTime::currentMSecsSinceEpoch();
-    m_unreadOverrides.remove(chatGuid);
+    const QString resolvedGuid = resolveCanonicalChatGuid(chatGuid);
+    m_localReadMutationTimeMs[resolvedGuid] = QDateTime::currentMSecsSinceEpoch();
+    m_unreadOverrides.remove(resolvedGuid);
     qint64 maxMsgDate = 0;
-    if (m_chatMessagesCache.contains(chatGuid)) {
-        const auto &chatMap = m_chatMessagesCache.value(chatGuid);
+    if (m_chatMessagesCache.contains(resolvedGuid)) {
+        const auto &chatMap = m_chatMessagesCache.value(resolvedGuid);
         for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
             maxMsgDate = qMax(maxMsgDate, it.value().value(QStringLiteral("dateCreated")).toVariant().toLongLong());
         }
     }
     for (ChatEntry &c : m_chats) {
-        if (c.guid == chatGuid) {
+        if (c.guid == resolvedGuid) {
             c.unreadCount = 0;
-            m_readWatermarks[chatGuid] = qMax(m_readWatermarks.value(chatGuid, 0), qMax(c.lastMessageDate, maxMsgDate));
+            m_readWatermarks[resolvedGuid] = qMax(m_readWatermarks.value(resolvedGuid, 0), qMax(c.lastMessageDate, maxMsgDate));
             break;
         }
     }
     if (!m_chats.isEmpty()) {
         saveAppState();
     }
-    // Also mark all cached messages in m_chatMessagesCache[chatGuid] as isRead = true
-    if (m_chatMessagesCache.contains(chatGuid)) {
-        auto &chatMap = m_chatMessagesCache[chatGuid];
+    // Also mark all cached messages in m_chatMessagesCache[resolvedGuid] as isRead = true
+    if (m_chatMessagesCache.contains(resolvedGuid)) {
+        auto &chatMap = m_chatMessagesCache[resolvedGuid];
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         for (auto it = chatMap.begin(); it != chatMap.end(); ++it) {
             QJsonObject m = it.value();
@@ -5572,11 +6268,13 @@ void Backend::markChatRead(const QString &chatGuid) {
         saveMessagesCache();
     }
     emit chatsChanged();
-    emit selectedChatChanged();
+    if (resolvedGuid == m_selectedChatGuid) {
+        emit selectedChatChanged();
+    }
 
     if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
 
-    const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(chatGuid));
+    const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(resolvedGuid));
     QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/chat/%1/read").arg(encoded));
     req.setPriority(QNetworkRequest::HighPriority);
     QNetworkReply *reply = m_sendNam.post(req, QByteArray("{}"));
@@ -5585,13 +6283,14 @@ void Backend::markChatRead(const QString &chatGuid) {
 
 void Backend::markChatUnread(const QString &chatGuid) {
     if (chatGuid.isEmpty()) return;
-    m_localReadMutationTimeMs[chatGuid] = QDateTime::currentMSecsSinceEpoch();
+    const QString resolvedGuid = resolveCanonicalChatGuid(chatGuid);
+    m_localReadMutationTimeMs[resolvedGuid] = QDateTime::currentMSecsSinceEpoch();
     qint64 latestIncomingDate = 0;
     qint64 latestIncomingReadDate = 0;
     QString latestMsgGuid;
 
-    if (m_chatMessagesCache.contains(chatGuid)) {
-        auto &chatMap = m_chatMessagesCache[chatGuid];
+    if (m_chatMessagesCache.contains(resolvedGuid)) {
+        auto &chatMap = m_chatMessagesCache[resolvedGuid];
         for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
             const QJsonObject &m = it.value();
             if (!m.value(QStringLiteral("isFromMe")).toBool() && m.value(QStringLiteral("itemType")).toInt(0) == 0) {
@@ -5614,21 +6313,23 @@ void Backend::markChatUnread(const QString &chatGuid) {
     }
 
     for (ChatEntry &c : m_chats) {
-        if (c.guid == chatGuid) {
+        if (c.guid == resolvedGuid) {
             c.unreadCount = 1;
             const qint64 targetUnreadDate = (latestIncomingDate > 0) ? latestIncomingDate : c.lastMessageDate;
-            m_readWatermarks[chatGuid] = qMax(0LL, targetUnreadDate - 1LL);
-            m_unreadOverrides[chatGuid] = qMax(targetUnreadDate, latestIncomingReadDate);
+            m_readWatermarks[resolvedGuid] = qMax(0LL, targetUnreadDate - 1LL);
+            m_unreadOverrides[resolvedGuid] = qMax(targetUnreadDate, latestIncomingReadDate);
             saveAppState();
             break;
         }
     }
     emit chatsChanged();
-    emit selectedChatChanged();
+    if (resolvedGuid == m_selectedChatGuid) {
+        emit selectedChatChanged();
+    }
 
     if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
 
-    const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(chatGuid));
+    const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(resolvedGuid));
     QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/chat/%1/unread").arg(encoded));
     req.setPriority(QNetworkRequest::HighPriority);
     QNetworkReply *reply = m_sendNam.post(req, QByteArray("{}"));
@@ -5663,12 +6364,14 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     const QString trimmed = replaceEmojiShortcodes(text.trimmed());
     if (chatGuid.isEmpty() || trimmed.isEmpty()) return;
 
+    const QString canonicalGuid = resolveCanonicalChatGuid(chatGuid);
+    const QString sendChatGuid = resolveActiveSendChatGuid(canonicalGuid);
     const QString tempGuid = QStringLiteral("temp-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
 
-    // Optimistic UI append (scoped to target chatGuid so background sends never bleed into another selected chat's timeline)
+    // Optimistic UI append (scoped to canonicalGuid so background sends never bleed into another selected chat's timeline)
     QVariantMap optimistic;
     optimistic.insert(QStringLiteral("guid"), tempGuid);
-    optimistic.insert(QStringLiteral("chatGuid"), chatGuid);
+    optimistic.insert(QStringLiteral("chatGuid"), canonicalGuid);
     optimistic.insert(QStringLiteral("text"), trimmed);
     optimistic.insert(QStringLiteral("formattedText"), formatMessageTextWithLinks(trimmed));
     optimistic.insert(QStringLiteral("verificationCode"), extractVerificationCode(trimmed));
@@ -5684,22 +6387,22 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     optimistic.insert(QStringLiteral("receiptText"), m_demoMode ? QStringLiteral("Delivered") : QStringLiteral("Sending..."));
     optimistic.insert(QStringLiteral("replyToGuid"), replyToGuid);
     optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), QDateTime::currentMSecsSinceEpoch());
-    if (m_demoMode && m_demoChatMessages.contains(chatGuid)) {
-        m_demoChatMessages[chatGuid].append(optimistic);
+    if (m_demoMode && m_demoChatMessages.contains(canonicalGuid)) {
+        m_demoChatMessages[canonicalGuid].append(optimistic);
     }
-    if (chatGuid == m_selectedChatGuid) {
+    if (canonicalGuid == m_selectedChatGuid || chatGuid == m_selectedChatGuid) {
         m_messages.append(optimistic);
         emit messagesChanged();
     }
 
-    m_unreadOverrides.remove(chatGuid);
+    m_unreadOverrides.remove(canonicalGuid);
     for (ChatEntry &c : m_chats) {
-        if (c.guid == chatGuid) {
+        if (c.guid == canonicalGuid) {
             c.lastMessagePreview = trimmed;
             c.lastMessageDate = QDateTime::currentMSecsSinceEpoch();
             c.relativeTime = QStringLiteral("now");
             c.unreadCount = 0;
-            m_readWatermarks[chatGuid] = qMax(m_readWatermarks.value(chatGuid, 0), c.lastMessageDate);
+            m_readWatermarks[canonicalGuid] = qMax(m_readWatermarks.value(canonicalGuid, 0), c.lastMessageDate);
             break;
         }
     }
@@ -5709,20 +6412,20 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     if (m_demoMode) return;
 
     QJsonObject payload;
-    payload.insert(QStringLiteral("chatGuid"), chatGuid);
+    payload.insert(QStringLiteral("chatGuid"), sendChatGuid);
     payload.insert(QStringLiteral("tempGuid"), tempGuid);
     payload.insert(QStringLiteral("message"), trimmed);
     payload.insert(QStringLiteral("method"), QStringLiteral("private-api"));
     if (!replyToGuid.isEmpty()) {
         payload.insert(QStringLiteral("selectedMessageGuid"), replyToGuid);
         int partIndex = 0;
-        if (m_chatMessagesCache.contains(chatGuid)) {
-            partIndex = computeTextPartIndex(m_chatMessagesCache.value(chatGuid).value(replyToGuid));
+        if (m_chatMessagesCache.contains(canonicalGuid)) {
+            partIndex = computeTextPartIndex(m_chatMessagesCache.value(canonicalGuid).value(replyToGuid));
         }
         payload.insert(QStringLiteral("partIndex"), partIndex);
     }
 
-    auto finalizeSentMessage = [this, chatGuid, tempGuid](const QByteArray &bytes) -> bool {
+    auto finalizeSentMessage = [this, canonicalGuid, tempGuid](const QByteArray &bytes) -> bool {
         const QJsonDocument doc = QJsonDocument::fromJson(bytes);
         QJsonObject dataObj = doc.object().value(QStringLiteral("data")).toObject();
         if (dataObj.value(QStringLiteral("messages")).isArray()) {
@@ -5734,25 +6437,50 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         const QString realGuid = dataObj.value(QStringLiteral("guid")).toString();
         const qint64 dateCreated = dataObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
         const int sendErrCode = dataObj.value(QStringLiteral("error")).toInt(0);
+        const bool hasIsSent = dataObj.contains(QStringLiteral("isSent"));
+        const bool isSentFlag = dataObj.value(QStringLiteral("isSent")).toBool(false);
+        const bool hasIsDelivered = dataObj.contains(QStringLiteral("isDelivered"));
+        const qint64 dateDelivered = dataObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
+        const bool isDeliveredFlag = dataObj.value(QStringLiteral("isDelivered")).toBool(false) || (dateDelivered > 0);
+        const bool looksLikeSyntheticChatGuid = realGuid.startsWith(QStringLiteral("iMessage;")) ||
+                                                realGuid.startsWith(QStringLiteral("SMS;")) ||
+                                                realGuid.startsWith(QStringLiteral("RCS;"));
+
         if (sendErrCode != 0) {
+            if (!realGuid.isEmpty() && !looksLikeSyntheticChatGuid) {
+                m_seenMessageGuids.insert(realGuid);
+                cacheMessageForChat(canonicalGuid, dataObj);
+                saveMessagesCache();
+                if (canonicalGuid == m_selectedChatGuid) {
+                    rebuildSelectedChatMessages();
+                }
+            }
             return false;
         }
 
-        if (!realGuid.isEmpty() && !realGuid.startsWith(QStringLiteral("iMessage;")) && !realGuid.startsWith(QStringLiteral("SMS;"))) {
+        if (!realGuid.isEmpty() && !looksLikeSyntheticChatGuid) {
             m_seenMessageGuids.insert(realGuid);
             if (dateCreated > m_lastMessageTimestamp) {
                 m_lastMessageTimestamp = dateCreated;
             }
-            cacheMessageForChat(chatGuid, dataObj);
+            cacheMessageForChat(canonicalGuid, dataObj);
 
-            if (chatGuid == m_selectedChatGuid) {
+            QString finalReceipt = QStringLiteral("Delivered");
+            if (!isDeliveredFlag && (hasIsSent || hasIsDelivered)) {
+                finalReceipt = isSentFlag ? QStringLiteral("Sent") : QStringLiteral("Sending...");
+                m_pendingDeliveryMessages.insert(realGuid, canonicalGuid);
+            }
+
+            if (canonicalGuid == m_selectedChatGuid) {
                 bool replaced = false;
                 for (int i = 0; i < m_messages.size(); ++i) {
                     QVariantMap m = m_messages[i].toMap();
                     const QString curG = m.value(QStringLiteral("guid")).toString();
                     if (curG == tempGuid || curG == realGuid) {
                         m.insert(QStringLiteral("guid"), realGuid);
-                        m.insert(QStringLiteral("receiptText"), QStringLiteral("Delivered"));
+                        m.insert(QStringLiteral("receiptText"), finalReceipt);
+                        m.insert(QStringLiteral("isFailed"), false);
+                        m.insert(QStringLiteral("errorCode"), 0);
                         m_messages[i] = m;
                         replaced = true;
                         break;
@@ -5777,11 +6505,11 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         }
     };
 
-    auto markOptimisticFailed = [this, chatGuid, tempGuid]() {
-        if (m_chatMessagesCache.contains(chatGuid)) {
-            m_chatMessagesCache[chatGuid].remove(tempGuid);
+    auto markOptimisticFailed = [this, canonicalGuid, tempGuid]() {
+        if (m_chatMessagesCache.contains(canonicalGuid)) {
+            m_chatMessagesCache[canonicalGuid].remove(tempGuid);
         }
-        if (chatGuid == m_selectedChatGuid) {
+        if (canonicalGuid == m_selectedChatGuid) {
             bool updated = false;
             for (int i = 0; i < m_messages.size(); ++i) {
                 QVariantMap m = m_messages[i].toMap();
@@ -5801,11 +6529,11 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         emit toastMessage(QStringLiteral("⚠ Message failed to send"));
     };
 
-    auto sendViaNewChat = [this, chatGuid, trimmed, finalizeSentMessage, markOptimisticFailed, finishSendTrack]() {
-        const QString addr = chatGuid.section(QStringLiteral(";-;"), 1);
+    auto sendViaNewChat = [this, canonicalGuid, sendChatGuid, trimmed, finalizeSentMessage, markOptimisticFailed, finishSendTrack]() {
+        const QString addr = sendChatGuid.section(QStringLiteral(";-;"), 1);
         if (addr.isEmpty()) {
             markOptimisticFailed();
-            loadChatMessages(chatGuid);
+            loadChatMessages(canonicalGuid);
             finishSendTrack();
             return;
         }
@@ -5817,13 +6545,13 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         req3.setPriority(QNetworkRequest::HighPriority);
         req3.setTransferTimeout(15000);
         QNetworkReply *r3 = m_sendNam.post(req3, QJsonDocument(newChatPayload).toJson(QJsonDocument::Compact));
-        connect(r3, &QNetworkReply::finished, this, [this, r3, chatGuid, finalizeSentMessage, markOptimisticFailed, finishSendTrack]() {
+        connect(r3, &QNetworkReply::finished, this, [this, r3, canonicalGuid, finalizeSentMessage, markOptimisticFailed, finishSendTrack]() {
             r3->deleteLater();
             const bool resolved = (r3->error() == QNetworkReply::NoError) && finalizeSentMessage(r3->readAll());
             fetchChatsMetadata();
             if (!resolved) {
                 markOptimisticFailed();
-                loadChatMessages(chatGuid);
+                loadChatMessages(canonicalGuid);
             }
             finishSendTrack();
         });
@@ -5835,26 +6563,26 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     sendReq.setPriority(QNetworkRequest::HighPriority);
     sendReq.setTransferTimeout(15000);
     QNetworkReply *reply = m_sendNam.post(sendReq, QJsonDocument(payload).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid, trimmed, tempGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, sendChatGuid, trimmed, tempGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
             const QByteArray errBytes = reply->isOpen() ? reply->readAll() : QByteArray();
             const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             const bool chatMissing = (status == 404 || errBytes.contains("Chat does not exist") || errBytes.contains("chat does not exist"));
-            if (chatMissing && chatGuid.contains(QStringLiteral(";-;"))) {
+            if (chatMissing && sendChatGuid.contains(QStringLiteral(";-;"))) {
                 sendViaNewChat();
                 return;
             }
             if (errBytes.contains("Message send failed") || reply->error() == QNetworkReply::TimeoutError) {
                 markOptimisticFailed();
-                loadChatMessages(chatGuid);
+                loadChatMessages(canonicalGuid);
                 finishSendTrack();
                 return;
             }
 
             // Fallback to apple-script method, and if that fails on a brand-new 1:1 chat, create via /api/v1/chat/new
             QJsonObject fallback;
-            fallback.insert(QStringLiteral("chatGuid"), chatGuid);
+            fallback.insert(QStringLiteral("chatGuid"), sendChatGuid);
             fallback.insert(QStringLiteral("tempGuid"), tempGuid + QStringLiteral("-as"));
             fallback.insert(QStringLiteral("message"), trimmed);
             fallback.insert(QStringLiteral("method"), QStringLiteral("apple-script"));
@@ -5862,22 +6590,22 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
             req2.setPriority(QNetworkRequest::HighPriority);
             req2.setTransferTimeout(15000);
             QNetworkReply *r2 = m_sendNam.post(req2, QJsonDocument(fallback).toJson(QJsonDocument::Compact));
-            connect(r2, &QNetworkReply::finished, this, [this, r2, chatGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
+            connect(r2, &QNetworkReply::finished, this, [this, r2, canonicalGuid, sendChatGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
                 r2->deleteLater();
                 if (r2->error() != QNetworkReply::NoError) {
                     const QByteArray r2Err = r2->isOpen() ? r2->readAll() : QByteArray();
-                    if (!r2Err.contains("Message send failed") && chatGuid.contains(QStringLiteral(";-;"))) {
+                    if (!r2Err.contains("Message send failed") && sendChatGuid.contains(QStringLiteral(";-;"))) {
                         sendViaNewChat();
                         return;
                     }
                     markOptimisticFailed();
-                    loadChatMessages(chatGuid);
+                    loadChatMessages(canonicalGuid);
                     finishSendTrack();
                     return;
                 }
                 if (!finalizeSentMessage(r2->readAll())) {
                     markOptimisticFailed();
-                    loadChatMessages(chatGuid);
+                    loadChatMessages(canonicalGuid);
                 }
                 finishSendTrack();
             });
@@ -5886,7 +6614,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
 
         if (!finalizeSentMessage(reply->readAll())) {
             markOptimisticFailed();
-            loadChatMessages(chatGuid);
+            loadChatMessages(canonicalGuid);
         }
         finishSendTrack();
     });
@@ -5894,6 +6622,8 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
 
 void Backend::sendReaction(const QString &chatGuid, const QString &messageGuid, const QString &reaction) {
     if (chatGuid.isEmpty() || messageGuid.isEmpty() || reaction.isEmpty()) return;
+    const QString canonicalGuid = resolveCanonicalChatGuid(chatGuid);
+    const QString sendChatGuid = resolveActiveSendChatGuid(canonicalGuid);
 
     QString reactionKey = reaction.trimmed().toLower();
     if (reaction == QStringLiteral("❤️")) reactionKey = QStringLiteral("love");
@@ -5958,12 +6688,12 @@ void Backend::sendReaction(const QString &chatGuid, const QString &messageGuid, 
     if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
 
     int partIndex = 0;
-    if (m_chatMessagesCache.contains(chatGuid)) {
-        partIndex = computeTextPartIndex(m_chatMessagesCache.value(chatGuid).value(messageGuid));
+    if (m_chatMessagesCache.contains(canonicalGuid)) {
+        partIndex = computeTextPartIndex(m_chatMessagesCache.value(canonicalGuid).value(messageGuid));
     }
 
     QJsonObject payload;
-    payload.insert(QStringLiteral("chatGuid"), chatGuid);
+    payload.insert(QStringLiteral("chatGuid"), sendChatGuid);
     payload.insert(QStringLiteral("selectedMessageGuid"), messageGuid);
     payload.insert(QStringLiteral("reaction"), reactionKey);
     payload.insert(QStringLiteral("partIndex"), partIndex);
@@ -5971,12 +6701,12 @@ void Backend::sendReaction(const QString &chatGuid, const QString &messageGuid, 
     QNetworkRequest reactReq = makeRequest(QStringLiteral("/api/v1/message/react"));
     reactReq.setPriority(QNetworkRequest::HighPriority);
     QNetworkReply *reply = m_sendNam.post(reactReq, QJsonDocument(payload).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid]() {
         reply->deleteLater();
-        loadChatMessages(chatGuid);
-        QTimer::singleShot(1200, this, [this, chatGuid]() {
-            if (m_selectedChatGuid == chatGuid) {
-                loadChatMessages(chatGuid);
+        loadChatMessages(canonicalGuid);
+        QTimer::singleShot(1200, this, [this, canonicalGuid]() {
+            if (m_selectedChatGuid == canonicalGuid) {
+                loadChatMessages(canonicalGuid);
             }
         });
     });
@@ -6657,6 +7387,8 @@ QString Backend::pasteClipboardImageToTempFile() {
 
 void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, const QString &caption) {
     if (chatGuid.isEmpty() || filePath.trimmed().isEmpty()) return;
+    const QString canonicalGuid = resolveCanonicalChatGuid(chatGuid);
+    const QString sendChatGuid = resolveActiveSendChatGuid(canonicalGuid);
     QFileInfo fi(filePath.trimmed());
     if (!fi.exists() || !fi.isFile()) return;
     const QString tempGuid = QStringLiteral("temp-att-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -6673,7 +7405,7 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     };
     QVariantMap optimistic;
     optimistic.insert(QStringLiteral("guid"), tempGuid);
-    optimistic.insert(QStringLiteral("chatGuid"), chatGuid);
+    optimistic.insert(QStringLiteral("chatGuid"), canonicalGuid);
     optimistic.insert(QStringLiteral("text"), caption.trimmed());
     optimistic.insert(QStringLiteral("formattedText"), formatMessageTextWithLinks(caption.trimmed()));
     optimistic.insert(QStringLiteral("isFromMe"), true);
@@ -6696,22 +7428,22 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     }
     optimistic.insert(QStringLiteral("receiptText"), m_demoMode ? QStringLiteral("Delivered") : QStringLiteral("Sending..."));
     optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), nowMs);
-    if (chatGuid == m_selectedChatGuid) {
+    if (canonicalGuid == m_selectedChatGuid || chatGuid == m_selectedChatGuid) {
         emit aboutToChangeMessages();
         m_messages.append(optimistic);
         emit messagesChanged();
     }
 
-    m_unreadOverrides.remove(chatGuid);
+    m_unreadOverrides.remove(canonicalGuid);
     for (ChatEntry &c : m_chats) {
-        if (c.guid == chatGuid) {
+        if (c.guid == canonicalGuid) {
             c.lastMessagePreview = caption.trimmed().isEmpty()
                                        ? (isImg ? QStringLiteral("📷 Photo") : (QStringLiteral("📎 ") + fi.fileName()))
                                        : caption.trimmed();
             c.lastMessageDate = nowMs;
             c.relativeTime = QStringLiteral("now");
             c.unreadCount = 0;
-            m_readWatermarks[chatGuid] = qMax(m_readWatermarks.value(chatGuid, 0), nowMs);
+            m_readWatermarks[canonicalGuid] = qMax(m_readWatermarks.value(canonicalGuid, 0), nowMs);
             break;
         }
     }
@@ -6730,7 +7462,7 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
         p.setBody(val.toUtf8());
         multiPart->append(p);
     };
-    addTextPart("chatGuid", chatGuid);
+    addTextPart("chatGuid", sendChatGuid);
     addTextPart("tempGuid", tempGuid);
     addTextPart("name", fi.fileName());
     addTextPart("method", QStringLiteral("private-api"));
@@ -6754,7 +7486,7 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     req.setTransferTimeout(45000);
     QNetworkReply *reply = m_sendNam.post(req, multiPart);
     multiPart->setParent(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid, tempGuid, absLocalPath]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, tempGuid, absLocalPath]() {
         reply->deleteLater();
         if (m_activeSendCount > 0) {
             --m_activeSendCount;
@@ -6764,6 +7496,12 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
             const QByteArray respBytes = reply->readAll();
             const QJsonObject dataObj = QJsonDocument::fromJson(respBytes).object().value(QStringLiteral("data")).toObject();
             const QString realGuid = dataObj.value(QStringLiteral("guid")).toString();
+            const int sendErrCode = dataObj.value(QStringLiteral("error")).toInt(0);
+            const bool hasIsSent = dataObj.contains(QStringLiteral("isSent"));
+            const bool isSentFlag = dataObj.value(QStringLiteral("isSent")).toBool(false);
+            const bool hasIsDelivered = dataObj.contains(QStringLiteral("isDelivered"));
+            const bool isDeliveredFlag = dataObj.value(QStringLiteral("isDelivered")).toBool(false) ||
+                                         (dataObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0);
             const QJsonArray atts = dataObj.value(QStringLiteral("attachments")).toArray();
             QString firstAttGuid;
             for (const QJsonValue &av : atts) {
@@ -6775,9 +7513,17 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
             }
             if (!realGuid.isEmpty()) {
                 m_seenMessageGuids.insert(realGuid);
-                cacheMessageForChat(chatGuid, dataObj);
+                cacheMessageForChat(canonicalGuid, dataObj);
             }
-            if (chatGuid == m_selectedChatGuid) {
+            QString finalReceipt = QStringLiteral("Delivered");
+            if (sendErrCode != 0) {
+                finalReceipt = QStringLiteral("⚠ Not Delivered");
+                emit toastMessage(QStringLiteral("⚠ Failed to send attachment (error %1)").arg(sendErrCode));
+            } else if (!isDeliveredFlag && (hasIsSent || hasIsDelivered)) {
+                finalReceipt = isSentFlag ? QStringLiteral("Sent") : QStringLiteral("Sending...");
+                if (!realGuid.isEmpty()) m_pendingDeliveryMessages.insert(realGuid, canonicalGuid);
+            }
+            if (canonicalGuid == m_selectedChatGuid) {
                 bool updatedOpt = false;
                 for (int i = 0; i < m_messages.size(); ++i) {
                     QVariantMap m = m_messages[i].toMap();
@@ -6796,7 +7542,9 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
                                 m.insert(QStringLiteral("imageAttachments"), imgList);
                             }
                         }
-                        m.insert(QStringLiteral("receiptText"), QStringLiteral("Delivered"));
+                        m.insert(QStringLiteral("receiptText"), finalReceipt);
+                        m.insert(QStringLiteral("isFailed"), sendErrCode != 0);
+                        m.insert(QStringLiteral("errorCode"), sendErrCode);
                         m_messages[i] = m;
                         updatedOpt = true;
                         break;
@@ -6810,10 +7558,10 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
             }
             saveMessagesCache();
             if (realGuid.isEmpty()) {
-                loadChatMessages(chatGuid);
+                loadChatMessages(canonicalGuid);
             }
         } else {
-            if (chatGuid == m_selectedChatGuid) {
+            if (canonicalGuid == m_selectedChatGuid) {
                 for (int i = 0; i < m_messages.size(); ++i) {
                     QVariantMap m = m_messages[i].toMap();
                     if (m.value(QStringLiteral("guid")).toString() == tempGuid) {

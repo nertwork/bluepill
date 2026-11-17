@@ -525,10 +525,15 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        var initialGuid = backend.selectedChatGuid || ""
+        if (initialGuid.length > 0) {
+            root.lastDraftChatGuid = initialGuid
+        }
         backend.registerWindow(root)
-        if (backend.selectedChatGuid && backend.selectedChatGuid.length > 0) {
-            root.lastDraftChatGuid = backend.selectedChatGuid
-            var savedDraft = (root.chatDrafts && root.chatDrafts[backend.selectedChatGuid] !== undefined) ? root.chatDrafts[backend.selectedChatGuid] : ""
+        var currentGuid = backend.selectedChatGuid || ""
+        if (currentGuid.length > 0) {
+            root.lastDraftChatGuid = currentGuid
+            var savedDraft = (root.chatDrafts && root.chatDrafts[currentGuid] !== undefined) ? root.chatDrafts[currentGuid] : ""
             if (savedDraft.length > 0 && composerInput.text !== savedDraft) {
                 composerInput.text = savedDraft
             }
@@ -543,14 +548,22 @@ ApplicationWindow {
             toastTimer.restart()
         }
         function onSelectedChatChanged() {
-            root.clearActionMenu()
-            root.replyTargetGuid = ""
-            root.replyTargetSender = ""
-            root.replyTargetText = ""
             var newGuid = backend.selectedChatGuid || ""
+            var sameConv = (root.lastDraftChatGuid === newGuid) || (root.lastDraftChatGuid !== "" && newGuid !== "" && backend.isSameConversation(root.lastDraftChatGuid, newGuid))
+            if (!sameConv) {
+                root.clearActionMenu()
+                root.replyTargetGuid = ""
+                root.replyTargetSender = ""
+                root.replyTargetText = ""
+            }
             if (root.lastDraftChatGuid !== "" && root.lastDraftChatGuid !== newGuid) {
                 var drafts = root.chatDrafts || ({})
-                drafts[root.lastDraftChatGuid] = composerInput.text
+                if (sameConv && composerInput.text !== "") {
+                    drafts[newGuid] = composerInput.text
+                    delete drafts[root.lastDraftChatGuid]
+                } else {
+                    drafts[root.lastDraftChatGuid] = composerInput.text
+                }
                 root.chatDrafts = drafts
             }
             if (root.lastDraftChatGuid !== newGuid) {
