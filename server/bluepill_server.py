@@ -454,6 +454,7 @@ class BluePillEngine:
         self._last_photos_heal_reason: str = ""
         self._last_photos_heal_actions: List[str] = []
         self._last_photos_health: Dict[str, Any] = {}
+        self._photos_high_cpu_streak: int = 0
         self._photos_watcher_state: Dict[str, Any] = {"last_sig": None, "last_health_ts": 0.0}
         self.deleted_state_path: Optional[str] = (
             None if is_ephemeral else os.path.expanduser("~/.config/bluepill/deleted_state.json")
@@ -650,9 +651,11 @@ class BluePillEngine:
     ) -> Dict[str, Any]:
         now = float(now_ts if now_ts is not None else time.time())
         photos_lib = os.path.expanduser(self.photos_library_path)
-        syncstatus_path = os.path.join(
-            photos_lib, "private", "com.apple.photolibraryd", "private", "syncstatus.plist"
+        syncstatus_candidates = (
+            os.path.join(photos_lib, "resources", "cpl", "cloudsync.noindex", "syncstatus.plist"),
+            os.path.join(photos_lib, "private", "com.apple.photolibraryd", "private", "syncstatus.plist"),
         )
+        syncstatus_path = next((p for p in syncstatus_candidates if os.path.exists(p)), syncstatus_candidates[0])
         last_sync_iso = ""
         last_sync_ms = 0
         last_sync_age_s: Optional[float] = None
@@ -686,11 +689,11 @@ class BluePillEngine:
         )
         cpu_pct = self._get_photolibraryd_cpu_pct() if sys.platform == "darwin" else None
         stale = bool(last_sync_age_s is not None and last_sync_age_s > self.photos_sync_stale_seconds)
-        wedged = bool(
-            cpu_pct is not None
-            and cpu_pct >= 85.0
-            and (last_sync_age_s is None or last_sync_age_s >= 300.0)
-        )
+        if cpu_pct is not None and cpu_pct >= 85.0 and (last_sync_age_s is None or last_sync_age_s >= 300.0):
+            self._photos_high_cpu_streak += 1
+        else:
+            self._photos_high_cpu_streak = 0
+        wedged = bool(self._photos_high_cpu_streak >= 2 or (stale and cpu_pct is not None and cpu_pct >= 85.0))
         heal_reasons: List[str] = []
         for d_name, is_up in resolved_daemons.items():
             if not is_up:
@@ -8528,13 +8531,13 @@ def run_selftest(engine: BluePillEngine) -> int:
         os.makedirs(os.path.join(photos_test_root, "database"), exist_ok=True)
         os.makedirs(os.path.join(photos_test_root, "originals", "0"), exist_ok=True)
         os.makedirs(os.path.join(photos_test_root, "resources", "derivatives", "masters", "0"), exist_ok=True)
-        os.makedirs(os.path.join(photos_test_root, "private", "com.apple.photolibraryd", "private"), exist_ok=True)
+        os.makedirs(os.path.join(photos_test_root, "resources", "cpl", "cloudsync.noindex"), exist_ok=True)
         test_eng.photos_library_path = photos_test_root
         test_eng._photos_library_assets.clear()
         test_eng._photos_poster_cache.clear()
         test_eng.db_path = os.path.join(test_eng._config_dir, "nonexistent_chat.db")
 
-        stale_plist = os.path.join(photos_test_root, "private", "com.apple.photolibraryd", "private", "syncstatus.plist")
+        stale_plist = os.path.join(photos_test_root, "resources", "cpl", "cloudsync.noindex", "syncstatus.plist")
         stale_dt = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(hours=3)
         with open(stale_plist, "wb") as spf:
             plistlib.dump({"lastSyncDate": stale_dt, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
