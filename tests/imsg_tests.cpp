@@ -4401,6 +4401,13 @@ private slots:
         QVERIFY(cachedVidItem.value(QStringLiteral("previewUrl")).toString().contains(QStringLiteral("preview=1")));
         QCOMPARE(cachedVidItem.value(QStringLiteral("streamUrl")).toString(), QUrl::fromLocalFile(cachedVidPath).toString());
 
+        // Verify explicit Refresh on page 0 includes refresh=1 server nudge query parameter
+        requestedQueries.clear();
+        pagedBackend.fetchIcloudPhotos(0, false, true);
+        QTRY_VERIFY_WITH_TIMEOUT(std::any_of(requestedQueries.cbegin(), requestedQueries.cend(), [](const QString &q) {
+            return q.contains(QStringLiteral("offset=0")) && q.contains(QStringLiteral("refresh=1"));
+        }), 1500);
+
         if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
         if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);
     }

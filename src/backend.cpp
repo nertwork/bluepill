@@ -11170,7 +11170,7 @@ void Backend::loadMoreIcloudPhotos() {
     fetchIcloudPhotos(m_icloudPhotosPage, true);
 }
 
-void Backend::fetchIcloudPhotos(int page, bool append) {
+void Backend::fetchIcloudPhotos(int page, bool append, bool forceNudge) {
     if (!m_icloudPhotosEnabled) return;
     if (!isSecureOrLocalIcloudEndpoint()) return;
     const int pageSize = std::max(12, m_icloudPhotosPageSize);
@@ -11183,9 +11183,12 @@ void Backend::fetchIcloudPhotos(int page, bool append) {
         m_icloudPhotosLoading = true;
         emit icloudPhotosLoadingChanged();
     }
-    const QString path = QStringLiteral("/api/v1/icloud/photos?source=photos_library&limit=%1&offset=%2")
-                             .arg(pageSize)
-                             .arg(offset);
+    QString path = QStringLiteral("/api/v1/icloud/photos?source=photos_library&limit=%1&offset=%2")
+                       .arg(pageSize)
+                       .arg(offset);
+    if (forceNudge && targetPage == 0 && !append) {
+        path += QStringLiteral("&refresh=1");
+    }
     QNetworkReply *reply = m_nam.get(makeRequest(path));
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqSeq, append, offset, pageSize, targetPage]() {
         reply->deleteLater();

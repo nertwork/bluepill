@@ -7245,7 +7245,7 @@ ApplicationWindow {
                 }
                 Button {
                     text: "🔄 " + i18n.tr("Refresh")
-                    onClicked: backend.fetchIcloudPhotos(backend.icloudPhotosPage, false)
+                    onClicked: backend.fetchIcloudPhotos(backend.icloudPhotosPage, false, true)
                 }
                 Button {
                     id: photosFullScreenBtn
@@ -7313,14 +7313,37 @@ ApplicationWindow {
 
                             Image {
                                 id: thumbImg
+                                property string baseSourceUrl: modelData.previewUrl || modelData.localUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
+                                property int retryAttempt: 0
                                 anchors.fill: parent
                                 anchors.margins: 2
                                 fillMode: Image.PreserveAspectFit
                                 autoTransform: true
                                 smooth: true
-                                source: modelData.previewUrl || modelData.localUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
+                                source: {
+                                    if (!baseSourceUrl) return ""
+                                    if (retryAttempt <= 0) return baseSourceUrl
+                                    var sep = baseSourceUrl.indexOf("?") >= 0 ? "&" : "?"
+                                    return baseSourceUrl + sep + "retry=" + retryAttempt
+                                }
                                 asynchronous: true
                                 cache: true
+                                onBaseSourceUrlChanged: retryAttempt = 0
+                                onStatusChanged: {
+                                    if (status === Image.Error && retryAttempt < 3 && baseSourceUrl.indexOf("http") === 0) {
+                                        thumbRetryTimer.restart()
+                                    }
+                                }
+                            }
+                            Timer {
+                                id: thumbRetryTimer
+                                interval: 2200
+                                repeat: false
+                                onTriggered: {
+                                    if (thumbImg.retryAttempt < 3) {
+                                        thumbImg.retryAttempt += 1
+                                    }
+                                }
                             }
 
                             Text {

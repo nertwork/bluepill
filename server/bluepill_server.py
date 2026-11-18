@@ -445,15 +445,24 @@ class BluePillEngine:
         self._photos_poster_cache: Dict[str, Tuple[str, str]] = {}
         self._image_dims_cache: Dict[Tuple[str, int, int], Tuple[int, int, bool]] = {}
         self.photos_sync_stale_seconds: int = max(
-            60, int(os.environ.get("BLUEPILL_PHOTOS_STALE_SECONDS", "1800") or "1800")
+            60, int(os.environ.get("BLUEPILL_PHOTOS_STALE_SECONDS", "600") or "600")
+        )
+        self.photos_nudge_stale_seconds: int = max(
+            30, int(os.environ.get("BLUEPILL_PHOTOS_NUDGE_STALE_SECONDS", "120") or "120")
+        )
+        self.photos_nudge_cooldown_seconds: int = max(
+            10, int(os.environ.get("BLUEPILL_PHOTOS_NUDGE_COOLDOWN_SECONDS", "25") or "25")
         )
         self.photos_heal_cooldown_seconds: int = max(
             60, int(os.environ.get("BLUEPILL_PHOTOS_HEAL_COOLDOWN_SECONDS", "900") or "900")
         )
         self._photos_heal_lock = threading.Lock()
+        self._photos_nudge_lock = threading.Lock()
         self._last_photos_heal_ts: float = 0.0
         self._last_photos_heal_reason: str = ""
         self._last_photos_heal_actions: List[str] = []
+        self._last_photos_nudge_ts: float = 0.0
+        self._last_photos_nudge_reason: str = ""
         self._last_photos_health: Dict[str, Any] = {}
         self._photos_high_cpu_streak: int = 0
         self._photos_high_cpu_last_obs_ts: float = 0.0
@@ -814,6 +823,130 @@ class BluePillEngine:
                 "warnings": warnings,
             }
 
+    def _nudge_cloudphotod(
+        self,
+        reason: str = "manual",
+        min_interval_seconds: Optional[int] = None,
+        min_sync_age: float = 10.0,
+        wait_seconds: float = 0.0,
+        now_ts: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Lightweight trigger that kickstarts only com.apple.cloudphotod (leaving
+        photolibraryd and cloudd untouched) so headless macOS relays pull recent
+        iCloud Photos metadata promptly even when APNS opportunistic push naps.
+        """
+        if not self.enable_photos:
+            return {"nudged": False, "skippedReason": "disabled", "dbChanged": False}
+        now = float(now_ts if now_ts is not None else time.time())
+        health = self._inspect_icloud_photos_health(now_ts=now)
+        daemons = health.get("daemons") or {}
+        if sys.platform == "darwin" and (
+            health.get("wedged") or (daemons and not all(bool(v) for v in daemons.values()))
+        ):
+            heal_res = self._heal_icloud_photos_daemons(
+                reason=f"nudge_escalated:{reason}",
+                min_interval_seconds=self.photos_heal_cooldown_seconds,
+                now_ts=now,
+            )
+            return {
+                "nudged": bool(heal_res.get("healed")),
+                "escalatedHeal": True,
+                "healResult": heal_res,
+                "dbChanged": False,
+            }
+        if sys.platform != "darwin":
+            return {"nudged": False, "skippedReason": "non_darwin", "dbChanged": False}
+
+        last_age = health.get("lastSyncAgeSeconds")
+        if last_age is not None and float(last_age) < float(min_sync_age):
+            return {
+                "nudged": False,
+                "skippedReason": "recently_synced",
+                "lastSyncAgeSeconds": last_age,
+                "dbChanged": False,
+            }
+
+        uid = os.getuid() if hasattr(os, "getuid") else 501
+        cooldown = (
+            self.photos_nudge_cooldown_seconds
+            if min_interval_seconds is None
+            else max(self.photos_nudge_cooldown_seconds, int(min_interval_seconds))
+        )
+        prev_sync_ms = int(health.get("lastSyncMs") or 0)
+        prev_sig = self._get_photos_db_signature()
+
+        with self._photos_nudge_lock:
+            elapsed = now - self._last_photos_nudge_ts if self._last_photos_nudge_ts > 0 else float(cooldown + 1)
+            if elapsed < cooldown:
+                return {
+                    "nudged": False,
+                    "skippedReason": "cooldown",
+                    "cooldownRemainingSeconds": max(1, int(cooldown - elapsed)),
+                    "dbChanged": False,
+                }
+            self._last_photos_nudge_ts = now
+            self._last_photos_nudge_reason = str(reason or "manual")
+            svc = "com.apple.cloudphotod"
+            plist = f"/System/Library/LaunchAgents/{svc}.plist"
+            nudged = False
+            warn_msg = ""
+            try:
+                self._run_launchctl(["enable", f"gui/{uid}/{svc}"])
+                ks = self._run_launchctl(["kickstart", "-k", f"gui/{uid}/{svc}"])
+                if ks.returncode != 0 and os.path.exists(plist):
+                    self._run_launchctl(["bootstrap", f"gui/{uid}", plist])
+                    ks = self._run_launchctl(["kickstart", "-k", f"gui/{uid}/{svc}"])
+                nudged = ks.returncode == 0
+                if not nudged:
+                    warn_msg = f"kickstart rc={ks.returncode}"
+            except Exception as exc:  # noqa: BLE001
+                warn_msg = str(exc)
+
+        db_changed = False
+        sync_advanced = False
+        if nudged and wait_seconds > 0.0:
+            deadline = time.time() + float(wait_seconds)
+            while time.time() < deadline and not self._stop_event.is_set():
+                time.sleep(0.35)
+                cur_sig = self._get_photos_db_signature()
+                if cur_sig is not None and cur_sig != prev_sig:
+                    db_changed = True
+                    sync_advanced = True
+                    break
+                cur_health = self._inspect_icloud_photos_health()
+                cur_ms = int(cur_health.get("lastSyncMs") or 0)
+                if cur_ms > prev_sync_ms:
+                    sync_advanced = True
+                    # Give photolibraryd a brief beat to commit ZASSET rows after syncstatus updates
+                    time.sleep(0.45)
+                    post_sig = self._get_photos_db_signature()
+                    if post_sig is not None and post_sig != prev_sig:
+                        db_changed = True
+                    break
+        if db_changed:
+            try:
+                self._poll_photos_db_once(self._photos_watcher_state)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.debug("[photos] Post-nudge watcher sync failed: %s", exc)
+
+        self.logger.info(
+            "[photos] Nudged %s (reason=%s nudged=%s sync_advanced=%s db_changed=%s%s)",
+            "com.apple.cloudphotod",
+            self._last_photos_nudge_reason,
+            nudged,
+            sync_advanced,
+            db_changed,
+            f" warn={warn_msg}" if warn_msg else "",
+        )
+        return {
+            "nudged": nudged,
+            "reason": self._last_photos_nudge_reason,
+            "syncAdvanced": sync_advanced,
+            "dbChanged": db_changed,
+            "warning": warn_msg,
+        }
+
     def _get_photos_db_signature(self) -> Optional[Tuple[int, int, float]]:
         photos_lib = os.path.expanduser(self.photos_library_path)
         photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
@@ -891,6 +1024,15 @@ class BluePillEngine:
                     reason=",".join(health.get("healReasons") or ["periodic_watchdog"]),
                     now_ts=now,
                 )
+            else:
+                age_s = health.get("lastSyncAgeSeconds")
+                if age_s is not None and float(age_s) >= float(self.photos_nudge_stale_seconds):
+                    self._nudge_cloudphotod(
+                        reason=f"periodic_nudge:{int(age_s)}s",
+                        min_interval_seconds=self.photos_nudge_stale_seconds,
+                        min_sync_age=float(self.photos_nudge_stale_seconds),
+                        now_ts=now,
+                    )
         return changed
 
     def _photos_poll_loop(self) -> None:
@@ -4080,15 +4222,25 @@ class BluePillEngine:
         if first_ch not in dirs_to_check:
             dirs_to_check.append(first_ch)
         for d in dirs_to_check:
-            for cand in (
-                os.path.join(photos_lib, "resources", "derivatives", "masters", d, f"{zuuid}_4_5005_c.jpeg"),
-                os.path.join(photos_lib, "resources", "derivatives", d, f"{zuuid}_1_105_c.jpeg"),
-            ):
+            for cand in BluePillEngine._derivative_image_candidates(photos_lib, zuuid, d):
                 if os.path.exists(cand):
                     real_cand = os.path.realpath(cand)
                     if os.path.exists(real_cand):
                         return real_cand
         return None
+
+    @staticmethod
+    def _derivative_image_candidates(photos_lib: str, zuuid: str, dir_name: str) -> List[str]:
+        """Return candidate derivative JPEG paths across Sonoma/Sequoia library layouts."""
+        if not zuuid:
+            return []
+        suffixes = ("_4_5005_c.jpeg", "_1_105_c.jpeg", "_1_102_o.jpeg", "_1_201_a.jpeg")
+        out: List[str] = []
+        for sfx in suffixes:
+            out.append(os.path.join(photos_lib, "resources", "derivatives", "masters", dir_name, f"{zuuid}{sfx}"))
+        for sfx in suffixes:
+            out.append(os.path.join(photos_lib, "resources", "derivatives", dir_name, f"{zuuid}{sfx}"))
+        return out
 
     @staticmethod
     def _find_photos_library_asset_file(
@@ -4115,14 +4267,8 @@ class BluePillEngine:
             if zfn:
                 candidates.append(os.path.join(photos_lib, "originals", d, zfn))
                 candidates.append(os.path.join(photos_lib, "resources", "renders", d, zfn))
-            if not is_video:
-                if zuuid:
-                    candidates.append(
-                        os.path.join(photos_lib, "resources", "derivatives", "masters", d, f"{zuuid}_4_5005_c.jpeg")
-                    )
-                    candidates.append(
-                        os.path.join(photos_lib, "resources", "derivatives", d, f"{zuuid}_1_105_c.jpeg")
-                    )
+            if not is_video and zuuid:
+                candidates.extend(BluePillEngine._derivative_image_candidates(photos_lib, zuuid, d))
             if zfn:
                 candidates.append(os.path.join(photos_lib, "resources", "derivatives", d, zfn))
         for cand in candidates:
@@ -4201,13 +4347,73 @@ class BluePillEngine:
             self.logger.debug("[photos] asset lookup failed for %s: %s", clean_guid, exc)
         return None
 
-    def download_cloud_attachment(self, guid: str) -> Dict[str, Any]:
+    def _is_chat_attachment_guid(self, clean_guid: str) -> bool:
+        if not clean_guid or not os.path.exists(self.db_path):
+            return False
+        try:
+            conn = self._open_chat_db()
+            try:
+                suffix_uuid = clean_guid.split("_")[-1] if "_" in clean_guid else clean_guid
+                row = conn.execute(
+                    "SELECT 1 FROM attachment WHERE guid = ? OR original_guid = ? OR guid LIKE ? LIMIT 1",
+                    (clean_guid, clean_guid, f"%{suffix_uuid}"),
+                ).fetchone()
+                return row is not None
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return False
+
+    def is_recent_photos_library_asset(self, guid: str, max_age_seconds: float = 120.0) -> bool:
+        clean_guid = urllib.parse.unquote(guid).strip()
+        if not clean_guid or not self.enable_photos:
+            return False
+        photos_lib = os.path.expanduser(self.photos_library_path)
+        photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
+        if not os.path.exists(photos_db):
+            return False
+        try:
+            pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+            try:
+                zcols = {c[1] for c in pconn.execute("PRAGMA table_info(ZASSET)").fetchall()}
+                date_expr = (
+                    "COALESCE(ZADDEDDATE, ZDATECREATED, 0)"
+                    if "ZADDEDDATE" in zcols
+                    else "COALESCE(ZDATECREATED, 0)"
+                )
+                row = pconn.execute(
+                    f"SELECT {date_expr} FROM ZASSET WHERE ZUUID = ? LIMIT 1",
+                    (clean_guid,),
+                ).fetchone()
+                if not row:
+                    return False
+                ts_apple = float(row[0] or 0.0)
+                if ts_apple <= 0:
+                    return False
+                created_unix = ts_apple + APPLE_EPOCH_OFFSET_SEC
+                return (time.time() - created_unix) <= float(max_age_seconds)
+            finally:
+                pconn.close()
+        except sqlite3.Error:
+            return False
+
+    def download_cloud_attachment(
+        self,
+        guid: str,
+        wait_attempts: int = 8,
+        allow_helper: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         clean_guid = urllib.parse.unquote(guid).strip()
         already = self.resolve_attachment_file(clean_guid)
         if already:
             return {"guid": clean_guid, "downloaded": True, "path": already[0], "mimeType": already[1]}
 
-        helper_ok = self._send_private_api_action("download-purged-attachment", {"attachmentGuid": clean_guid})
+        should_try_helper = self._is_chat_attachment_guid(clean_guid) if allow_helper is None else bool(allow_helper)
+        helper_ok = (
+            self._send_private_api_action("download-purged-attachment", {"attachmentGuid": clean_guid})
+            if should_try_helper
+            else False
+        )
         fallback_used = False
         if not helper_ok and sys.platform == "darwin":
             if os.path.exists(self.db_path):
@@ -4276,7 +4482,7 @@ class BluePillEngine:
                     self.logger.debug("[photos] Photos.sqlite brctl fallback failed for %s: %s", clean_guid, exc)
 
         if (helper_ok or fallback_used) and sys.platform == "darwin":
-            for _ in range(8):
+            for _ in range(max(1, int(wait_attempts))):
                 time.sleep(0.35)
                 resolved = self.resolve_attachment_file(clean_guid)
                 if resolved:
@@ -4673,11 +4879,7 @@ class BluePillEngine:
                                     and zfn
                                     and os.path.exists(os.path.join(photos_lib, "originals", zdir, f".{zfn}.icloud"))
                                 )
-                                can_unpurge = bool(
-                                    resolved_asset is not None
-                                    or has_icloud_stub
-                                    or (not is_video and has_brctl and bool(zdir and zfn))
-                                )
+                                can_unpurge = bool(resolved_asset is not None or has_icloud_stub)
                                 seen_lib_guids.add(zuuid)
                                 zdate_val = float(ar["_zdate"] or 0.0)
                                 created_ms = (
@@ -4897,7 +5099,11 @@ class BluePillEngine:
             processed_count += 1
             photo_failed = False
             if is_evicted:
-                res = self.download_cloud_attachment(guid)
+                res = self.download_cloud_attachment(
+                    guid,
+                    wait_attempts=1,
+                    allow_helper=(p.get("source") != "photos_library"),
+                )
                 if res.get("downloaded"):
                     unpurged_count += 1
                 else:
@@ -4970,11 +5176,22 @@ class BluePillEngine:
     ) -> Dict[str, Any]:
         clamped_limit = max(1, min(int(limit or 250), 250))
         clamped_offset = max(0, int(offset or 0))
+        nudge_res: Dict[str, Any] = {}
+        if self.enable_photos and sys.platform == "darwin":
+            nudge_res = self._nudge_cloudphotod(
+                reason="manual_sync",
+                min_interval_seconds=20,
+                min_sync_age=8.0,
+                wait_seconds=4.0,
+            )
         with self._photo_sync_lock:
             if self._active_photo_sync_job_id:
                 existing = self._photo_sync_jobs.get(self._active_photo_sync_job_id)
                 if existing and existing.get("state") == "running":
-                    return dict(existing)
+                    snap = dict(existing)
+                    if nudge_res:
+                        snap["nudge"] = nudge_res
+                    return snap
             job_id = f"psync-{int(time.time() * 1000)}-{len(self._photo_sync_jobs) + 1}"
             job: Dict[str, Any] = {
                 "jobId": job_id,
@@ -5043,6 +5260,17 @@ class BluePillEngine:
                         })
                         snapshot = dict(job)
                     self.broadcast_socketio("icloud-photos-sync", snapshot)
+                    if cur_offset == clamped_offset and has_more and (
+                        sync_acc > 0 or unp_acc > 0 or bool(nudge_res.get("dbChanged"))
+                    ):
+                        self.broadcast_socketio(
+                            "icloud-photos-updated",
+                            {
+                                "total": self.count_icloud_photos(),
+                                "synced": sync_acc,
+                                "timestampMs": int(time.time() * 1000),
+                            },
+                        )
                     if sync_all and has_more and isinstance(next_off, int) and next_off > cur_offset:
                         cur_offset = next_off
                     else:
@@ -7709,6 +7937,26 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                     )
                 except FileNotFoundError:
                     resolved = None
+                if (
+                    not resolved
+                    and sys.platform == "darwin"
+                    and (resize_val is not None or preview_flag)
+                    and self.engine.is_recent_photos_library_asset(att_guid, max_age_seconds=120.0)
+                ):
+                    for _ in range(5):
+                        time.sleep(0.4)
+                        try:
+                            resolved = self.engine.resolve_attachment_file(
+                                att_guid,
+                                convert_heic=not original_flag,
+                                resize=resize_val,
+                                allow_photos_library=True,
+                                preview_only=preview_flag,
+                            )
+                        except FileNotFoundError:
+                            resolved = None
+                        if resolved:
+                            break
             if not resolved:
                 self._send_json(404, None, "Attachment not found")
                 return
@@ -7823,6 +8071,27 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                     os.path.expanduser(self.engine.photos_library_path), "database", "Photos.sqlite"
                 )
                 src_param = "photos_library" if os.path.exists(photos_db_cand) else "all"
+            refresh_flag = str(
+                (qs.get("refresh") or qs.get("nudge") or [""])[0] or ""
+            ).strip().lower() in ("1", "true", "yes")
+            if off == 0 and sys.platform == "darwin" and self.engine.enable_photos and src_param in ("photos_library", "all"):
+                if refresh_flag:
+                    self.engine._nudge_cloudphotod(
+                        reason="photos_refresh",
+                        min_interval_seconds=15,
+                        min_sync_age=8.0,
+                        wait_seconds=4.0,
+                    )
+                else:
+                    p_health = self.engine._inspect_icloud_photos_health()
+                    p_age = p_health.get("lastSyncAgeSeconds")
+                    if p_age is not None and float(p_age) >= 15.0:
+                        self.engine._nudge_cloudphotod(
+                            reason="photos_page0",
+                            min_interval_seconds=25,
+                            min_sync_age=15.0,
+                            wait_seconds=4.0,
+                        )
             fetched = self.engine.query_icloud_photos(
                 limit=lim + 1,
                 offset=off,
@@ -8740,7 +9009,7 @@ def run_selftest(engine: BluePillEngine) -> int:
         assert pf_stale["modules"]["photos"]["cloudImageCount"] == 10 and pf_stale["modules"]["photos"]["cloudVideoCount"] == 2
         # Verify high-CPU wedge streak ignores rapid duplicate checks & resets if lastSyncDate advances (and UTI cloudAssetCountPerType keys)
         obs_t0 = time.time()
-        fresh_dt1 = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(minutes=10)
+        fresh_dt1 = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(minutes=6)
         with open(stale_plist, "wb") as spf:
             plistlib.dump({"lastSyncDate": fresh_dt1, "cloudAssetCountPerType": {"public.image": 10, "public.movie": 2}}, spf)
         h_cpu1 = test_eng._inspect_icloud_photos_health(now_ts=obs_t0, cpu_pct_override=95.0)
@@ -8889,6 +9158,39 @@ def run_selftest(engine: BluePillEngine) -> int:
             assert any(ev == "icloud-photos-updated" and pl.get("total") == 5 for ev, pl in photo_events), f"Missing socket event: {photo_events}"
         finally:
             test_eng.broadcast_socketio = orig_emit_p
+
+        # Verify Sonoma/Sequoia non-masters derivative fallback, non-stub canUnpurge gating, and _nudge_cloudphotod guards
+        nonmaster_dir = os.path.join(photos_test_root, "resources", "derivatives", "9")
+        os.makedirs(nonmaster_dir, exist_ok=True)
+        shutil.copy2(sample_jpg, os.path.join(nonmaster_dir, "99999999-NONMASTER_1_105_c.jpeg"))
+        vconn3 = sqlite3.connect(vdb_path)
+        try:
+            vconn3.execute(
+                "INSERT INTO ZASSET VALUES ('99999999-NONMASTER', 'IMG_NM.HEIC', 'public.heic', '9', 0, 7000.0, 7000.0, 0, 0.0, 100, 100);"
+            )
+            vconn3.execute(
+                "INSERT INTO ZASSET VALUES ('88888888-EVICTED', 'IMG_EVICT.HEIC', 'public.heic', '8', 0, 6500.0, 6500.0, 0, 0.0, 100, 100);"
+            )
+            vconn3.commit()
+        finally:
+            vconn3.close()
+        q_nm = test_eng.query_icloud_photos(limit=10, offset=0, source="photos_library")
+        nm_item = next(it for it in q_nm if it.get("guid") == "99999999-NONMASTER")
+        ev_item = next(it for it in q_nm if it.get("guid") == "88888888-EVICTED")
+        assert nm_item["isCloudEvicted"] is False, f"Expected non-master derivative to resolve: {nm_item}"
+        assert ev_item["isCloudEvicted"] is True and ev_item["canUnpurge"] is False, f"Evicted photos_library asset without .icloud stub must have canUnpurge=False: {ev_item}"
+        ev_sync = test_eng.sync_icloud_photos(limit=10, offset=0)
+        assert ev_sync["failed"] == 0 and ev_sync["status"] == "ok", f"Evicted non-stub photos_library item must not stall/fail batch sync: {ev_sync}"
+        test_eng._last_photos_nudge_ts = 0.0
+        nudge_recent_plist = os.path.join(photos_test_root, "resources", "cpl", "cloudsync.noindex", "syncstatus.plist")
+        fresh_now_dt = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        with open(nudge_recent_plist, "wb") as spf:
+            plistlib.dump({"lastSyncDate": fresh_now_dt, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
+        nudge_skip = test_eng._nudge_cloudphotod(reason="selftest_fresh", min_sync_age=30.0)
+        if sys.platform == "darwin":
+            assert nudge_skip.get("nudged") is False and nudge_skip.get("skippedReason") == "recently_synced", f"Expected recently_synced skip: {nudge_skip}"
+        else:
+            assert nudge_skip.get("nudged") is False and nudge_skip.get("skippedReason") == "non_darwin", f"Unexpected non-darwin nudge result: {nudge_skip}"
     finally:
         srv.shutdown()
         srv.server_close()
