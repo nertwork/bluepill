@@ -2253,6 +2253,7 @@ void Backend::handleSocketIoPayload(const QByteArray &rawPayload) {
     const QStringList packets = text.split(QChar(0x1E), Qt::SkipEmptyParts);
     bool shouldTriggerDeltaPoll = false;
     bool shouldTriggerUnreadCheck = false;
+    bool shouldTriggerPhotosRefresh = false;
 
     for (const QString &pkt : packets) {
         const QString trimmed = pkt.trimmed();
@@ -2323,6 +2324,19 @@ void Backend::handleSocketIoPayload(const QByteArray &rawPayload) {
                        eventName == QStringLiteral("participant-removed") ||
                        eventName == QStringLiteral("participant-left")) {
                 shouldTriggerUnreadCheck = true;
+            } else if (eventName == QStringLiteral("icloud-photos-updated")) {
+                if (m_icloudPhotosEnabled && !m_demoMode) {
+                    if (eventData.isObject()) {
+                        const int evTotal = eventData.toObject().value(QStringLiteral("total")).toInt(0);
+                        if (evTotal > m_icloudPhotosTotal) {
+                            m_icloudPhotosTotal = evTotal;
+                            emit icloudPhotosChanged();
+                        }
+                    }
+                    if (m_icloudPhotosPage == 0) {
+                        shouldTriggerPhotosRefresh = true;
+                    }
+                }
             }
         }
     }
@@ -2333,6 +2347,9 @@ void Backend::handleSocketIoPayload(const QByteArray &rawPayload) {
         }
         if (shouldTriggerUnreadCheck) {
             QTimer::singleShot(150, this, &Backend::fetchUnreadStateFromServer);
+        }
+        if (shouldTriggerPhotosRefresh) {
+            QTimer::singleShot(120, this, [this]() { fetchIcloudPhotos(0, false); });
         }
     }
 }
@@ -11192,16 +11209,30 @@ void Backend::fetchIcloudPhotos(int page, bool append) {
                             seenGuids.insert(guid);
                         }
                         if (!guid.isEmpty()) {
+                            const bool isVideo = m.value(QStringLiteral("isVideo")).toBool() ||
+                                                 (m.value(QStringLiteral("mediaType")).toString() == QStringLiteral("video"));
+                            const QString srvPreview = m.value(QStringLiteral("previewUrl")).toString();
+                            const bool wantPreviewParam = isVideo && srvPreview.contains(QStringLiteral("preview=1"));
                             const QString baseLiveUrl = attachmentDownloadUrl(guid);
-                            const QString thumbUrl = baseLiveUrl.startsWith(QStringLiteral("file://"))
-                                                         ? baseLiveUrl
-                                                         : (baseLiveUrl + (baseLiveUrl.contains(QLatin1Char('?')) ? QStringLiteral("&height=360") : QStringLiteral("?height=360")));
+                            QString thumbUrl = baseLiveUrl;
+                            if (!thumbUrl.startsWith(QStringLiteral("file://"))) {
+                                const QLatin1Char sep = thumbUrl.contains(QLatin1Char('?')) ? QLatin1Char('&') : QLatin1Char('?');
+                                thumbUrl += sep + QStringLiteral("height=360");
+                                if (wantPreviewParam) {
+                                    thumbUrl += QStringLiteral("&preview=1");
+                                }
+                            }
                             m.insert(QStringLiteral("previewUrl"), thumbUrl);
+                            if (!m.value(QStringLiteral("isCloudEvicted")).toBool() && !baseLiveUrl.isEmpty()) {
+                                m.insert(QStringLiteral("streamUrl"), baseLiveUrl);
+                            }
                             const QString cached = lookupCachedAttachmentPath(m_attachmentPaths, guid);
                             if (!cached.isEmpty() && QFileInfo::exists(cached) && QFileInfo(cached).size() >= 100) {
                                 const QString localUrl = QUrl::fromLocalFile(cached).toString();
                                 m.insert(QStringLiteral("localUrl"), localUrl);
-                                m.insert(QStringLiteral("previewUrl"), localUrl);
+                                if (!isVideo) {
+                                    m.insert(QStringLiteral("previewUrl"), localUrl);
+                                }
                                 m.insert(QStringLiteral("isCloudEvicted"), false);
                             }
                         }

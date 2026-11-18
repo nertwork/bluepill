@@ -4261,9 +4261,23 @@ private slots:
                             const int idx = offset + i;
                             QJsonObject item;
                             item.insert(QStringLiteral("guid"), QStringLiteral("plib:PHOTO-GUID-%1").arg(idx));
-                            item.insert(QStringLiteral("transferName"), QStringLiteral("IMG_%1.JPG").arg(1000 + idx));
-                            item.insert(QStringLiteral("mimeType"), QStringLiteral("image/jpeg"));
-                            item.insert(QStringLiteral("isCloudEvicted"), false);
+                            if (idx == 0) {
+                                item.insert(QStringLiteral("transferName"), QStringLiteral("VID_0000.MOV"));
+                                item.insert(QStringLiteral("mimeType"), QStringLiteral("video/quicktime"));
+                                item.insert(QStringLiteral("mediaType"), QStringLiteral("video"));
+                                item.insert(QStringLiteral("isVideo"), true);
+                                item.insert(QStringLiteral("duration"), 14.2);
+                                item.insert(QStringLiteral("isCloudEvicted"), true);
+                                item.insert(QStringLiteral("canUnpurge"), false);
+                                item.insert(QStringLiteral("hasPreview"), true);
+                                item.insert(QStringLiteral("previewUrl"), QStringLiteral("/api/v1/attachment/plib%3APHOTO-GUID-0/live?preview=1"));
+                            } else {
+                                item.insert(QStringLiteral("transferName"), QStringLiteral("IMG_%1.JPG").arg(1000 + idx));
+                                item.insert(QStringLiteral("mimeType"), QStringLiteral("image/jpeg"));
+                                item.insert(QStringLiteral("mediaType"), QStringLiteral("image"));
+                                item.insert(QStringLiteral("isVideo"), false);
+                                item.insert(QStringLiteral("isCloudEvicted"), false);
+                            }
                             item.insert(QStringLiteral("width"), 4032);
                             item.insert(QStringLiteral("height"), 3024);
                             items.append(item);
@@ -4311,6 +4325,9 @@ private slots:
         QCOMPARE(pagedBackend.icloudPhotosPageCount(), 3);
         QVERIFY(pagedBackend.icloudPhotosHasMore());
         QVERIFY(pagedBackend.icloudPhotos().first().toMap().value(QStringLiteral("previewUrl")).toString().contains(QStringLiteral("height=360")));
+        QVERIFY(pagedBackend.icloudPhotos().first().toMap().value(QStringLiteral("previewUrl")).toString().contains(QStringLiteral("preview=1")));
+        QVERIFY(pagedBackend.icloudPhotos().first().toMap().value(QStringLiteral("isVideo")).toBool());
+        QCOMPARE(pagedBackend.icloudPhotos().first().toMap().value(QStringLiteral("duration")).toDouble(), 14.2);
 
         // Next page -> page 1 (offset 60)
         pagedBackend.nextIcloudPhotosPage();
@@ -4350,6 +4367,12 @@ private slots:
         QVERIFY(pagedBackend.icloudPhotosSyncing());
         QTRY_VERIFY_WITH_TIMEOUT(!pagedBackend.icloudPhotosSyncing(), 2500);
         QVERIFY(syncPollCount >= 1);
+
+        // Verify Socket.IO icloud-photos-updated push refreshes page 0 cleanly with updated server total
+        totalPhotosOnServer = 155;
+        pagedBackend.handleSocketIoPayloadForTest(
+            QByteArrayLiteral("42[\"icloud-photos-updated\",{\"total\":155,\"maxRowId\":999}]"));
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosTotal(), 155, 1500);
 
         if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
         if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);

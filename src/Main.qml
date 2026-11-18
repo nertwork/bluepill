@@ -7157,6 +7157,17 @@ ApplicationWindow {
         width: isFullScreen ? Math.max(520, root.width - 20) : Math.min(880, Math.max(540, root.width - 80))
         height: isFullScreen ? Math.max(400, root.height - 20) : Math.min(580, Math.max(400, root.height - 80))
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        onOpened: {
+            if (backend.icloudPhotosEnabled) {
+                backend.fetchIcloudPhotos(0, false)
+            }
+        }
+        Timer {
+            interval: 20000
+            repeat: true
+            running: icloudPhotosPopup.visible && backend.icloudPhotosEnabled && !backend.icloudPhotosLoading && !backend.icloudPhotosSyncing && backend.icloudPhotosPage === 0
+            onTriggered: backend.fetchIcloudPhotos(0, false)
+        }
         background: Rectangle {
             color: theme.darkBackground
             radius: theme.radius + 4
@@ -7291,16 +7302,41 @@ ApplicationWindow {
                                 fillMode: Image.PreserveAspectFit
                                 autoTransform: true
                                 smooth: true
-                                source: modelData.localUrl || modelData.previewUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
+                                source: modelData.previewUrl || modelData.localUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
                                 asynchronous: true
                                 cache: true
                             }
 
                             Text {
                                 anchors.centerIn: parent
-                                text: "🖼"
+                                text: (Boolean(modelData.isVideo) || modelData.mediaType === "video") ? "🎬" : "🖼"
                                 font.pixelSize: 24
                                 visible: thumbImg.status !== Image.Ready
+                            }
+
+                            Rectangle {
+                                visible: Boolean(modelData.isVideo) || modelData.mediaType === "video"
+                                anchors.left: parent.left
+                                anchors.bottom: parent.bottom
+                                anchors.margins: 4
+                                height: 18
+                                width: vidDurationText.implicitWidth + 8
+                                radius: 4
+                                color: Qt.rgba(0, 0, 0, 0.78)
+                                Text {
+                                    id: vidDurationText
+                                    anchors.centerIn: parent
+                                    font.pixelSize: 9
+                                    font.bold: true
+                                    color: "#ffffff"
+                                    text: {
+                                        var sec = Math.max(0, Math.round(Number(modelData.duration || 0)))
+                                        if (sec <= 0) return "🎬 Video"
+                                        var m = Math.floor(sec / 60)
+                                        var s = sec % 60
+                                        return "🎬 " + m + ":" + (s < 10 ? "0" : "") + s
+                                    }
+                                }
                             }
 
                             RowLayout {
@@ -7343,9 +7379,14 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
+                                    var isVid = Boolean(modelData.isVideo) || modelData.mediaType === "video"
                                     if (modelData.guid && !modelData.isCloudEvicted) {
-                                        icloudPhotosPopup.close()
-                                        root.openPhotoViewer(backend.icloudPhotos, index)
+                                        if (isVid) {
+                                            backend.openAttachment(modelData.guid, modelData.name || "video.mov")
+                                        } else {
+                                            icloudPhotosPopup.close()
+                                            root.openPhotoViewer(backend.icloudPhotos, index)
+                                        }
                                     } else if (modelData.guid && modelData.isCloudEvicted && modelData.canUnpurge !== false) {
                                         backend.downloadCloudAttachment(modelData.guid)
                                     }
@@ -7368,12 +7409,24 @@ ApplicationWindow {
                             Button {
                                 Layout.fillWidth: true
                                 enabled: !modelData.isCloudEvicted || modelData.canUnpurge !== false
-                                text: modelData.isCloudEvicted ? (modelData.canUnpurge === false ? "☁ iCloud Only" : "☁ Unpurge") : "View"
+                                text: {
+                                    var isVid = Boolean(modelData.isVideo) || modelData.mediaType === "video"
+                                    if (modelData.isCloudEvicted) {
+                                        if (modelData.canUnpurge === false) {
+                                            return isVid ? "🎬 iCloud Only" : "☁ iCloud Only"
+                                        }
+                                        return "☁ Unpurge"
+                                    }
+                                    return isVid ? "▶ Video" : "View"
+                                }
                                 onClicked: {
                                     if (!modelData.guid) return
+                                    var isVid = Boolean(modelData.isVideo) || modelData.mediaType === "video"
                                     if (modelData.isCloudEvicted) {
                                         if (modelData.canUnpurge === false) return
                                         backend.downloadCloudAttachment(modelData.guid)
+                                    } else if (isVid) {
+                                        backend.openAttachment(modelData.guid, modelData.name || "video.mov")
                                     } else {
                                         icloudPhotosPopup.close()
                                         root.openPhotoViewer(backend.icloudPhotos, index)
