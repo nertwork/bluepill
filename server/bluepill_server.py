@@ -684,13 +684,16 @@ class BluePillEngine:
                         last_sync_age_s = max(0.0, round(now - sync_ts, 1))
                     counts = plist_obj.get("cloudAssetCountPerType")
                     if isinstance(counts, dict):
-                        cloud_asset_count = sum(
-                            int(v) for v in counts.values() if isinstance(v, (int, float))
-                        )
-                        if isinstance(counts.get("image"), (int, float)):
-                            cloud_image_count = int(counts["image"])
-                        if isinstance(counts.get("video"), (int, float)):
-                            cloud_video_count = int(counts["video"])
+                        for raw_k, raw_v in counts.items():
+                            if not isinstance(raw_v, (int, float)):
+                                continue
+                            v_int = int(raw_v)
+                            cloud_asset_count += v_int
+                            k_low = str(raw_k).lower()
+                            if "image" in k_low or "photo" in k_low:
+                                cloud_image_count += v_int
+                            elif "video" in k_low or "movie" in k_low:
+                                cloud_video_count += v_int
             except Exception as exc:
                 self.logger.debug("[photos] Failed reading syncstatus.plist: %s", exc)
 
@@ -8735,12 +8738,13 @@ def run_selftest(engine: BluePillEngine) -> int:
         pf_stale = test_eng.run_preflight(fix=False)
         assert pf_stale["modules"]["photos"]["cloudSyncStale"] is True, f"Preflight missing cloudSyncStale: {pf_stale}"
         assert pf_stale["modules"]["photos"]["cloudImageCount"] == 10 and pf_stale["modules"]["photos"]["cloudVideoCount"] == 2
-        # Verify high-CPU wedge streak ignores rapid duplicate checks & resets if lastSyncDate advances
+        # Verify high-CPU wedge streak ignores rapid duplicate checks & resets if lastSyncDate advances (and UTI cloudAssetCountPerType keys)
         obs_t0 = time.time()
         fresh_dt1 = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(minutes=10)
         with open(stale_plist, "wb") as spf:
-            plistlib.dump({"lastSyncDate": fresh_dt1, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
+            plistlib.dump({"lastSyncDate": fresh_dt1, "cloudAssetCountPerType": {"public.image": 10, "public.movie": 2}}, spf)
         h_cpu1 = test_eng._inspect_icloud_photos_health(now_ts=obs_t0, cpu_pct_override=95.0)
+        assert h_cpu1["cloudImageCount"] == 10 and h_cpu1["cloudVideoCount"] == 2, f"Expected UTI split cloud counts: {h_cpu1}"
         h_cpu_rapid = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 5.0, cpu_pct_override=95.0)
         assert h_cpu1["wedged"] is False and h_cpu_rapid["wedged"] is False, f"Rapid high-CPU polls must not immediately wedge: {h_cpu_rapid}"
         fresh_dt2 = fresh_dt1 + datetime.timedelta(minutes=2)
