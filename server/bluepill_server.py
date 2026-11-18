@@ -349,13 +349,14 @@ def encode_typedstream_nsattributedstring(text: str) -> bytes:
 class SocketIOSession:
     """Represents an Engine.IO v4 / Socket.IO v4 long-polling client session."""
 
-    def __init__(self, sid: str) -> None:
+    def __init__(self, sid: str, icloud_authorized: bool = False) -> None:
         self.sid = sid
         self.created_at = time.time()
         self.last_seen = time.time()
         self.queue: List[str] = []
         self.cond = threading.Condition()
         self.closed = False
+        self.icloud_authorized = bool(icloud_authorized)
 
     def enqueue(self, packet: str) -> None:
         with self.cond:
@@ -660,6 +661,8 @@ class BluePillEngine:
         last_sync_ms = 0
         last_sync_age_s: Optional[float] = None
         cloud_asset_count = 0
+        cloud_image_count = 0
+        cloud_video_count = 0
         if os.path.exists(syncstatus_path):
             try:
                 with open(syncstatus_path, "rb") as sf:
@@ -681,6 +684,10 @@ class BluePillEngine:
                         cloud_asset_count = sum(
                             int(v) for v in counts.values() if isinstance(v, (int, float))
                         )
+                        if isinstance(counts.get("image"), (int, float)):
+                            cloud_image_count = int(counts["image"])
+                        if isinstance(counts.get("video"), (int, float)):
+                            cloud_video_count = int(counts["video"])
             except Exception as exc:
                 self.logger.debug("[photos] Failed reading syncstatus.plist: %s", exc)
 
@@ -711,6 +718,8 @@ class BluePillEngine:
             "staleThresholdSeconds": self.photos_sync_stale_seconds,
             "cloudSyncStale": stale,
             "cloudAssetCount": cloud_asset_count,
+            "cloudImageCount": cloud_image_count,
+            "cloudVideoCount": cloud_video_count,
             "photolibrarydCpu": cpu_pct,
             "wedged": wedged,
             "daemons": resolved_daemons,
@@ -734,7 +743,7 @@ class BluePillEngine:
         cooldown = (
             self.photos_heal_cooldown_seconds
             if min_interval_seconds is None
-            else max(0, int(min_interval_seconds))
+            else max(self.photos_heal_cooldown_seconds, int(min_interval_seconds))
         )
         with self._photos_heal_lock:
             elapsed = now - self._last_photos_heal_ts if self._last_photos_heal_ts > 0 else float(cooldown + 1)
@@ -789,7 +798,7 @@ class BluePillEngine:
             try:
                 zcols = {c[1] for c in pconn.execute("PRAGMA table_info(ZASSET)").fetchall()}
                 if "ZADDEDDATE" in zcols:
-                    max_date_expr = "COALESCE(MAX(COALESCE(ZADDEDDATE, ZDATECREATED, 0)), 0)"
+                    max_date_expr = "COALESCE(MAX(ZADDEDDATE), 0)"
                 else:
                     max_date_expr = "COALESCE(MAX(COALESCE(ZDATECREATED, 0)), 0)"
                 row = pconn.execute(
@@ -801,7 +810,7 @@ class BluePillEngine:
                 ).fetchone()
                 if not row:
                     return (0, 0, 0.0)
-                return (int(row[0] or 0), int(row[1] or 0), round(float(row[2] or 0.0), 3))
+                return (int(row[0] or 0), int(row[1] or 0), float(row[2] or 0.0))
             finally:
                 pconn.close()
         except sqlite3.Error:
@@ -1028,6 +1037,8 @@ class BluePillEngine:
                     "lastSyncAgeSeconds": photos_health.get("lastSyncAgeSeconds"),
                     "cloudSyncStale": bool(photos_health.get("cloudSyncStale", False)),
                     "cloudAssetCount": int(photos_health.get("cloudAssetCount", 0) or 0),
+                    "cloudImageCount": int(photos_health.get("cloudImageCount", 0) or 0),
+                    "cloudVideoCount": int(photos_health.get("cloudVideoCount", 0) or 0),
                     "photolibrarydCpu": photos_health.get("photolibrarydCpu"),
                     "wedged": bool(photos_health.get("wedged", False)),
                     "healReasons": list(photos_health.get("healReasons") or []),
@@ -3989,11 +4000,14 @@ class BluePillEngine:
 
     def broadcast_socketio(self, event_name: str, payload: Any) -> None:
         packet = "42" + json.dumps([event_name, payload])
+        require_icloud_auth = event_name in ("icloud-photos-updated", "icloud-photos-sync")
         with self._sessions_lock:
             dead = []
             for sid, sess in self._sessions.items():
                 if time.time() - sess.last_seen > 120.0:
                     dead.append(sid)
+                elif require_icloud_auth and not getattr(sess, "icloud_authorized", False):
+                    continue
                 else:
                     sess.enqueue(packet)
             for sid in dead:
@@ -4646,9 +4660,10 @@ class BluePillEngine:
                                     else 0
                                 )
                                 quoted_guid = urllib.parse.quote(zuuid)
+                                has_preview = bool(resolved_poster) if is_video else bool(resolved_poster or resolved_asset)
                                 preview_url = (
-                                    f"/api/v1/attachment/{quoted_guid}/live?preview=1"
-                                    if (is_video and resolved_poster)
+                                    (f"/api/v1/attachment/{quoted_guid}/live?preview=1" if resolved_poster else "")
+                                    if is_video
                                     else f"/api/v1/attachment/{quoted_guid}/live"
                                 )
                                 entry = {
@@ -4658,7 +4673,7 @@ class BluePillEngine:
                                     "mediaType": "video" if is_video else "image",
                                     "isVideo": is_video,
                                     "duration": round(raw_zdur, 2) if is_video else 0.0,
-                                    "hasPreview": bool(resolved_poster or resolved_asset),
+                                    "hasPreview": has_preview,
                                     "createdMs": created_ms,
                                     "totalBytes": size_bytes,
                                     "isCloudEvicted": resolved_asset is None,
@@ -5023,7 +5038,7 @@ class BluePillEngine:
                     self.broadcast_socketio(
                         "icloud-photos-updated",
                         {
-                            "total": total_acc,
+                            "total": self.count_icloud_photos(),
                             "synced": sync_acc,
                             "timestampMs": int(time.time() * 1000),
                         },
@@ -7014,15 +7029,104 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     let photosTotal = 0;
     let photosHasMore = false;
     let photosPollTimer = null;
+    let photosRequestSeq = 0;
+    let photosSioSid = '';
+    let photosSioLoopActive = false;
+    let photosSioAbort = null;
     function formatPhotoDuration(sec) {
       const s = Math.max(0, Math.round(Number(sec) || 0));
       const mins = Math.floor(s / 60);
       const rem = s % 60;
       return mins + ':' + (rem < 10 ? '0' : '') + rem;
     }
+    function startPhotosSocketIo() {
+      if (photosSioLoopActive) return;
+      photosSioLoopActive = true;
+      (async () => {
+        while (photosSioLoopActive) {
+          try {
+            const modal = document.getElementById('photosModal');
+            if (!modal || modal.style.display === 'none') {
+              photosSioLoopActive = false;
+              break;
+            }
+            photosSioAbort = new AbortController();
+            if (!photosSioSid) {
+              const hs = await fetch(apiUrl('/socket.io?EIO=4&transport=polling'), { signal: photosSioAbort.signal });
+              const hsTxt = await hs.text();
+              if (hsTxt && hsTxt.startsWith('0')) {
+                const hsObj = JSON.parse(hsTxt.slice(1));
+                if (hsObj && hsObj.sid) photosSioSid = hsObj.sid;
+              }
+              if (photosSioSid) {
+                await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
+                  method: 'POST',
+                  body: '40',
+                  signal: photosSioAbort.signal
+                });
+              }
+            }
+            if (!photosSioSid) {
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            const pr = await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
+              signal: photosSioAbort.signal
+            });
+            if (!pr.ok) {
+              photosSioSid = '';
+              await new Promise(r => setTimeout(r, 1500));
+              continue;
+            }
+            const raw = await pr.text();
+            if (raw) {
+              for (const pkt of raw.split(String.fromCharCode(0x1e))) {
+                if (!pkt) continue;
+                if (pkt === '2') {
+                  await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
+                    method: 'POST',
+                    body: '3',
+                    signal: photosSioAbort.signal
+                  });
+                } else if (pkt.startsWith('42')) {
+                  try {
+                    const arr = JSON.parse(pkt.slice(2));
+                    if (Array.isArray(arr) && arr[0] === 'icloud-photos-updated') {
+                      const evPayload = (arr.length > 1 && arr[1]) ? arr[1] : {};
+                      if (photosPage === 0) {
+                        loadPhotos(0);
+                      } else if (typeof evPayload.total === 'number') {
+                        photosTotal = Number(evPayload.total);
+                        const pageCount = Math.max(1, Math.ceil(photosTotal / photosPageSize));
+                        const metaEl = document.getElementById('photosPageMeta');
+                        if (metaEl) metaEl.textContent = 'Page ' + (photosPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
+                      }
+                    }
+                  } catch (_) {}
+                }
+              }
+            }
+            await new Promise(r => setTimeout(r, 1000));
+          } catch (e) {
+            if (!photosSioLoopActive || (e && e.name === 'AbortError')) break;
+            photosSioSid = '';
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        }
+      })();
+    }
+    function stopPhotosSocketIo() {
+      photosSioLoopActive = false;
+      photosSioSid = '';
+      if (photosSioAbort) {
+        try { photosSioAbort.abort(); } catch (_) {}
+        photosSioAbort = null;
+      }
+    }
     function openPhotosModal() {
       document.getElementById('photosModal').style.display = 'flex';
       loadPhotos(0);
+      startPhotosSocketIo();
       if (photosPollTimer) clearInterval(photosPollTimer);
       photosPollTimer = setInterval(() => {
         const modal = document.getElementById('photosModal');
@@ -7033,6 +7137,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
     function closePhotosModal() {
       document.getElementById('photosModal').style.display = 'none';
+      stopPhotosSocketIo();
       if (photosPollTimer) {
         clearInterval(photosPollTimer);
         photosPollTimer = null;
@@ -7049,21 +7154,25 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       loadPhotos(next);
     }
     async function loadPhotos(page = photosPage) {
+      const reqSeq = ++photosRequestSeq;
+      const targetPage = Math.max(0, page);
+      photosPage = targetPage;
       try {
-        photosPage = Math.max(0, page);
-        const off = photosPage * photosPageSize;
+        const off = targetPage * photosPageSize;
         const resp = await fetch(apiUrl('/api/v1/icloud/photos?limit=' + photosPageSize + '&offset=' + off));
+        if (!resp.ok) return;
         const j = await resp.json();
+        if (reqSeq !== photosRequestSeq) return;
         const photos = j.data || [];
-        photosTotal = Number(j.total || photos.length);
+        photosTotal = Number(typeof j.total === 'number' ? j.total : photos.length);
         photosHasMore = Boolean(j.hasMore);
         const pageCount = Math.max(1, Math.ceil(photosTotal / photosPageSize));
         const metaEl = document.getElementById('photosPageMeta');
-        if (metaEl) metaEl.textContent = 'Page ' + (photosPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
+        if (metaEl) metaEl.textContent = 'Page ' + (targetPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
         const prevBtn = document.getElementById('photosPrevBtn');
-        if (prevBtn) prevBtn.disabled = (photosPage <= 0);
+        if (prevBtn) prevBtn.disabled = (targetPage <= 0);
         const nextBtn = document.getElementById('photosNextBtn');
-        if (nextBtn) nextBtn.disabled = (!photosHasMore && (photosPage + 1) >= pageCount);
+        if (nextBtn) nextBtn.disabled = (!photosHasMore && (targetPage + 1) >= pageCount);
         const grid = document.getElementById('photosGrid');
         grid.innerHTML = '';
         grid.scrollTop = 0;
@@ -7071,10 +7180,10 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           const card = document.createElement('div');
           card.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px;';
           const liveUrl = apiUrl('/api/v1/attachment/' + encodeURIComponent(p.guid) + '/live');
-          const thumbUrl = p.previewUrl ? apiUrl(p.previewUrl) : liveUrl;
           const isEvicted = Boolean(p.isCloudEvicted);
           const isVideo = Boolean(p.isVideo) || String(p.mediaType || '') === 'video';
-          const hasPreview = Boolean(p.hasPreview) || !isEvicted;
+          const hasPreview = isVideo ? Boolean(p.hasPreview && p.previewUrl) : !isEvicted;
+          const thumbUrl = p.previewUrl ? apiUrl(p.previewUrl) : liveUrl;
           const isPortrait = Boolean(p.isPortrait);
           const previewBox = document.createElement('div');
           previewBox.style.cssText = 'width:100%;height:' + (isPortrait ? '210px' : '140px') + ';border-radius:6px;background:#151b23;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;cursor:pointer;';
@@ -7202,8 +7311,33 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
 
     async function downloadAttachmentLive(guid) {
-      await fetch(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/download'), { method: 'POST' });
-      window.open(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/live'), '_blank');
+      const statusBanner = document.getElementById('photosSyncStatusBanner');
+      if (statusBanner) { statusBanner.style.display = 'none'; statusBanner.textContent = ''; }
+      try {
+        const resp = await fetch(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/download'), { method: 'POST' });
+        let j = null;
+        try { j = await resp.json(); } catch (_) { j = null; }
+        const d = (j && j.data) ? j.data : {};
+        if (!resp.ok || d.downloaded !== true) {
+          const msg = (d && (d.error || d.message)) || (j && j.message) || ('Attachment download failed (HTTP ' + resp.status + ')');
+          if (statusBanner) {
+            statusBanner.style.background = '#3d1518';
+            statusBanner.style.color = '#f85149';
+            statusBanner.textContent = '⚠ ' + msg;
+            statusBanner.style.display = 'block';
+          }
+          return;
+        }
+        window.open(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/live'), '_blank');
+        await loadPhotos(photosPage);
+      } catch (e) {
+        if (statusBanner) {
+          statusBanner.style.background = '#3d1518';
+          statusBanner.style.color = '#f85149';
+          statusBanner.textContent = '⚠ ' + ((e && e.message) ? e.message : String(e));
+          statusBanner.style.display = 'block';
+        }
+      }
     }
   </script>
 
@@ -7387,6 +7521,16 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                     fields[field_name] = payload.decode("utf-8", errors="replace")
         return fields
 
+    def _send_attachment_common_headers(self, mime: str, file_path: str, content_len: int) -> None:
+        self.send_header("Content-Type", mime)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(content_len))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if mime.lower().startswith("image/svg") or file_path.lower().endswith(".svg"):
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+            self.send_header("Content-Disposition", 'attachment; filename="attachment.svg"')
+
     def do_OPTIONS(self) -> None:
         self._req_t0 = time.time()
         self._send_json(200, None)
@@ -7414,12 +7558,13 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             if not self._check_auth(parsed):
                 self._send_json(401, None, "Unauthorized")
                 return
+            icloud_auth = bool(self.engine.password) and self._check_auth(parsed) and self._is_secure_or_loopback()
             qs = urllib.parse.parse_qs(parsed.query)
             sid = (qs.get("sid") or [""])[0]
             if not sid:
                 sid = uuid.uuid4().hex
                 with self.engine._sessions_lock:
-                    self.engine._sessions[sid] = SocketIOSession(sid)
+                    self.engine._sessions[sid] = SocketIOSession(sid, icloud_authorized=icloud_auth)
                 handshake = "0" + json.dumps(
                     {
                         "sid": sid,
@@ -7439,8 +7584,10 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             with self.engine._sessions_lock:
                 sess = self.engine._sessions.get(sid)
                 if not sess:
-                    sess = SocketIOSession(sid)
+                    sess = SocketIOSession(sid, icloud_authorized=icloud_auth)
                     self.engine._sessions[sid] = sess
+                else:
+                    sess.icloud_authorized = icloud_auth
             pkts = sess.pop_packets(timeout=0.05)
             out = "\x1e".join(pkts).encode("utf-8")
             self.send_response(200)
@@ -7540,56 +7687,63 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json(404, None, "Attachment not found")
                 return
             file_path, mime = resolved
-            file_size = os.path.getsize(file_path)
-            range_hdr = str(self.headers.get("Range") or "").strip()
+            if_range_hdr = str(self.headers.get("If-Range") or "").strip()
+            range_hdr = "" if if_range_hdr else str(self.headers.get("Range") or "").strip()
             range_match = re.match(r"^bytes=(\d*)-(\d*)$", range_hdr) if range_hdr else None
-            if range_match and file_size > 0:
-                start_s, end_s = range_match.groups()
-                start_b = int(start_s) if start_s else 0
-                end_b = int(end_s) if end_s else (file_size - 1)
-                if not start_s and end_s:
-                    # suffix-byte-range-spec
-                    suffix_len = int(end_s)
-                    start_b = max(0, file_size - suffix_len)
-                    end_b = file_size - 1
-                end_b = min(end_b, file_size - 1)
-                if start_b < 0 or start_b >= file_size or end_b < start_b:
-                    self._log_http(416)
-                    self.send_response(416)
-                    self.send_header("Content-Range", f"bytes */{file_size}")
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.end_headers()
-                    return
-                chunk_len = (end_b - start_b) + 1
-                with open(file_path, "rb") as f:
-                    f.seek(start_b)
-                    chunk = f.read(chunk_len)
-                self._log_http(206)
-                self.send_response(206)
-                self.send_header("Content-Type", mime)
-                self.send_header("Accept-Ranges", "bytes")
-                self.send_header("Content-Range", f"bytes {start_b}-{end_b}/{file_size}")
-                self.send_header("Content-Length", str(len(chunk)))
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("X-Content-Type-Options", "nosniff")
-                self.end_headers()
-                self.wfile.write(chunk)
+            try:
+                f = open(file_path, "rb")
+            except FileNotFoundError:
+                self._send_json(404, None, "Attachment not found")
                 return
-            with open(file_path, "rb") as f:
-                raw = f.read()
-            self._log_http(200)
-            self.send_response(200)
-            self.send_header("Content-Type", mime)
-            self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            if mime.lower().startswith("image/svg") or file_path.lower().endswith(".svg"):
-                self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
-                self.send_header("Content-Disposition", 'attachment; filename="attachment.svg"')
-            self.end_headers()
-            self.wfile.write(raw)
-            return
+            with f:
+                file_size = int(os.fstat(f.fileno()).st_size)
+                if range_match and file_size > 0:
+                    start_s, end_s = range_match.groups()
+                    start_b = int(start_s) if start_s else 0
+                    end_b = int(end_s) if end_s else (file_size - 1)
+                    if not start_s and end_s:
+                        # suffix-byte-range-spec
+                        suffix_len = int(end_s)
+                        start_b = max(0, file_size - suffix_len)
+                        end_b = file_size - 1
+                    end_b = min(end_b, file_size - 1)
+                    if start_b < 0 or start_b >= file_size or end_b < start_b:
+                        self._log_http(416)
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{file_size}")
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.end_headers()
+                        return
+                    remaining = (end_b - start_b) + 1
+                    f.seek(start_b)
+                    self._log_http(206)
+                    self.send_response(206)
+                    self.send_header("Content-Range", f"bytes {start_b}-{end_b}/{file_size}")
+                    self._send_attachment_common_headers(mime, file_path, remaining)
+                    self.end_headers()
+                    try:
+                        while remaining > 0:
+                            buf = f.read(min(65536, remaining))
+                            if not buf:
+                                break
+                            self.wfile.write(buf)
+                            remaining -= len(buf)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
+                self._log_http(200)
+                self.send_response(200)
+                self._send_attachment_common_headers(mime, file_path, file_size)
+                self.end_headers()
+                try:
+                    while True:
+                        buf = f.read(65536)
+                        if not buf:
+                            break
+                        self.wfile.write(buf)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
 
         m_wave = re.match(r"^/api/v1/attachment/([^/]+)/waveform$", path)
         if m_wave:
@@ -8536,6 +8690,16 @@ def run_selftest(engine: BluePillEngine) -> int:
         test_eng._photos_library_assets.clear()
         test_eng._photos_poster_cache.clear()
         test_eng.db_path = os.path.join(test_eng._config_dir, "nonexistent_chat.db")
+        launchctl_calls: List[List[str]] = []
+        test_eng._run_launchctl = lambda args: (
+            launchctl_calls.append(list(args)) or subprocess.CompletedProcess(args, 0, "", "")
+        )
+        test_eng._get_photolibraryd_cpu_pct = lambda: 5.0
+        test_eng._check_icloud_photos_daemons = lambda uid=None: {
+            "com.apple.cloudd": True,
+            "com.apple.photolibraryd": True,
+            "com.apple.cloudphotod": True,
+        }
 
         stale_plist = os.path.join(photos_test_root, "resources", "cpl", "cloudsync.noindex", "syncstatus.plist")
         stale_dt = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(hours=3)
@@ -8544,8 +8708,20 @@ def run_selftest(engine: BluePillEngine) -> int:
         p_health = test_eng._inspect_icloud_photos_health()
         assert p_health["cloudSyncStale"] is True and p_health["needsHeal"] is True, f"Expected stale health: {p_health}"
         assert p_health["cloudAssetCount"] == 12, f"Expected 12 cloud assets: {p_health}"
+        assert p_health["cloudImageCount"] == 10 and p_health["cloudVideoCount"] == 2, f"Expected split cloud counts: {p_health}"
         pf_stale = test_eng.run_preflight(fix=False)
         assert pf_stale["modules"]["photos"]["cloudSyncStale"] is True, f"Preflight missing cloudSyncStale: {pf_stale}"
+        assert pf_stale["modules"]["photos"]["cloudImageCount"] == 10 and pf_stale["modules"]["photos"]["cloudVideoCount"] == 2
+        if sys.platform == "darwin":
+            first_heal = test_eng._heal_icloud_photos_daemons(reason="selftest", min_interval_seconds=120, now_ts=1000.0)
+            assert first_heal.get("healed") is True and any(c[:2] == ["kickstart", "-k"] for c in launchctl_calls), f"Expected stubbed kickstart: {first_heal}"
+            second_heal = test_eng._heal_icloud_photos_daemons(reason="selftest_2", min_interval_seconds=120, now_ts=1200.0)
+            assert second_heal.get("healed") is False and second_heal.get("skippedReason") == "cooldown", f"Cooldown floor bypassed: {second_heal}"
+        else:
+            test_eng._last_photos_heal_ts = 1000.0
+            second_heal = test_eng._heal_icloud_photos_daemons(reason="selftest_2", min_interval_seconds=120, now_ts=1200.0)
+            assert second_heal.get("skippedReason") == "cooldown", f"Cooldown floor bypassed: {second_heal}"
+            test_eng._last_photos_heal_ts = 0.0
 
         shutil.copy2(sample_jpg, os.path.join(photos_test_root, "originals", "0", "IMG_OLD_LOCAL.JPG"))
         shutil.copy2(sample_jpg, os.path.join(photos_test_root, "resources", "derivatives", "masters", "0", "VID-CLOUD-001_4_5005_c.jpeg"))
@@ -8553,6 +8729,9 @@ def run_selftest(engine: BluePillEngine) -> int:
         local_mov_path = os.path.join(photos_test_root, "originals", "0", "IMG_LOCAL_002.MOV")
         with open(local_mov_path, "wb") as mvf:
             mvf.write(b"ftypqt  0123456789ABCDEF")
+        noposter_mov_path = os.path.join(photos_test_root, "originals", "0", "IMG_NO_POSTER.MOV")
+        with open(noposter_mov_path, "wb") as npf:
+            npf.write(b"ftypqt  NOPOSTER")
 
         vdb_path = os.path.join(photos_test_root, "database", "Photos.sqlite")
         vconn = sqlite3.connect(vdb_path)
@@ -8567,6 +8746,9 @@ def run_selftest(engine: BluePillEngine) -> int:
                 "INSERT INTO ZASSET VALUES ('VID-LOCAL-002', 'IMG_LOCAL_002.MOV', 'com.apple.quicktime-movie', '0', 0, 2000.0, 2000.0, 1, 7.5, 1920, 1080);"
             )
             vconn.execute(
+                "INSERT INTO ZASSET VALUES ('VID-NOPOSTER', 'IMG_NO_POSTER.MOV', 'com.apple.quicktime-movie', '0', 0, 3000.0, 3000.0, 1, 3.0, 1920, 1080);"
+            )
+            vconn.execute(
                 "INSERT INTO ZASSET VALUES ('VID-CLOUD-001', 'IMG_CLOUD_001.MOV', 'com.apple.quicktime-movie', '0', 0, 5000.0, 5000.0, 1, 12.5, 1080, 1920);"
             )
             vconn.commit()
@@ -8574,12 +8756,13 @@ def run_selftest(engine: BluePillEngine) -> int:
             vconn.close()
 
         v_items = test_eng.query_icloud_photos(limit=10, offset=0, source="photos_library")
-        assert [it["guid"] for it in v_items] == ["VID-CLOUD-001", "VID-LOCAL-002", "IMG-OLD-000"], f"Chronological order broken: {v_items}"
-        assert test_eng.count_icloud_photos(source="photos_library") == 3
+        assert [it["guid"] for it in v_items] == ["VID-CLOUD-001", "VID-NOPOSTER", "VID-LOCAL-002", "IMG-OLD-000"], f"Chronological order broken: {v_items}"
+        assert test_eng.count_icloud_photos(source="photos_library") == 4
         assert v_items[0]["isVideo"] is True and v_items[0]["mediaType"] == "video" and v_items[0]["duration"] == 12.5
         assert v_items[0]["isCloudEvicted"] is True and v_items[0]["hasPreview"] is True
         assert v_items[0]["previewUrl"].endswith("/live?preview=1")
-        assert v_items[1]["isVideo"] is True and v_items[1]["isCloudEvicted"] is False
+        assert v_items[1]["isVideo"] is True and v_items[1]["hasPreview"] is False and v_items[1]["previewUrl"] == "", f"Local video without poster must not advertise video as preview: {v_items[1]}"
+        assert v_items[2]["isVideo"] is True and v_items[2]["isCloudEvicted"] is False and v_items[2]["hasPreview"] is True
         assert test_eng.resolve_attachment_file("VID-CLOUD-001", preview_only=False) is None
         poster_res = test_eng.resolve_attachment_file("VID-CLOUD-001", preview_only=True)
         assert poster_res is not None and poster_res[1] == "image/jpeg", f"Expected video poster JPEG: {poster_res}"
@@ -8587,7 +8770,7 @@ def run_selftest(engine: BluePillEngine) -> int:
         vid_sync = test_eng.sync_icloud_photos(limit=10, offset=0)
         assert vid_sync["failed"] == 0 and vid_sync["status"] == "ok", f"Optimize-storage video must not fail sync: {vid_sync}"
 
-        # Verify HTTP ?preview=1 and Range: bytes=0-3 streaming against running selftest HTTP server
+        # Verify HTTP ?preview=1, Range: bytes=0-3, and If-Range fallback against running selftest HTTP server
         orig_srv_engine_lib = engine.photos_library_path
         orig_srv_assets = dict(engine._photos_library_assets)
         orig_srv_posters = dict(engine._photos_poster_cache)
@@ -8609,7 +8792,15 @@ def run_selftest(engine: BluePillEngine) -> int:
             )
             with urllib.request.urlopen(r_req, timeout=5.0) as rresp:
                 assert rresp.status == 206, f"Expected 206 Partial Content, got {rresp.status}"
+                assert rresp.headers.get("X-Content-Type-Options") == "nosniff"
                 assert rresp.read() == b"ftyp"
+            ir_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/v1/attachment/VID-LOCAL-002/live?password=selftest-secret",
+                headers={"Range": "bytes=0-3", "If-Range": "\"stale-validator\""},
+            )
+            with urllib.request.urlopen(ir_req, timeout=5.0) as irresp:
+                assert irresp.status == 200, f"Expected 200 full body when If-Range present without validator, got {irresp.status}"
+                assert irresp.read() == b"ftypqt  0123456789ABCDEF"
         finally:
             engine.photos_library_path = orig_srv_engine_lib
             engine.db_path = orig_srv_db
@@ -8617,6 +8808,21 @@ def run_selftest(engine: BluePillEngine) -> int:
             engine._photos_library_assets.update(orig_srv_assets)
             engine._photos_poster_cache.clear()
             engine._photos_poster_cache.update(orig_srv_posters)
+
+        # Verify SocketIO iCloud Photos broadcast gating (unauth session must not receive icloud-photos-updated)
+        unauth_sess = SocketIOSession("unauth-test", icloud_authorized=False)
+        auth_sess = SocketIOSession("auth-test", icloud_authorized=True)
+        with test_eng._sessions_lock:
+            test_eng._sessions["unauth-test"] = unauth_sess
+            test_eng._sessions["auth-test"] = auth_sess
+        try:
+            test_eng.broadcast_socketio("icloud-photos-updated", {"total": 4})
+            assert len(unauth_sess.queue) == 0, f"Unauthorized session received icloud-photos-updated: {unauth_sess.queue}"
+            assert len(auth_sess.queue) == 1, f"Authorized session missed icloud-photos-updated: {auth_sess.queue}"
+        finally:
+            with test_eng._sessions_lock:
+                test_eng._sessions.pop("unauth-test", None)
+                test_eng._sessions.pop("auth-test", None)
 
         # Verify Photos.sqlite watcher detects new asset and broadcasts icloud-photos-updated
         watch_state: Dict[str, Any] = {}
@@ -8635,7 +8841,7 @@ def run_selftest(engine: BluePillEngine) -> int:
                 vconn2.close()
             os.utime(vdb_path, (time.time() + 2, time.time() + 2))
             assert test_eng._poll_photos_db_once(watch_state, now_ts=125.0) is True
-            assert any(ev == "icloud-photos-updated" and pl.get("total") == 4 for ev, pl in photo_events), f"Missing socket event: {photo_events}"
+            assert any(ev == "icloud-photos-updated" and pl.get("total") == 5 for ev, pl in photo_events), f"Missing socket event: {photo_events}"
         finally:
             test_eng.broadcast_socketio = orig_emit_p
     finally:

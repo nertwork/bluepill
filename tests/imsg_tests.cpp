@@ -4374,6 +4374,33 @@ private slots:
             QByteArrayLiteral("42[\"icloud-photos-updated\",{\"total\":155,\"maxRowId\":999}]"));
         QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosTotal(), 155, 1500);
 
+        // Verify navigation-race guard: pagination before 120ms timer fires cancels stale page-0 reset
+        pagedBackend.nextIcloudPhotosPage();
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosPage(), 1, 1500);
+        totalPhotosOnServer = 153; // Simulate server deletion / count decrease while on page 1
+        pagedBackend.handleSocketIoPayloadForTest(
+            QByteArrayLiteral("42[\"icloud-photos-updated\",{\"total\":153,\"maxRowId\":999}]"));
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosTotal(), 153, 1500);
+        QCOMPARE(pagedBackend.icloudPhotosPage(), 1);
+
+        // Verify cached local video keeps server ?preview=1 thumbnail URL rather than local file:// .mov URL
+        QTemporaryDir cachedVidDir;
+        QVERIFY(cachedVidDir.isValid());
+        const QString cachedVidPath = cachedVidDir.filePath(QStringLiteral("VID_0000.MOV"));
+        {
+            QFile vf(cachedVidPath);
+            QVERIFY(vf.open(QIODevice::WriteOnly));
+            vf.write(QByteArray(256, 'V'));
+        }
+        pagedBackend.cacheAttachmentPathForTest(QStringLiteral("plib:PHOTO-GUID-0"), cachedVidPath);
+        pagedBackend.fetchIcloudPhotos(0, false);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotosPage(), 0, 1500);
+        QTRY_COMPARE_WITH_TIMEOUT(pagedBackend.icloudPhotos().first().toMap().value(QStringLiteral("isCloudEvicted")).toBool(), false, 1500);
+        const QVariantMap cachedVidItem = pagedBackend.icloudPhotos().first().toMap();
+        QVERIFY(cachedVidItem.value(QStringLiteral("previewUrl")).toString().startsWith(QStringLiteral("http://")));
+        QVERIFY(cachedVidItem.value(QStringLiteral("previewUrl")).toString().contains(QStringLiteral("preview=1")));
+        QCOMPARE(cachedVidItem.value(QStringLiteral("streamUrl")).toString(), QUrl::fromLocalFile(cachedVidPath).toString());
+
         if (prevUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevUrl);
         if (prevPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevPass);
     }

@@ -7165,8 +7165,24 @@ ApplicationWindow {
         Timer {
             interval: 20000
             repeat: true
-            running: icloudPhotosPopup.visible && backend.icloudPhotosEnabled && !backend.icloudPhotosLoading && !backend.icloudPhotosSyncing && backend.icloudPhotosPage === 0
+            running: icloudPhotosPopup.visible && backend.icloudPhotosEnabled && !backend.icloudPhotosLoading && !backend.icloudPhotosSyncing && backend.icloudPhotosPage === 0 && backend.icloudPhotos.length <= backend.icloudPhotosPageSize
             onTriggered: backend.fetchIcloudPhotos(0, false)
+        }
+
+        function openImageGalleryFromPhotos(clickedIndex) {
+            var allItems = backend.icloudPhotos || []
+            var imagesOnly = []
+            var mappedIndex = 0
+            for (var i = 0; i < allItems.length; ++i) {
+                var item = allItems[i]
+                var itemIsVid = Boolean(item && (item.isVideo || item.mediaType === "video"))
+                if (itemIsVid) continue
+                if (i === clickedIndex) mappedIndex = imagesOnly.length
+                imagesOnly.push(item)
+            }
+            if (imagesOnly.length === 0) return
+            icloudPhotosPopup.close()
+            root.openPhotoViewer(imagesOnly, mappedIndex)
         }
         background: Rectangle {
             color: theme.darkBackground
@@ -7384,8 +7400,7 @@ ApplicationWindow {
                                         if (isVid) {
                                             backend.openAttachment(modelData.guid, modelData.name || "video.mov")
                                         } else {
-                                            icloudPhotosPopup.close()
-                                            root.openPhotoViewer(backend.icloudPhotos, index)
+                                            icloudPhotosPopup.openImageGalleryFromPhotos(index)
                                         }
                                     } else if (modelData.guid && modelData.isCloudEvicted && modelData.canUnpurge !== false) {
                                         backend.downloadCloudAttachment(modelData.guid)
@@ -7428,8 +7443,7 @@ ApplicationWindow {
                                     } else if (isVid) {
                                         backend.openAttachment(modelData.guid, modelData.name || "video.mov")
                                     } else {
-                                        icloudPhotosPopup.close()
-                                        root.openPhotoViewer(backend.icloudPhotos, index)
+                                        icloudPhotosPopup.openImageGalleryFromPhotos(index)
                                     }
                                 }
                             }

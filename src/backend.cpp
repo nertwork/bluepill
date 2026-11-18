@@ -2327,15 +2327,16 @@ void Backend::handleSocketIoPayload(const QByteArray &rawPayload) {
             } else if (eventName == QStringLiteral("icloud-photos-updated")) {
                 if (m_icloudPhotosEnabled && !m_demoMode) {
                     if (eventData.isObject()) {
-                        const int evTotal = eventData.toObject().value(QStringLiteral("total")).toInt(0);
-                        if (evTotal > m_icloudPhotosTotal) {
-                            m_icloudPhotosTotal = evTotal;
-                            emit icloudPhotosChanged();
+                        const QJsonValue evTotalVal = eventData.toObject().value(QStringLiteral("total"));
+                        if (evTotalVal.isDouble()) {
+                            const int evTotal = evTotalVal.toInt(-1);
+                            if (evTotal >= 0 && evTotal != m_icloudPhotosTotal) {
+                                m_icloudPhotosTotal = evTotal;
+                                emit icloudPhotosChanged();
+                            }
                         }
                     }
-                    if (m_icloudPhotosPage == 0) {
-                        shouldTriggerPhotosRefresh = true;
-                    }
+                    shouldTriggerPhotosRefresh = true;
                 }
             }
         }
@@ -2349,7 +2350,15 @@ void Backend::handleSocketIoPayload(const QByteArray &rawPayload) {
             QTimer::singleShot(150, this, &Backend::fetchUnreadStateFromServer);
         }
         if (shouldTriggerPhotosRefresh) {
-            QTimer::singleShot(120, this, [this]() { fetchIcloudPhotos(0, false); });
+            const quint64 navGen = m_icloudPhotosRequestSeq;
+            QTimer::singleShot(120, this, [this, navGen]() {
+                if (m_icloudPhotosRequestSeq != navGen) return;
+                if (m_icloudPhotosPage == 0 && m_icloudPhotos.size() <= std::max(12, m_icloudPhotosPageSize)) {
+                    fetchIcloudPhotos(0, false);
+                } else {
+                    fetchIcloudPhotosTotalOnly();
+                }
+            });
         }
     }
 }
@@ -11214,12 +11223,22 @@ void Backend::fetchIcloudPhotos(int page, bool append) {
                             const QString srvPreview = m.value(QStringLiteral("previewUrl")).toString();
                             const bool wantPreviewParam = isVideo && srvPreview.contains(QStringLiteral("preview=1"));
                             const QString baseLiveUrl = attachmentDownloadUrl(guid);
-                            QString thumbUrl = baseLiveUrl;
-                            if (!thumbUrl.startsWith(QStringLiteral("file://"))) {
-                                const QLatin1Char sep = thumbUrl.contains(QLatin1Char('?')) ? QLatin1Char('&') : QLatin1Char('?');
-                                thumbUrl += sep + QStringLiteral("height=360");
-                                if (wantPreviewParam) {
-                                    thumbUrl += QStringLiteral("&preview=1");
+                            const QString serverLiveUrl = isSecureOrLocalIcloudEndpoint()
+                                ? (m_serverUrl + QStringLiteral("/api/v1/attachment/")
+                                   + QString::fromUtf8(QUrl::toPercentEncoding(guid))
+                                   + QStringLiteral("/live?password=")
+                                   + QString::fromUtf8(QUrl::toPercentEncoding(m_password)))
+                                : QString();
+                            QString thumbUrl;
+                            if (isVideo) {
+                                if (wantPreviewParam && !serverLiveUrl.isEmpty()) {
+                                    thumbUrl = serverLiveUrl + QStringLiteral("&height=360&preview=1");
+                                }
+                            } else {
+                                thumbUrl = baseLiveUrl;
+                                if (!thumbUrl.isEmpty() && !thumbUrl.startsWith(QStringLiteral("file://"))) {
+                                    const QLatin1Char sep = thumbUrl.contains(QLatin1Char('?')) ? QLatin1Char('&') : QLatin1Char('?');
+                                    thumbUrl += sep + QStringLiteral("height=360");
                                 }
                             }
                             m.insert(QStringLiteral("previewUrl"), thumbUrl);
@@ -11233,6 +11252,7 @@ void Backend::fetchIcloudPhotos(int page, bool append) {
                                 if (!isVideo) {
                                     m.insert(QStringLiteral("previewUrl"), localUrl);
                                 }
+                                m.insert(QStringLiteral("streamUrl"), localUrl);
                                 m.insert(QStringLiteral("isCloudEvicted"), false);
                             }
                         }
@@ -11248,6 +11268,31 @@ void Backend::fetchIcloudPhotos(int page, bool append) {
                 }
                 emit icloudPhotosChanged();
             }
+        }
+    });
+}
+
+void Backend::fetchIcloudPhotosTotalOnly() {
+    if (!m_icloudPhotosEnabled) return;
+    if (!isSecureOrLocalIcloudEndpoint()) return;
+    const quint64 navGen = m_icloudPhotosRequestSeq;
+    const QString path = QStringLiteral("/api/v1/icloud/photos?source=photos_library&limit=1&offset=0");
+    QNetworkReply *reply = m_nam.get(makeRequest(path));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, navGen]() {
+        reply->deleteLater();
+        if (m_icloudPhotosRequestSeq != navGen) return;
+        if (reply->error() != QNetworkReply::NoError) return;
+        const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
+        if (doc.value(QStringLiteral("status")).toInt() != 200) return;
+        const int srvTotal = doc.value(QStringLiteral("total")).toInt(-1);
+        if (srvTotal < 0) return;
+        const int pageSize = std::max(12, m_icloudPhotosPageSize);
+        const int loadedEnd = (m_icloudPhotosPage * pageSize) + int(m_icloudPhotos.size());
+        const bool newHasMore = (loadedEnd < srvTotal);
+        if (m_icloudPhotosTotal != srvTotal || m_icloudPhotosHasMore != newHasMore) {
+            m_icloudPhotosTotal = srvTotal;
+            m_icloudPhotosHasMore = newHasMore;
+            emit icloudPhotosChanged();
         }
     });
 }

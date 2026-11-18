@@ -213,6 +213,9 @@ public:
         m_icloudPhotosTotal = list.size();
         emit icloudPhotosChanged();
     }
+    void cacheAttachmentPathForTest(const QString &guid, const QString &filePath) {
+        m_attachmentPaths.insert(guid, filePath);
+    }
 
 
     void setWindowActive(bool active);
@@ -314,6 +317,7 @@ public:
     Q_INVOKABLE QString saveIcloudEvent(const QString &title, qint64 startMs, qint64 endMs, const QString &calendarName = QStringLiteral("Home"), const QString &notes = QString());
     Q_INVOKABLE void deleteIcloudEvent(const QString &id);
     Q_INVOKABLE void fetchIcloudPhotos(int page = -1, bool append = false);
+    Q_INVOKABLE void fetchIcloudPhotosTotalOnly();
     Q_INVOKABLE void nextIcloudPhotosPage();
     Q_INVOKABLE void prevIcloudPhotosPage();
     Q_INVOKABLE void loadMoreIcloudPhotos();
