@@ -456,6 +456,8 @@ class BluePillEngine:
         self._last_photos_heal_actions: List[str] = []
         self._last_photos_health: Dict[str, Any] = {}
         self._photos_high_cpu_streak: int = 0
+        self._photos_high_cpu_last_obs_ts: float = 0.0
+        self._photos_high_cpu_last_sync_ms: Optional[int] = None
         self._photos_watcher_state: Dict[str, Any] = {"last_sig": None, "last_health_ts": 0.0}
         self.deleted_state_path: Optional[str] = (
             None if is_ephemeral else os.path.expanduser("~/.config/bluepill/deleted_state.json")
@@ -649,6 +651,7 @@ class BluePillEngine:
         self,
         daemons_status: Optional[Dict[str, bool]] = None,
         now_ts: Optional[float] = None,
+        cpu_pct_override: Optional[float] = None,
     ) -> Dict[str, Any]:
         now = float(now_ts if now_ts is not None else time.time())
         photos_lib = os.path.expanduser(self.photos_library_path)
@@ -694,12 +697,32 @@ class BluePillEngine:
         resolved_daemons = dict(daemons_status) if daemons_status is not None else (
             self._check_icloud_photos_daemons() if sys.platform == "darwin" else {}
         )
-        cpu_pct = self._get_photolibraryd_cpu_pct() if sys.platform == "darwin" else None
+        cpu_pct = cpu_pct_override if cpu_pct_override is not None else (
+            self._get_photolibraryd_cpu_pct() if sys.platform == "darwin" else None
+        )
         stale = bool(last_sync_age_s is not None and last_sync_age_s > self.photos_sync_stale_seconds)
         if cpu_pct is not None and cpu_pct >= 85.0 and (last_sync_age_s is None or last_sync_age_s >= 300.0):
-            self._photos_high_cpu_streak += 1
+            if self._photos_high_cpu_streak == 0 or self._photos_high_cpu_last_obs_ts <= 0:
+                self._photos_high_cpu_streak = 1
+                self._photos_high_cpu_last_obs_ts = now
+                self._photos_high_cpu_last_sync_ms = last_sync_ms
+            elif (
+                last_sync_ms > 0
+                and self._photos_high_cpu_last_sync_ms is not None
+                and last_sync_ms != self._photos_high_cpu_last_sync_ms
+            ):
+                # lastSyncDate advanced while working; restart observation window instead of declaring a wedge
+                self._photos_high_cpu_streak = 1
+                self._photos_high_cpu_last_obs_ts = now
+                self._photos_high_cpu_last_sync_ms = last_sync_ms
+            elif (now - self._photos_high_cpu_last_obs_ts) >= 50.0:
+                self._photos_high_cpu_streak += 1
+                self._photos_high_cpu_last_obs_ts = now
+                self._photos_high_cpu_last_sync_ms = last_sync_ms
         else:
             self._photos_high_cpu_streak = 0
+            self._photos_high_cpu_last_obs_ts = 0.0
+            self._photos_high_cpu_last_sync_ms = None
         wedged = bool(self._photos_high_cpu_streak >= 2 or (stale and cpu_pct is not None and cpu_pct >= 85.0))
         heal_reasons: List[str] = []
         for d_name, is_up in resolved_daemons.items():
@@ -8712,6 +8735,24 @@ def run_selftest(engine: BluePillEngine) -> int:
         pf_stale = test_eng.run_preflight(fix=False)
         assert pf_stale["modules"]["photos"]["cloudSyncStale"] is True, f"Preflight missing cloudSyncStale: {pf_stale}"
         assert pf_stale["modules"]["photos"]["cloudImageCount"] == 10 and pf_stale["modules"]["photos"]["cloudVideoCount"] == 2
+        # Verify high-CPU wedge streak ignores rapid duplicate checks & resets if lastSyncDate advances
+        obs_t0 = time.time()
+        fresh_dt1 = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(minutes=10)
+        with open(stale_plist, "wb") as spf:
+            plistlib.dump({"lastSyncDate": fresh_dt1, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
+        h_cpu1 = test_eng._inspect_icloud_photos_health(now_ts=obs_t0, cpu_pct_override=95.0)
+        h_cpu_rapid = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 5.0, cpu_pct_override=95.0)
+        assert h_cpu1["wedged"] is False and h_cpu_rapid["wedged"] is False, f"Rapid high-CPU polls must not immediately wedge: {h_cpu_rapid}"
+        fresh_dt2 = fresh_dt1 + datetime.timedelta(minutes=2)
+        with open(stale_plist, "wb") as spf:
+            plistlib.dump({"lastSyncDate": fresh_dt2, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
+        h_cpu_prog = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 60.0, cpu_pct_override=95.0)
+        assert h_cpu_prog["wedged"] is False, f"Advancing lastSyncDate must reset wedge streak: {h_cpu_prog}"
+        h_cpu_wedged = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 120.0, cpu_pct_override=95.0)
+        assert h_cpu_wedged["wedged"] is True, f"Sustained time-separated stalled high CPU must mark wedged: {h_cpu_wedged}"
+        test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 130.0, cpu_pct_override=5.0)
+        with open(stale_plist, "wb") as spf:
+            plistlib.dump({"lastSyncDate": stale_dt, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
         if sys.platform == "darwin":
             first_heal = test_eng._heal_icloud_photos_daemons(reason="selftest", min_interval_seconds=120, now_ts=1000.0)
             assert first_heal.get("healed") is True and any(c[:2] == ["kickstart", "-k"] for c in launchctl_calls), f"Expected stubbed kickstart: {first_heal}"
