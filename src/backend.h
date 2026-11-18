@@ -647,6 +647,7 @@ private:
     bool m_icloudPhotosHasMore = false;
     bool m_icloudPhotosLoading = false;
     quint64 m_icloudPhotosRequestSeq = 0;
+    quint64 m_icloudPhotosTotalRequestSeq = 0;
     bool m_icloudNotesEnabled = true;
     bool m_icloudCalendarEnabled = true;
     bool m_icloudPhotosEnabled = true;

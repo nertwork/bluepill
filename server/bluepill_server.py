@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BluePill Headless macOS Relay Server (`bluepill-server` v1.2.1)
+BluePill Headless macOS Relay Server (`bluepill-server` v1.2.2)
 Zero-Electron, single-file Python 3 stdlib relay for Apple Messages (`chat.db`),
 macOS Contacts (`AddressBook-v22.abcddb`), Pinned Chats (`com.apple.messages.pinning.plist`),
 Engine.IO v4 / Socket.IO v4 push events, and Direct SSH JSON-RPC (`stdio`) mode.
@@ -50,7 +50,7 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 APPLE_EPOCH_OFFSET_SEC = 978307200
 APPLE_EPOCH_OFFSET_MS = 978307200000
 _VIDEO_EXTS = (".mov", ".mp4", ".m4v", ".avi", ".mkv", ".3gp")
@@ -6410,7 +6410,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill Web UI</span>
-      <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.2.1 · Zero-Electron macOS Relay</span>
+      <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.2.2 · Zero-Electron macOS Relay</span>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <button onclick="openNotesModal()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;display:flex;align-items:center;gap:4px;">📝 Notes</button>
@@ -7843,6 +7843,17 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                 else:
                     sess.icloud_authorized = icloud_auth
             pkts = sess.pop_packets(timeout=0.05)
+            if not icloud_auth:
+                pkts = [
+                    pkt
+                    for pkt in pkts
+                    if not (
+                        pkt.startswith('42["icloud-photos-updated"')
+                        or pkt.startswith('42["icloud-photos-sync"')
+                    )
+                ]
+                if not pkts:
+                    pkts = ["2"]
             out = "\x1e".join(pkts).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=UTF-8")
@@ -9009,21 +9020,26 @@ def run_selftest(engine: BluePillEngine) -> int:
         assert pf_stale["modules"]["photos"]["cloudImageCount"] == 10 and pf_stale["modules"]["photos"]["cloudVideoCount"] == 2
         # Verify high-CPU wedge streak ignores rapid duplicate checks & resets if lastSyncDate advances (and UTI cloudAssetCountPerType keys)
         obs_t0 = time.time()
-        fresh_dt1 = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(minutes=6)
-        with open(stale_plist, "wb") as spf:
-            plistlib.dump({"lastSyncDate": fresh_dt1, "cloudAssetCountPerType": {"public.image": 10, "public.movie": 2}}, spf)
-        h_cpu1 = test_eng._inspect_icloud_photos_health(now_ts=obs_t0, cpu_pct_override=95.0)
-        assert h_cpu1["cloudImageCount"] == 10 and h_cpu1["cloudVideoCount"] == 2, f"Expected UTI split cloud counts: {h_cpu1}"
-        h_cpu_rapid = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 5.0, cpu_pct_override=95.0)
-        assert h_cpu1["wedged"] is False and h_cpu_rapid["wedged"] is False, f"Rapid high-CPU polls must not immediately wedge: {h_cpu_rapid}"
-        fresh_dt2 = fresh_dt1 + datetime.timedelta(minutes=2)
-        with open(stale_plist, "wb") as spf:
-            plistlib.dump({"lastSyncDate": fresh_dt2, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
-        h_cpu_prog = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 60.0, cpu_pct_override=95.0)
-        assert h_cpu_prog["wedged"] is False, f"Advancing lastSyncDate must reset wedge streak: {h_cpu_prog}"
-        h_cpu_wedged = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 120.0, cpu_pct_override=95.0)
-        assert h_cpu_wedged["wedged"] is True, f"Sustained time-separated stalled high CPU must mark wedged: {h_cpu_wedged}"
-        test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 130.0, cpu_pct_override=5.0)
+        orig_selftest_stale = test_eng.photos_sync_stale_seconds
+        test_eng.photos_sync_stale_seconds = 1800
+        try:
+            fresh_dt1 = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(minutes=6)
+            with open(stale_plist, "wb") as spf:
+                plistlib.dump({"lastSyncDate": fresh_dt1, "cloudAssetCountPerType": {"public.image": 10, "public.movie": 2}}, spf)
+            h_cpu1 = test_eng._inspect_icloud_photos_health(now_ts=obs_t0, cpu_pct_override=95.0)
+            assert h_cpu1["cloudImageCount"] == 10 and h_cpu1["cloudVideoCount"] == 2, f"Expected UTI split cloud counts: {h_cpu1}"
+            h_cpu_rapid = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 5.0, cpu_pct_override=95.0)
+            assert h_cpu1["wedged"] is False and h_cpu_rapid["wedged"] is False, f"Rapid high-CPU polls must not immediately wedge: {h_cpu_rapid}"
+            fresh_dt2 = fresh_dt1 + datetime.timedelta(minutes=2)
+            with open(stale_plist, "wb") as spf:
+                plistlib.dump({"lastSyncDate": fresh_dt2, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
+            h_cpu_prog = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 60.0, cpu_pct_override=95.0)
+            assert h_cpu_prog["wedged"] is False, f"Advancing lastSyncDate must reset wedge streak: {h_cpu_prog}"
+            h_cpu_wedged = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 120.0, cpu_pct_override=95.0)
+            assert h_cpu_wedged["wedged"] is True, f"Sustained time-separated stalled high CPU must mark wedged: {h_cpu_wedged}"
+            test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 130.0, cpu_pct_override=5.0)
+        finally:
+            test_eng.photos_sync_stale_seconds = orig_selftest_stale
         with open(stale_plist, "wb") as spf:
             plistlib.dump({"lastSyncDate": stale_dt, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
         if sys.platform == "darwin":
@@ -9296,7 +9312,7 @@ def run_status_or_doctor(engine: BluePillEngine, mode: str, as_json: bool) -> in
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="bluepill-server",
-        description="BluePill Headless macOS Relay Server + Web UI (v1.2.1)",
+        description="BluePill Headless macOS Relay Server + Web UI (v1.2.2)",
     )
     parser.add_argument(
         "command",

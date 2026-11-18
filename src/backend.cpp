@@ -11279,11 +11279,12 @@ void Backend::fetchIcloudPhotosTotalOnly() {
     if (!m_icloudPhotosEnabled) return;
     if (!isSecureOrLocalIcloudEndpoint()) return;
     const quint64 navGen = m_icloudPhotosRequestSeq;
+    const quint64 totalSeq = ++m_icloudPhotosTotalRequestSeq;
     const QString path = QStringLiteral("/api/v1/icloud/photos?source=photos_library&limit=1&offset=0");
     QNetworkReply *reply = m_nam.get(makeRequest(path));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, navGen]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, navGen, totalSeq]() {
         reply->deleteLater();
-        if (m_icloudPhotosRequestSeq != navGen) return;
+        if (m_icloudPhotosRequestSeq != navGen || m_icloudPhotosTotalRequestSeq != totalSeq) return;
         if (reply->error() != QNetworkReply::NoError) return;
         const QJsonObject doc = QJsonDocument::fromJson(reply->readAll()).object();
         if (doc.value(QStringLiteral("status")).toInt() != 200) return;
