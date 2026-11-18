@@ -1,5 +1,5 @@
 ## Summary
-- **Closes / Fixes:** #
+- **Closes / Fixes (Required — PR must link an issue):** #
 - **Component:** (`src/backend.cpp` / `src/Main.qml` / `server/bluepill_server.py` / `Formula/bluepill.rb` / `tests/` / `docs/` / `pkgbuild/`)
 
 ### Changes Made

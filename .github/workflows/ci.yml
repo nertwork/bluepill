@@ -5,15 +5,67 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+    types: [opened, edited, synchronize, reopened]
 
 permissions:
   contents: read
+  pull-requests: read
+  issues: read
 
 jobs:
   lint-and-validate:
     name: Lint, Syntax & Security Audit
     runs-on: ubuntu-latest
     steps:
+      - name: Enforce Linked GitHub Issue on Pull Requests
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - << 'PY'
+          import json, os, re, sys, urllib.request, urllib.error
+
+          body = os.environ.get("PR_BODY") or ""
+          repo = os.environ["REPO"]
+          token = os.environ["GH_TOKEN"]
+          pattern = re.compile(
+              r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|ref(?:s|erences?)?)\s*:?\s*(?:\*\*[^*]*\*\*\s*:?\s*)?(?:https://github\.com/"
+              + re.escape(repo)
+              + r"/issues/|#)(\d+)",
+              re.IGNORECASE,
+          )
+          nums = sorted(set(pattern.findall(body)))
+          if not nums:
+              print("ERROR: Pull Request must reference a GitHub issue (e.g., 'Closes #123' or 'Fixes #123').")
+              sys.exit(1)
+
+          valid = []
+          for num in nums:
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/issues/{num}",
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "bluepill-ci-issue-gate",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      data = json.loads(resp.read().decode())
+                      if "pull_request" not in data:
+                          valid.append(f"#{num}")
+              except urllib.error.URLError as exc:
+                  print(f"Warning: could not verify #{num}: {exc}")
+
+          if not valid:
+              print(f"ERROR: Referenced IDs ({', '.join('#' + n for n in nums)}) did not resolve to an open/existing issue in {repo}.")
+              sys.exit(1)
+
+          print("Verified linked issue(s):", ", ".join(valid))
+          PY
+
       - name: Checkout Repository
         uses: actions/checkout@v7
 
