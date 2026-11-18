@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BluePill Headless macOS Relay Server (`bluepill-server` v1.2.1)
+BluePill Headless macOS Relay Server (`bluepill-server` v1.2.2)
 Zero-Electron, single-file Python 3 stdlib relay for Apple Messages (`chat.db`),
 macOS Contacts (`AddressBook-v22.abcddb`), Pinned Chats (`com.apple.messages.pinning.plist`),
 Engine.IO v4 / Socket.IO v4 push events, and Direct SSH JSON-RPC (`stdio`) mode.
@@ -50,9 +50,10 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 APPLE_EPOCH_OFFSET_SEC = 978307200
 APPLE_EPOCH_OFFSET_MS = 978307200000
+_VIDEO_EXTS = (".mov", ".mp4", ".m4v", ".avi", ".mkv", ".3gp")
 
 LOG_RING: Deque[str] = collections.deque(maxlen=500)
 _LOG_LOCK = threading.Lock()
@@ -348,13 +349,14 @@ def encode_typedstream_nsattributedstring(text: str) -> bytes:
 class SocketIOSession:
     """Represents an Engine.IO v4 / Socket.IO v4 long-polling client session."""
 
-    def __init__(self, sid: str) -> None:
+    def __init__(self, sid: str, icloud_authorized: bool = False) -> None:
         self.sid = sid
         self.created_at = time.time()
         self.last_seen = time.time()
         self.queue: List[str] = []
         self.cond = threading.Condition()
         self.closed = False
+        self.icloud_authorized = bool(icloud_authorized)
 
     def enqueue(self, packet: str) -> None:
         with self.cond:
@@ -440,7 +442,32 @@ class BluePillEngine:
         self._photo_sync_lock = threading.Lock()
         self._photo_sync_jobs: Dict[str, Dict[str, Any]] = {}
         self._active_photo_sync_job_id: Optional[str] = None
+        self._photos_poster_cache: Dict[str, Tuple[str, str]] = {}
         self._image_dims_cache: Dict[Tuple[str, int, int], Tuple[int, int, bool]] = {}
+        self.photos_sync_stale_seconds: int = max(
+            60, int(os.environ.get("BLUEPILL_PHOTOS_STALE_SECONDS", "600") or "600")
+        )
+        self.photos_nudge_stale_seconds: int = max(
+            30, int(os.environ.get("BLUEPILL_PHOTOS_NUDGE_STALE_SECONDS", "120") or "120")
+        )
+        self.photos_nudge_cooldown_seconds: int = max(
+            10, int(os.environ.get("BLUEPILL_PHOTOS_NUDGE_COOLDOWN_SECONDS", "25") or "25")
+        )
+        self.photos_heal_cooldown_seconds: int = max(
+            60, int(os.environ.get("BLUEPILL_PHOTOS_HEAL_COOLDOWN_SECONDS", "900") or "900")
+        )
+        self._photos_heal_lock = threading.Lock()
+        self._photos_nudge_lock = threading.Lock()
+        self._last_photos_heal_ts: float = 0.0
+        self._last_photos_heal_reason: str = ""
+        self._last_photos_heal_actions: List[str] = []
+        self._last_photos_nudge_ts: float = 0.0
+        self._last_photos_nudge_reason: str = ""
+        self._last_photos_health: Dict[str, Any] = {}
+        self._photos_high_cpu_streak: int = 0
+        self._photos_high_cpu_last_obs_ts: float = 0.0
+        self._photos_high_cpu_last_sync_ms: Optional[int] = None
+        self._photos_watcher_state: Dict[str, Any] = {"last_sig": None, "last_health_ts": 0.0}
         self.deleted_state_path: Optional[str] = (
             None if is_ephemeral else os.path.expanduser("~/.config/bluepill/deleted_state.json")
         )
@@ -496,6 +523,7 @@ class BluePillEngine:
                     self.logger.warning("[preflight] startup check warning: %s", exc)
             self._start_helper_listener()
             self._start_wal_watcher()
+            self._start_photos_watcher()
             self._start_scheduler_loop()
 
     @staticmethod
@@ -567,6 +595,467 @@ class BluePillEngine:
             "enablePhotos": self.enable_photos,
         }
 
+    _ICLOUD_PHOTOS_DAEMONS = (
+        "com.apple.cloudd",
+        "com.apple.photolibraryd",
+        "com.apple.cloudphotod",
+    )
+
+    def _run_launchctl(self, args: List[str], timeout: float = 4.0) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["/bin/launchctl", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+
+    def _check_icloud_photos_daemons(self, uid: Optional[int] = None) -> Dict[str, bool]:
+        resolved_uid = uid if uid is not None else (os.getuid() if hasattr(os, "getuid") else 501)
+        status: Dict[str, bool] = {svc.split(".")[-1]: False for svc in self._ICLOUD_PHOTOS_DAEMONS}
+        if sys.platform != "darwin":
+            return status
+        for svc in self._ICLOUD_PHOTOS_DAEMONS:
+            short_name = svc.split(".")[-1]
+            is_running = False
+            try:
+                pr = self._run_launchctl(["print", f"gui/{resolved_uid}/{svc}"])
+                is_running = pr.returncode == 0 and ("state = running" in pr.stdout or "pid =" in pr.stdout)
+            except Exception:
+                is_running = False
+            status[short_name] = is_running
+        return status
+
+    @staticmethod
+    def _get_photolibraryd_cpu_pct() -> Optional[float]:
+        if sys.platform != "darwin":
+            return None
+        try:
+            pr = subprocess.run(
+                ["/bin/ps", "-eo", "pcpu=,comm="],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+            if pr.returncode != 0:
+                return None
+            max_cpu: Optional[float] = None
+            for line in pr.stdout.splitlines():
+                parts = line.strip().split(None, 1)
+                if len(parts) != 2:
+                    continue
+                comm = os.path.basename(parts[1].strip())
+                if comm == "photolibraryd":
+                    try:
+                        val = float(parts[0].replace(",", "."))
+                        max_cpu = val if max_cpu is None else max(max_cpu, val)
+                    except ValueError:
+                        continue
+            return max_cpu
+        except Exception:
+            return None
+
+    def _inspect_icloud_photos_health(
+        self,
+        daemons_status: Optional[Dict[str, bool]] = None,
+        now_ts: Optional[float] = None,
+        cpu_pct_override: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        now = float(now_ts if now_ts is not None else time.time())
+        photos_lib = os.path.expanduser(self.photos_library_path)
+        syncstatus_candidates = (
+            os.path.join(photos_lib, "resources", "cpl", "cloudsync.noindex", "syncstatus.plist"),
+            os.path.join(photos_lib, "private", "com.apple.photolibraryd", "private", "syncstatus.plist"),
+        )
+        syncstatus_path = next((p for p in syncstatus_candidates if os.path.exists(p)), syncstatus_candidates[0])
+        last_sync_iso = ""
+        last_sync_ms = 0
+        last_sync_age_s: Optional[float] = None
+        cloud_asset_count = 0
+        cloud_image_count = 0
+        cloud_video_count = 0
+        if os.path.exists(syncstatus_path):
+            try:
+                with open(syncstatus_path, "rb") as sf:
+                    plist_obj = plistlib.load(sf)
+                if isinstance(plist_obj, dict):
+                    raw_dt = plist_obj.get("lastSyncDate")
+                    if isinstance(raw_dt, datetime.datetime):
+                        dt_utc = (
+                            raw_dt.replace(tzinfo=datetime.timezone.utc)
+                            if raw_dt.tzinfo is None
+                            else raw_dt.astimezone(datetime.timezone.utc)
+                        )
+                        sync_ts = dt_utc.timestamp()
+                        last_sync_iso = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+                        last_sync_ms = int(sync_ts * 1000)
+                        last_sync_age_s = max(0.0, round(now - sync_ts, 1))
+                    counts = plist_obj.get("cloudAssetCountPerType")
+                    if isinstance(counts, dict):
+                        for raw_k, raw_v in counts.items():
+                            if not isinstance(raw_v, (int, float)):
+                                continue
+                            v_int = int(raw_v)
+                            cloud_asset_count += v_int
+                            k_low = str(raw_k).lower()
+                            if "image" in k_low or "photo" in k_low:
+                                cloud_image_count += v_int
+                            elif "video" in k_low or "movie" in k_low:
+                                cloud_video_count += v_int
+            except Exception as exc:
+                self.logger.debug("[photos] Failed reading syncstatus.plist: %s", exc)
+
+        resolved_daemons = dict(daemons_status) if daemons_status is not None else (
+            self._check_icloud_photos_daemons() if sys.platform == "darwin" else {}
+        )
+        cpu_pct = cpu_pct_override if cpu_pct_override is not None else (
+            self._get_photolibraryd_cpu_pct() if sys.platform == "darwin" else None
+        )
+        stale = bool(last_sync_age_s is not None and last_sync_age_s > self.photos_sync_stale_seconds)
+        if cpu_pct is not None and cpu_pct >= 85.0 and (last_sync_age_s is None or last_sync_age_s >= 300.0):
+            if self._photos_high_cpu_streak == 0 or self._photos_high_cpu_last_obs_ts <= 0:
+                self._photos_high_cpu_streak = 1
+                self._photos_high_cpu_last_obs_ts = now
+                self._photos_high_cpu_last_sync_ms = last_sync_ms
+            elif (
+                last_sync_ms > 0
+                and self._photos_high_cpu_last_sync_ms is not None
+                and last_sync_ms != self._photos_high_cpu_last_sync_ms
+            ):
+                # lastSyncDate advanced while working; restart observation window instead of declaring a wedge
+                self._photos_high_cpu_streak = 1
+                self._photos_high_cpu_last_obs_ts = now
+                self._photos_high_cpu_last_sync_ms = last_sync_ms
+            elif (now - self._photos_high_cpu_last_obs_ts) >= 50.0:
+                self._photos_high_cpu_streak += 1
+                self._photos_high_cpu_last_obs_ts = now
+                self._photos_high_cpu_last_sync_ms = last_sync_ms
+        else:
+            self._photos_high_cpu_streak = 0
+            self._photos_high_cpu_last_obs_ts = 0.0
+            self._photos_high_cpu_last_sync_ms = None
+        wedged = bool(self._photos_high_cpu_streak >= 2 or (stale and cpu_pct is not None and cpu_pct >= 85.0))
+        heal_reasons: List[str] = []
+        for d_name, is_up in resolved_daemons.items():
+            if not is_up:
+                heal_reasons.append(f"daemon_down:{d_name}")
+        if stale and last_sync_age_s is not None:
+            heal_reasons.append(f"sync_stale:{int(last_sync_age_s)}s")
+        if wedged and cpu_pct is not None:
+            heal_reasons.append(f"photolibraryd_high_cpu:{cpu_pct:.1f}%")
+
+        health: Dict[str, Any] = {
+            "syncStatusPath": syncstatus_path,
+            "lastSyncIso": last_sync_iso,
+            "lastSyncMs": last_sync_ms,
+            "lastSyncAgeSeconds": last_sync_age_s,
+            "staleThresholdSeconds": self.photos_sync_stale_seconds,
+            "cloudSyncStale": stale,
+            "cloudAssetCount": cloud_asset_count,
+            "cloudImageCount": cloud_image_count,
+            "cloudVideoCount": cloud_video_count,
+            "photolibrarydCpu": cpu_pct,
+            "wedged": wedged,
+            "daemons": resolved_daemons,
+            "healReasons": heal_reasons,
+            "needsHeal": bool(heal_reasons),
+            "lastHealTs": self._last_photos_heal_ts,
+            "lastHealReason": self._last_photos_heal_reason,
+            "lastHealActions": list(self._last_photos_heal_actions),
+        }
+        self._last_photos_health = health
+        return health
+
+    def _heal_icloud_photos_daemons(
+        self,
+        reason: str = "",
+        min_interval_seconds: Optional[int] = None,
+        now_ts: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        uid = os.getuid() if hasattr(os, "getuid") else 501
+        now = float(now_ts if now_ts is not None else time.time())
+        cooldown = (
+            self.photos_heal_cooldown_seconds
+            if min_interval_seconds is None
+            else max(self.photos_heal_cooldown_seconds, int(min_interval_seconds))
+        )
+        with self._photos_heal_lock:
+            elapsed = now - self._last_photos_heal_ts if self._last_photos_heal_ts > 0 else float(cooldown + 1)
+            if elapsed < cooldown:
+                return {
+                    "healed": False,
+                    "skippedReason": "cooldown",
+                    "cooldownRemainingSeconds": max(1, int(cooldown - elapsed)),
+                    "actions": [],
+                }
+            if sys.platform != "darwin":
+                return {"healed": False, "skippedReason": "non_darwin", "actions": []}
+            self._last_photos_heal_ts = now
+            self._last_photos_heal_reason = str(reason or "manual")
+            actions: List[str] = []
+            warnings: List[str] = []
+            for svc in self._ICLOUD_PHOTOS_DAEMONS:
+                plist = f"/System/Library/LaunchAgents/{svc}.plist"
+                try:
+                    self._run_launchctl(["enable", f"gui/{uid}/{svc}"])
+                    ks = self._run_launchctl(["kickstart", "-k", f"gui/{uid}/{svc}"])
+                    if ks.returncode != 0 and os.path.exists(plist):
+                        self._run_launchctl(["bootstrap", f"gui/{uid}", plist])
+                        ks = self._run_launchctl(["kickstart", "-k", f"gui/{uid}/{svc}"])
+                    if ks.returncode == 0:
+                        actions.append(f"kickstarted gui/{uid}/{svc}")
+                    else:
+                        warnings.append(f"kickstart failed for {svc} (rc={ks.returncode})")
+                except Exception as exc:
+                    warnings.append(f"Failed to restart {svc}: {exc}")
+            self._last_photos_heal_actions = list(actions)
+            self.logger.warning(
+                "[photos] Auto-healed iCloud Photos daemons (reason=%s actions=%s warnings=%s)",
+                self._last_photos_heal_reason,
+                actions,
+                warnings,
+            )
+            return {
+                "healed": bool(actions),
+                "reason": self._last_photos_heal_reason,
+                "actions": actions,
+                "warnings": warnings,
+            }
+
+    def _nudge_cloudphotod(
+        self,
+        reason: str = "manual",
+        min_interval_seconds: Optional[int] = None,
+        min_sync_age: float = 10.0,
+        wait_seconds: float = 0.0,
+        now_ts: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Lightweight trigger that kickstarts only com.apple.cloudphotod (leaving
+        photolibraryd and cloudd untouched) so headless macOS relays pull recent
+        iCloud Photos metadata promptly even when APNS opportunistic push naps.
+        """
+        if not self.enable_photos:
+            return {"nudged": False, "skippedReason": "disabled", "dbChanged": False}
+        now = float(now_ts if now_ts is not None else time.time())
+        health = self._inspect_icloud_photos_health(now_ts=now)
+        daemons = health.get("daemons") or {}
+        if sys.platform == "darwin" and (
+            health.get("wedged") or (daemons and not all(bool(v) for v in daemons.values()))
+        ):
+            heal_res = self._heal_icloud_photos_daemons(
+                reason=f"nudge_escalated:{reason}",
+                min_interval_seconds=self.photos_heal_cooldown_seconds,
+                now_ts=now,
+            )
+            return {
+                "nudged": bool(heal_res.get("healed")),
+                "escalatedHeal": True,
+                "healResult": heal_res,
+                "dbChanged": False,
+            }
+        if sys.platform != "darwin":
+            return {"nudged": False, "skippedReason": "non_darwin", "dbChanged": False}
+
+        last_age = health.get("lastSyncAgeSeconds")
+        if last_age is not None and float(last_age) < float(min_sync_age):
+            return {
+                "nudged": False,
+                "skippedReason": "recently_synced",
+                "lastSyncAgeSeconds": last_age,
+                "dbChanged": False,
+            }
+
+        uid = os.getuid() if hasattr(os, "getuid") else 501
+        cooldown = (
+            self.photos_nudge_cooldown_seconds
+            if min_interval_seconds is None
+            else max(self.photos_nudge_cooldown_seconds, int(min_interval_seconds))
+        )
+        prev_sync_ms = int(health.get("lastSyncMs") or 0)
+        prev_sig = self._get_photos_db_signature()
+
+        with self._photos_nudge_lock:
+            elapsed = now - self._last_photos_nudge_ts if self._last_photos_nudge_ts > 0 else float(cooldown + 1)
+            if elapsed < cooldown:
+                return {
+                    "nudged": False,
+                    "skippedReason": "cooldown",
+                    "cooldownRemainingSeconds": max(1, int(cooldown - elapsed)),
+                    "dbChanged": False,
+                }
+            self._last_photos_nudge_ts = now
+            self._last_photos_nudge_reason = str(reason or "manual")
+            svc = "com.apple.cloudphotod"
+            plist = f"/System/Library/LaunchAgents/{svc}.plist"
+            nudged = False
+            warn_msg = ""
+            try:
+                self._run_launchctl(["enable", f"gui/{uid}/{svc}"])
+                ks = self._run_launchctl(["kickstart", "-k", f"gui/{uid}/{svc}"])
+                if ks.returncode != 0 and os.path.exists(plist):
+                    self._run_launchctl(["bootstrap", f"gui/{uid}", plist])
+                    ks = self._run_launchctl(["kickstart", "-k", f"gui/{uid}/{svc}"])
+                nudged = ks.returncode == 0
+                if not nudged:
+                    warn_msg = f"kickstart rc={ks.returncode}"
+            except Exception as exc:  # noqa: BLE001
+                warn_msg = str(exc)
+
+        db_changed = False
+        sync_advanced = False
+        if nudged and wait_seconds > 0.0:
+            deadline = time.time() + float(wait_seconds)
+            while time.time() < deadline and not self._stop_event.is_set():
+                time.sleep(0.35)
+                cur_sig = self._get_photos_db_signature()
+                if cur_sig is not None and cur_sig != prev_sig:
+                    db_changed = True
+                    sync_advanced = True
+                    break
+                cur_health = self._inspect_icloud_photos_health()
+                cur_ms = int(cur_health.get("lastSyncMs") or 0)
+                if cur_ms > prev_sync_ms:
+                    sync_advanced = True
+                    # Give photolibraryd a brief beat to commit ZASSET rows after syncstatus updates
+                    time.sleep(0.45)
+                    post_sig = self._get_photos_db_signature()
+                    if post_sig is not None and post_sig != prev_sig:
+                        db_changed = True
+                    break
+        if db_changed:
+            try:
+                self._poll_photos_db_once(self._photos_watcher_state)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.debug("[photos] Post-nudge watcher sync failed: %s", exc)
+
+        self.logger.info(
+            "[photos] Nudged %s (reason=%s nudged=%s sync_advanced=%s db_changed=%s%s)",
+            "com.apple.cloudphotod",
+            self._last_photos_nudge_reason,
+            nudged,
+            sync_advanced,
+            db_changed,
+            f" warn={warn_msg}" if warn_msg else "",
+        )
+        return {
+            "nudged": nudged,
+            "reason": self._last_photos_nudge_reason,
+            "syncAdvanced": sync_advanced,
+            "dbChanged": db_changed,
+            "warning": warn_msg,
+        }
+
+    def _get_photos_db_signature(self) -> Optional[Tuple[int, int, float]]:
+        photos_lib = os.path.expanduser(self.photos_library_path)
+        photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
+        if not os.path.exists(photos_db):
+            return None
+        try:
+            pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+            try:
+                zcols = {c[1] for c in pconn.execute("PRAGMA table_info(ZASSET)").fetchall()}
+                if "ZADDEDDATE" in zcols:
+                    max_date_expr = "COALESCE(MAX(ZADDEDDATE), 0)"
+                else:
+                    max_date_expr = "COALESCE(MAX(COALESCE(ZDATECREATED, 0)), 0)"
+                row = pconn.execute(
+                    f"""
+                    SELECT COUNT(*), COALESCE(MAX(ROWID), 0), {max_date_expr}
+                    FROM ZASSET
+                    WHERE ZFILENAME IS NOT NULL AND (ZTRASHEDSTATE IS NULL OR ZTRASHEDSTATE = 0);
+                    """
+                ).fetchone()
+                if not row:
+                    return (0, 0, 0.0)
+                return (int(row[0] or 0), int(row[1] or 0), float(row[2] or 0.0))
+            finally:
+                pconn.close()
+        except sqlite3.Error:
+            return None
+
+    def _poll_photos_db_once(self, state: Dict[str, Any], now_ts: Optional[float] = None) -> bool:
+        if not self.enable_photos:
+            return False
+        now = float(now_ts if now_ts is not None else time.time())
+        photos_lib = os.path.expanduser(self.photos_library_path)
+        photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
+        wal_path = f"{photos_db}-wal"
+        fs_stamp = []
+        for p in (photos_db, wal_path):
+            try:
+                st = os.stat(p)
+                fs_stamp.append((int(st.st_mtime_ns), int(st.st_size)))
+            except OSError:
+                fs_stamp.append((0, 0))
+        prev_fs = state.get("last_fs_stamp")
+        last_db_check = float(state.get("last_db_check_ts") or 0.0)
+        changed = False
+        if prev_fs != tuple(fs_stamp) or (now - last_db_check) >= 20.0:
+            state["last_fs_stamp"] = tuple(fs_stamp)
+            state["last_db_check_ts"] = now
+            sig = self._get_photos_db_signature()
+            if sig is not None:
+                prev_sig = state.get("last_sig")
+                state["last_sig"] = sig
+                if prev_sig is not None and sig != prev_sig:
+                    changed = True
+                    self.broadcast_socketio(
+                        "icloud-photos-updated",
+                        {
+                            "total": sig[0],
+                            "maxRowId": sig[1],
+                            "maxAddedDate": sig[2],
+                            "timestampMs": int(now * 1000),
+                        },
+                    )
+                    self.logger.info(
+                        "[photos] Detected Photos.sqlite change (total=%d max_rowid=%d); pushed icloud-photos-updated",
+                        sig[0],
+                        sig[1],
+                    )
+        last_health_ts = float(state.get("last_health_ts") or 0.0)
+        if sys.platform == "darwin" and (now - last_health_ts) >= 60.0:
+            state["last_health_ts"] = now
+            health = self._inspect_icloud_photos_health(now_ts=now)
+            if health.get("needsHeal"):
+                self._heal_icloud_photos_daemons(
+                    reason=",".join(health.get("healReasons") or ["periodic_watchdog"]),
+                    now_ts=now,
+                )
+            else:
+                age_s = health.get("lastSyncAgeSeconds")
+                if age_s is not None and float(age_s) >= float(self.photos_nudge_stale_seconds):
+                    self._nudge_cloudphotod(
+                        reason=f"periodic_nudge:{int(age_s)}s",
+                        min_interval_seconds=self.photos_nudge_stale_seconds,
+                        min_sync_age=float(self.photos_nudge_stale_seconds),
+                        now_ts=now,
+                    )
+        return changed
+
+    def _photos_poll_loop(self) -> None:
+        state = self._photos_watcher_state
+        if state.get("last_sig") is None:
+            sig = self._get_photos_db_signature()
+            if sig is not None:
+                state["last_sig"] = sig
+        while not self._stop_event.is_set():
+            try:
+                self._poll_photos_db_once(state)
+            except Exception as exc:
+                self.logger.debug("[photos] Watcher poll warning: %s", exc)
+            self._stop_event.wait(5.0)
+
+    def _start_photos_watcher(self) -> None:
+        if self.enable_photos:
+            sig = self._get_photos_db_signature()
+            if sig is not None:
+                self._photos_watcher_state["last_sig"] = sig
+        t = threading.Thread(target=self._photos_poll_loop, daemon=True)
+        t.start()
+
     def run_preflight(self, fix: bool = True) -> Dict[str, Any]:
         actions_taken: List[str] = []
         warnings: List[str] = []
@@ -616,59 +1105,35 @@ class BluePillEngine:
             elif sys.platform == "darwin":
                 warnings.append("Calendar.sqlitedb not found in Group Containers or ~/Library/Calendars")
 
-        # 3. Photos preflight + daemon auto-enable on macOS
+        # 3. Photos preflight + daemon health check & auto-heal on macOS
         photos_lib = os.path.expanduser(self.photos_library_path)
         photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
         photos_readable = False
         photos_asset_count = 0
         photos_local_derivatives = 0
-        daemons_status: Dict[str, bool] = {"photolibraryd": False, "cloudphotod": False}
+        daemons_status: Dict[str, bool] = {
+            svc.split(".")[-1]: False for svc in self._ICLOUD_PHOTOS_DAEMONS
+        }
+        photos_health: Dict[str, Any] = {}
         if self.enable_photos:
-            if sys.platform == "darwin":
-                for svc in ("com.apple.photolibraryd", "com.apple.cloudphotod"):
-                    short_name = svc.split(".")[-1]
-                    is_running = False
-                    try:
-                        pr = subprocess.run(
-                            ["/bin/launchctl", "print", f"gui/{uid}/{svc}"],
-                            capture_output=True,
-                            text=True,
-                            timeout=4.0,
-                            check=False,
-                        )
-                        is_running = pr.returncode == 0 and ("state = running" in pr.stdout or "pid =" in pr.stdout)
-                    except Exception:
-                        is_running = False
-                    if not is_running and fix:
-                        plist = f"/System/Library/LaunchAgents/{svc}.plist"
-                        try:
-                            subprocess.run(
-                                ["/bin/launchctl", "enable", f"gui/{uid}/{svc}"],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                timeout=4.0,
-                                check=False,
-                            )
-                            if os.path.exists(plist):
-                                subprocess.run(
-                                    ["/bin/launchctl", "bootstrap", f"gui/{uid}", plist],
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                    timeout=4.0,
-                                    check=False,
-                                )
-                            ks = subprocess.run(
-                                ["/bin/launchctl", "kickstart", "-k", f"gui/{uid}/{svc}"],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                timeout=4.0,
-                                check=False,
-                            )
-                            is_running = ks.returncode == 0
-                            actions_taken.append(f"Enabled and kickstarted gui/{uid}/{svc}")
-                        except Exception as exc:
-                            warnings.append(f"Failed to enable {svc}: {exc}")
-                    daemons_status[short_name] = is_running
+            daemons_status = self._check_icloud_photos_daemons(uid=uid)
+            photos_health = self._inspect_icloud_photos_health(daemons_status=daemons_status)
+            if sys.platform == "darwin" and fix and photos_health.get("needsHeal"):
+                heal_res = self._heal_icloud_photos_daemons(
+                    reason=",".join(photos_health.get("healReasons") or ["preflight"]),
+                    min_interval_seconds=120,
+                )
+                for act in heal_res.get("actions") or []:
+                    actions_taken.append(act)
+                for w in heal_res.get("warnings") or []:
+                    warnings.append(w)
+                daemons_status = self._check_icloud_photos_daemons(uid=uid)
+                photos_health = self._inspect_icloud_photos_health(daemons_status=daemons_status)
+            if sys.platform == "darwin" and photos_health.get("cloudSyncStale"):
+                age_s = photos_health.get("lastSyncAgeSeconds")
+                warnings.append(
+                    f"iCloud Photos sync stale (lastSync={photos_health.get('lastSyncIso') or 'unknown'}, age={age_s}s)"
+                )
 
             if os.path.exists(photos_db):
                 try:
@@ -735,6 +1200,18 @@ class BluePillEngine:
                     "assetCount": photos_asset_count,
                     "localDerivativesCount": photos_local_derivatives,
                     "daemons": daemons_status,
+                    "lastSyncIso": photos_health.get("lastSyncIso", ""),
+                    "lastSyncMs": photos_health.get("lastSyncMs", 0),
+                    "lastSyncAgeSeconds": photos_health.get("lastSyncAgeSeconds"),
+                    "cloudSyncStale": bool(photos_health.get("cloudSyncStale", False)),
+                    "cloudAssetCount": int(photos_health.get("cloudAssetCount", 0) or 0),
+                    "cloudImageCount": int(photos_health.get("cloudImageCount", 0) or 0),
+                    "cloudVideoCount": int(photos_health.get("cloudVideoCount", 0) or 0),
+                    "photolibrarydCpu": photos_health.get("photolibrarydCpu"),
+                    "wedged": bool(photos_health.get("wedged", False)),
+                    "healReasons": list(photos_health.get("healReasons") or []),
+                    "lastHealTs": photos_health.get("lastHealTs", 0.0),
+                    "lastHealReason": photos_health.get("lastHealReason", ""),
                 },
             },
             "actionsTaken": actions_taken,
@@ -2409,6 +2886,7 @@ class BluePillEngine:
         resize: Optional[int] = None,
         transcode_audio: bool = False,
         allow_photos_library: bool = True,
+        preview_only: bool = False,
     ) -> Optional[Tuple[str, str]]:
         clean_guid = urllib.parse.unquote(guid).strip()
         if clean_guid in self._outbound_attachments:
@@ -2421,7 +2899,17 @@ class BluePillEngine:
                     resize=resize,
                     transcode_audio=transcode_audio,
                 )
-        if allow_photos_library and clean_guid in self._photos_library_assets:
+        if allow_photos_library and preview_only:
+            poster_cached = self._photos_poster_cache.get(clean_guid)
+            if poster_cached and os.path.exists(poster_cached[0]):
+                return self._postprocess_resolved_attachment(
+                    poster_cached[0],
+                    poster_cached[1],
+                    convert_heic=convert_heic,
+                    resize=resize,
+                    transcode_audio=transcode_audio,
+                )
+        if allow_photos_library and not preview_only and clean_guid in self._photos_library_assets:
             p_path, p_mime = self._photos_library_assets[clean_guid]
             if os.path.exists(p_path):
                 return self._postprocess_resolved_attachment(
@@ -2434,7 +2922,7 @@ class BluePillEngine:
         if not os.path.exists(self.db_path):
             if not allow_photos_library:
                 return None
-            photos_resolved = self._resolve_photos_library_asset(clean_guid)
+            photos_resolved = self._resolve_photos_library_asset(clean_guid, preview_only=preview_only)
             if not photos_resolved:
                 return None
             return self._postprocess_resolved_attachment(
@@ -2470,7 +2958,7 @@ class BluePillEngine:
             if not row:
                 if not allow_photos_library:
                     return None
-                photos_resolved = self._resolve_photos_library_asset(clean_guid)
+                photos_resolved = self._resolve_photos_library_asset(clean_guid, preview_only=preview_only)
                 if not photos_resolved:
                     return None
                 return self._postprocess_resolved_attachment(
@@ -3680,11 +4168,14 @@ class BluePillEngine:
 
     def broadcast_socketio(self, event_name: str, payload: Any) -> None:
         packet = "42" + json.dumps([event_name, payload])
+        require_icloud_auth = event_name in ("icloud-photos-updated", "icloud-photos-sync")
         with self._sessions_lock:
             dead = []
             for sid, sess in self._sessions.items():
                 if time.time() - sess.last_seen > 120.0:
                     dead.append(sid)
+                elif require_icloud_auth and not getattr(sess, "icloud_authorized", False):
+                    continue
                 else:
                     sess.enqueue(packet)
             for sid in dead:
@@ -3709,9 +4200,61 @@ class BluePillEngine:
         )
 
     @staticmethod
-    def _find_photos_library_asset_file(
-        photos_lib: str, zuuid: str, zfn: str, zdir: str
+    def _is_video_asset(zuti: str, zfn: str, zkind: Optional[int] = None) -> bool:
+        if zkind == 1:
+            return True
+        uti_low = str(zuti or "").strip().lower()
+        if any(tok in uti_low for tok in ("movie", "video", "mpeg", "quicktime")):
+            return True
+        fn_low = str(zfn or "").strip().lower()
+        return fn_low.endswith(_VIDEO_EXTS)
+
+    @staticmethod
+    def _find_photos_library_poster_file(
+        photos_lib: str, zuuid: str, zdir: str
     ) -> Optional[str]:
+        if not zuuid:
+            return None
+        dirs_to_check: List[str] = []
+        if zdir:
+            dirs_to_check.append(zdir)
+        first_ch = zuuid[0].upper()
+        if first_ch not in dirs_to_check:
+            dirs_to_check.append(first_ch)
+        for d in dirs_to_check:
+            for cand in BluePillEngine._derivative_image_candidates(photos_lib, zuuid, d):
+                if os.path.exists(cand):
+                    real_cand = os.path.realpath(cand)
+                    if os.path.exists(real_cand):
+                        return real_cand
+        return None
+
+    @staticmethod
+    def _derivative_image_candidates(photos_lib: str, zuuid: str, dir_name: str) -> List[str]:
+        """Return candidate derivative JPEG paths across Sonoma/Sequoia library layouts."""
+        if not zuuid:
+            return []
+        suffixes = ("_4_5005_c.jpeg", "_1_105_c.jpeg", "_1_102_o.jpeg", "_1_201_a.jpeg")
+        out: List[str] = []
+        for sfx in suffixes:
+            out.append(os.path.join(photos_lib, "resources", "derivatives", "masters", dir_name, f"{zuuid}{sfx}"))
+        for sfx in suffixes:
+            out.append(os.path.join(photos_lib, "resources", "derivatives", dir_name, f"{zuuid}{sfx}"))
+        return out
+
+    @staticmethod
+    def _find_photos_library_asset_file(
+        photos_lib: str,
+        zuuid: str,
+        zfn: str,
+        zdir: str,
+        is_video: Optional[bool] = None,
+        preview_only: bool = False,
+    ) -> Optional[str]:
+        if preview_only and is_video:
+            poster = BluePillEngine._find_photos_library_poster_file(photos_lib, zuuid, zdir)
+            if poster:
+                return poster
         candidates: List[str] = []
         dirs_to_check: List[str] = []
         if zdir:
@@ -3724,13 +4267,8 @@ class BluePillEngine:
             if zfn:
                 candidates.append(os.path.join(photos_lib, "originals", d, zfn))
                 candidates.append(os.path.join(photos_lib, "resources", "renders", d, zfn))
-            if zuuid:
-                candidates.append(
-                    os.path.join(photos_lib, "resources", "derivatives", "masters", d, f"{zuuid}_4_5005_c.jpeg")
-                )
-                candidates.append(
-                    os.path.join(photos_lib, "resources", "derivatives", d, f"{zuuid}_1_105_c.jpeg")
-                )
+            if not is_video and zuuid:
+                candidates.extend(BluePillEngine._derivative_image_candidates(photos_lib, zuuid, d))
             if zfn:
                 candidates.append(os.path.join(photos_lib, "resources", "derivatives", d, zfn))
         for cand in candidates:
@@ -3740,11 +4278,17 @@ class BluePillEngine:
                     return real_cand
         return None
 
-    def _resolve_photos_library_asset(self, guid: str) -> Optional[Tuple[str, str]]:
+    def _resolve_photos_library_asset(
+        self, guid: str, preview_only: bool = False
+    ) -> Optional[Tuple[str, str]]:
         clean_guid = urllib.parse.unquote(guid).strip()
         if not clean_guid:
             return None
-        if clean_guid in self._photos_library_assets:
+        if preview_only:
+            cached_poster = self._photos_poster_cache.get(clean_guid)
+            if cached_poster and os.path.exists(cached_poster[0]):
+                return cached_poster
+        elif clean_guid in self._photos_library_assets:
             cached_p, cached_m = self._photos_library_assets[clean_guid]
             if os.path.exists(cached_p):
                 return cached_p, cached_m
@@ -3756,9 +4300,12 @@ class BluePillEngine:
             pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
             try:
                 pconn.row_factory = sqlite3.Row
+                zcols = {c[1] for c in pconn.execute("PRAGMA table_info(ZASSET)").fetchall()}
+                zkind_sel = ", ZKIND" if "ZKIND" in zcols else ", NULL AS ZKIND"
+                zuti_sel = ", ZUNIFORMTYPEIDENTIFIER" if "ZUNIFORMTYPEIDENTIFIER" in zcols else ", NULL AS ZUNIFORMTYPEIDENTIFIER"
                 row = pconn.execute(
-                    """
-                    SELECT ZUUID, ZFILENAME, ZDIRECTORY
+                    f"""
+                    SELECT ZUUID, ZFILENAME, ZDIRECTORY{zkind_sel}{zuti_sel}
                     FROM ZASSET
                     WHERE ZUUID = ? AND ZFILENAME IS NOT NULL
                     LIMIT 1
@@ -3769,10 +4316,30 @@ class BluePillEngine:
                     return None
                 zfn = str(row["ZFILENAME"] or "").strip()
                 zdir = str(row["ZDIRECTORY"] or "").strip()
-                real_cand = self._find_photos_library_asset_file(photos_lib, clean_guid, zfn, zdir)
+                zuti = str(row["ZUNIFORMTYPEIDENTIFIER"] or "").strip()
+                raw_zkind = row["ZKIND"]
+                zkind = int(raw_zkind) if raw_zkind is not None else None
+                is_vid = self._is_video_asset(zuti, zfn, zkind)
+                if preview_only and is_vid:
+                    poster_cand = self._find_photos_library_poster_file(photos_lib, clean_guid, zdir)
+                    if poster_cand:
+                        self._photos_poster_cache[clean_guid] = (poster_cand, "image/jpeg")
+                        return poster_cand, "image/jpeg"
+                real_cand = self._find_photos_library_asset_file(
+                    photos_lib,
+                    clean_guid,
+                    zfn,
+                    zdir,
+                    is_video=is_vid,
+                    preview_only=preview_only,
+                )
                 if real_cand:
-                    mime = mimetypes.guess_type(real_cand)[0] or "image/jpeg"
-                    self._photos_library_assets[clean_guid] = (real_cand, mime)
+                    default_mime = "video/quicktime" if (is_vid and not preview_only) else "image/jpeg"
+                    mime = mimetypes.guess_type(real_cand)[0] or default_mime
+                    if preview_only and mime.startswith("image/"):
+                        self._photos_poster_cache[clean_guid] = (real_cand, mime)
+                    elif not preview_only:
+                        self._photos_library_assets[clean_guid] = (real_cand, mime)
                     return real_cand, mime
             finally:
                 pconn.close()
@@ -3780,13 +4347,73 @@ class BluePillEngine:
             self.logger.debug("[photos] asset lookup failed for %s: %s", clean_guid, exc)
         return None
 
-    def download_cloud_attachment(self, guid: str) -> Dict[str, Any]:
+    def _is_chat_attachment_guid(self, clean_guid: str) -> bool:
+        if not clean_guid or not os.path.exists(self.db_path):
+            return False
+        try:
+            conn = self._open_chat_db()
+            try:
+                suffix_uuid = clean_guid.split("_")[-1] if "_" in clean_guid else clean_guid
+                row = conn.execute(
+                    "SELECT 1 FROM attachment WHERE guid = ? OR original_guid = ? OR guid LIKE ? LIMIT 1",
+                    (clean_guid, clean_guid, f"%{suffix_uuid}"),
+                ).fetchone()
+                return row is not None
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return False
+
+    def is_recent_photos_library_asset(self, guid: str, max_age_seconds: float = 120.0) -> bool:
+        clean_guid = urllib.parse.unquote(guid).strip()
+        if not clean_guid or not self.enable_photos:
+            return False
+        photos_lib = os.path.expanduser(self.photos_library_path)
+        photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
+        if not os.path.exists(photos_db):
+            return False
+        try:
+            pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+            try:
+                zcols = {c[1] for c in pconn.execute("PRAGMA table_info(ZASSET)").fetchall()}
+                date_expr = (
+                    "COALESCE(ZADDEDDATE, ZDATECREATED, 0)"
+                    if "ZADDEDDATE" in zcols
+                    else "COALESCE(ZDATECREATED, 0)"
+                )
+                row = pconn.execute(
+                    f"SELECT {date_expr} FROM ZASSET WHERE ZUUID = ? LIMIT 1",
+                    (clean_guid,),
+                ).fetchone()
+                if not row:
+                    return False
+                ts_apple = float(row[0] or 0.0)
+                if ts_apple <= 0:
+                    return False
+                created_unix = ts_apple + APPLE_EPOCH_OFFSET_SEC
+                return (time.time() - created_unix) <= float(max_age_seconds)
+            finally:
+                pconn.close()
+        except sqlite3.Error:
+            return False
+
+    def download_cloud_attachment(
+        self,
+        guid: str,
+        wait_attempts: int = 8,
+        allow_helper: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         clean_guid = urllib.parse.unquote(guid).strip()
         already = self.resolve_attachment_file(clean_guid)
         if already:
             return {"guid": clean_guid, "downloaded": True, "path": already[0], "mimeType": already[1]}
 
-        helper_ok = self._send_private_api_action("download-purged-attachment", {"attachmentGuid": clean_guid})
+        should_try_helper = self._is_chat_attachment_guid(clean_guid) if allow_helper is None else bool(allow_helper)
+        helper_ok = (
+            self._send_private_api_action("download-purged-attachment", {"attachmentGuid": clean_guid})
+            if should_try_helper
+            else False
+        )
         fallback_used = False
         if not helper_ok and sys.platform == "darwin":
             if os.path.exists(self.db_path):
@@ -3855,7 +4482,7 @@ class BluePillEngine:
                     self.logger.debug("[photos] Photos.sqlite brctl fallback failed for %s: %s", clean_guid, exc)
 
         if (helper_ok or fallback_used) and sys.platform == "darwin":
-            for _ in range(8):
+            for _ in range(max(1, int(wait_attempts))):
                 time.sleep(0.35)
                 resolved = self.resolve_attachment_file(clean_guid)
                 if resolved:
@@ -4137,11 +4764,12 @@ class BluePillEngine:
                     zcols = {c[1] for c in pconn.execute("PRAGMA table_info(ZASSET)").fetchall()}
                     has_zdims = "ZWIDTH" in zcols and "ZHEIGHT" in zcols
                     zdim_select = ", COALESCE(ZWIDTH, 0) AS _zw, COALESCE(ZHEIGHT, 0) AS _zh" if has_zdims else ", 0 AS _zw, 0 AS _zh"
+                    zkind_select = ", COALESCE(ZKIND, 0) AS _zkind" if "ZKIND" in zcols else ", NULL AS _zkind"
+                    zdur_select = ", COALESCE(ZDURATION, 0.0) AS _zdur" if "ZDURATION" in zcols else ", 0.0 AS _zdur"
                     asset_count_row = pconn.execute("SELECT count(*) FROM ZASSET;").fetchone()
                     if asset_count_row and asset_count_row[0] > 0:
                         needed_lib = window_limit - len(lib_photos)
                         lib_batch_fetch = max(min(needed_lib * 2, 600), 200) if (photos_only and not use_cursor) else max(needed_lib, 60)
-                        evicted_lib_candidates: List[Dict[str, Any]] = []
                         seen_lib_paths: set[str] = set()
                         local_lib_cur = _cursor_state.get("lib_cursor") if use_cursor else None
                         while len(lib_photos) < window_limit:
@@ -4156,26 +4784,14 @@ class BluePillEngine:
                             rows = pconn.execute(
                                 f"""
                                 SELECT ROWID AS _rowid, COALESCE(ZDATECREATED, 0) AS _zdate,
-                                       ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY{zdim_select}
+                                       ZUUID, ZFILENAME, ZUNIFORMTYPEIDENTIFIER, ZDIRECTORY{zdim_select}{zkind_select}{zdur_select}
                                 FROM ZASSET
                                 WHERE ZFILENAME IS NOT NULL
                                   AND (ZTRASHEDSTATE IS NULL OR ZTRASHEDSTATE = 0)
                                   AND (
                                     ZUNIFORMTYPEIDENTIFIER IS NULL
-                                    OR (
-                                      LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%movie%'
-                                      AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%video%'
-                                      AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%mpeg%'
-                                      AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%quicktime%'
-                                      AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%audio%'
-                                    )
+                                    OR LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%audio%'
                                   )
-                                  AND LOWER(ZFILENAME) NOT LIKE '%.mov'
-                                  AND LOWER(ZFILENAME) NOT LIKE '%.mp4'
-                                  AND LOWER(ZFILENAME) NOT LIKE '%.m4v'
-                                  AND LOWER(ZFILENAME) NOT LIKE '%.avi'
-                                  AND LOWER(ZFILENAME) NOT LIKE '%.mkv'
-                                  AND LOWER(ZFILENAME) NOT LIKE '%.3gp'
                                   {lib_cursor_sql}
                                 ORDER BY COALESCE(ZDATECREATED, 0) DESC, ROWID DESC LIMIT ?
                                 """,
@@ -4195,18 +4811,48 @@ class BluePillEngine:
                                     continue
                                 zfn = str(ar["ZFILENAME"] or f"asset_{zuuid[:8]}").strip()
                                 zdir = str(ar["ZDIRECTORY"] or "").strip()
-                                cached_pair = self._photos_library_assets.get(zuuid)
-                                if cached_pair and os.path.exists(cached_pair[0]):
-                                    resolved_asset: Optional[str] = cached_pair[0]
+                                zuti = str(ar["ZUNIFORMTYPEIDENTIFIER"] or "").strip()
+                                raw_zkind = ar["_zkind"]
+                                zkind = int(raw_zkind) if raw_zkind is not None else None
+                                is_video = self._is_video_asset(zuti, zfn, zkind)
+                                raw_zdur = float(ar["_zdur"] or 0.0) if is_video else 0.0
+                                resolved_poster: Optional[str] = None
+                                if is_video:
+                                    cached_pair = self._photos_library_assets.get(zuuid)
+                                    if cached_pair and os.path.exists(cached_pair[0]):
+                                        resolved_asset: Optional[str] = cached_pair[0]
+                                    else:
+                                        resolved_asset = self._find_photos_library_asset_file(
+                                            photos_lib, zuuid, zfn, zdir, is_video=True, preview_only=False
+                                        )
+                                    cached_poster = self._photos_poster_cache.get(zuuid)
+                                    if cached_poster and os.path.exists(cached_poster[0]):
+                                        resolved_poster = cached_poster[0]
+                                    else:
+                                        resolved_poster = self._find_photos_library_poster_file(photos_lib, zuuid, zdir)
+                                        if resolved_poster:
+                                            self._photos_poster_cache[zuuid] = (resolved_poster, "image/jpeg")
+                                    dedup_key = resolved_asset or resolved_poster
+                                    if dedup_key and photos_only:
+                                        if dedup_key in seen_lib_paths:
+                                            continue
+                                        seen_lib_paths.add(dedup_key)
+                                    mime = mimetypes.guess_type(resolved_asset or zfn)[0] or "video/quicktime"
                                 else:
-                                    resolved_asset = self._find_photos_library_asset_file(photos_lib, zuuid, zfn, zdir)
-                                if resolved_asset and photos_only:
-                                    if resolved_asset in seen_lib_paths:
+                                    cached_pair = self._photos_library_assets.get(zuuid)
+                                    if cached_pair and os.path.exists(cached_pair[0]):
+                                        resolved_asset = cached_pair[0]
+                                    else:
+                                        resolved_asset = self._find_photos_library_asset_file(
+                                            photos_lib, zuuid, zfn, zdir, is_video=False, preview_only=False
+                                        )
+                                    if resolved_asset and photos_only:
+                                        if resolved_asset in seen_lib_paths:
+                                            continue
+                                        seen_lib_paths.add(resolved_asset)
+                                    mime = mimetypes.guess_type(resolved_asset or zfn)[0] or "image/jpeg"
+                                    if not mime.startswith("image/"):
                                         continue
-                                    seen_lib_paths.add(resolved_asset)
-                                mime = (mimetypes.guess_type(resolved_asset or zfn)[0] or "image/jpeg")
-                                if not mime.startswith("image/"):
-                                    continue
                                 size_bytes = 0
                                 dim_path = ""
                                 zw = int(ar["_zw"] or 0)
@@ -4217,45 +4863,65 @@ class BluePillEngine:
                                         size_bytes = int(os.path.getsize(resolved_asset))
                                     except OSError:
                                         size_bytes = 0
-                                    cached_target = self._cached_converted_jpeg_path(resolved_asset, None)
-                                    if os.path.exists(cached_target):
-                                        dim_path = cached_target
-                                        mime = "image/jpeg"
-                                    else:
-                                        dim_path = resolved_asset
-                                can_unpurge = bool(
-                                    resolved_asset is not None
-                                    or (sys.platform == "darwin" and bool(zdir and zfn) and os.path.exists("/usr/bin/brctl"))
+                                    if not is_video:
+                                        cached_target = self._cached_converted_jpeg_path(resolved_asset, None)
+                                        if os.path.exists(cached_target):
+                                            dim_path = cached_target
+                                            mime = "image/jpeg"
+                                        else:
+                                            dim_path = resolved_asset
+                                if is_video and resolved_poster and (zw <= 0 or zh <= 0):
+                                    dim_path = resolved_poster
+                                has_brctl = sys.platform == "darwin" and os.path.exists("/usr/bin/brctl")
+                                has_icloud_stub = bool(
+                                    has_brctl
+                                    and zdir
+                                    and zfn
+                                    and os.path.exists(os.path.join(photos_lib, "originals", zdir, f".{zfn}.icloud"))
                                 )
+                                can_unpurge = bool(resolved_asset is not None or has_icloud_stub)
                                 seen_lib_guids.add(zuuid)
+                                zdate_val = float(ar["_zdate"] or 0.0)
+                                created_ms = (
+                                    int((zdate_val + APPLE_EPOCH_OFFSET_SEC) * 1000)
+                                    if zdate_val > 0
+                                    else 0
+                                )
+                                quoted_guid = urllib.parse.quote(zuuid)
+                                has_preview = bool(resolved_poster) if is_video else bool(resolved_poster or resolved_asset)
+                                preview_url = (
+                                    (f"/api/v1/attachment/{quoted_guid}/live?preview=1" if resolved_poster else "")
+                                    if is_video
+                                    else f"/api/v1/attachment/{quoted_guid}/live"
+                                )
                                 entry = {
                                     "guid": zuuid,
                                     "name": zfn,
                                     "mimeType": mime,
+                                    "mediaType": "video" if is_video else "image",
+                                    "isVideo": is_video,
+                                    "duration": round(raw_zdur, 2) if is_video else 0.0,
+                                    "hasPreview": has_preview,
+                                    "createdMs": created_ms,
                                     "totalBytes": size_bytes,
                                     "isCloudEvicted": resolved_asset is None,
                                     "canUnpurge": can_unpurge,
                                     "source": "photos_library",
                                     "transferState": 5 if resolved_asset else 0,
-                                    "previewUrl": f"/api/v1/attachment/{urllib.parse.quote(zuuid)}/live",
+                                    "previewUrl": preview_url,
                                     "width": zw if zw > 0 else 0,
                                     "height": zh if zh > 0 else 0,
                                     "isPortrait": bool(zh > zw) if (zw > 0 and zh > 0) else False,
                                     "_dimPath": dim_path if (zw <= 0 or zh <= 0) else "",
                                 }
-                                if photos_only and not use_cursor and resolved_asset is None:
-                                    evicted_lib_candidates.append(entry)
-                                else:
-                                    lib_photos.append(entry)
-                                    if len(lib_photos) >= window_limit:
-                                        consumed_all_lib_rows = False
-                                        break
+                                lib_photos.append(entry)
+                                if len(lib_photos) >= window_limit:
+                                    consumed_all_lib_rows = False
+                                    break
                             if consumed_all_lib_rows and len(rows) < lib_batch_fetch:
                                 if use_cursor:
                                     _cursor_state["lib_exhausted"] = True
                                 break
-                        if photos_only and not use_cursor and len(lib_photos) < window_limit and evicted_lib_candidates:
-                            lib_photos.extend(evicted_lib_candidates[: window_limit - len(lib_photos)])
                 finally:
                     pconn.close()
             except sqlite3.Error as exc:
@@ -4339,20 +5005,8 @@ class BluePillEngine:
                           AND (ZTRASHEDSTATE IS NULL OR ZTRASHEDSTATE = 0)
                           AND (
                             ZUNIFORMTYPEIDENTIFIER IS NULL
-                            OR (
-                              LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%movie%'
-                              AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%video%'
-                              AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%mpeg%'
-                              AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%quicktime%'
-                              AND LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%audio%'
-                            )
+                            OR LOWER(ZUNIFORMTYPEIDENTIFIER) NOT LIKE '%audio%'
                           )
-                          AND LOWER(ZFILENAME) NOT LIKE '%.mov'
-                          AND LOWER(ZFILENAME) NOT LIKE '%.mp4'
-                          AND LOWER(ZFILENAME) NOT LIKE '%.m4v'
-                          AND LOWER(ZFILENAME) NOT LIKE '%.avi'
-                          AND LOWER(ZFILENAME) NOT LIKE '%.mkv'
-                          AND LOWER(ZFILENAME) NOT LIKE '%.3gp'
                         """
                     ).fetchone()
                     if row and row[0]:
@@ -4389,6 +5043,18 @@ class BluePillEngine:
         """
         clamped_limit = max(1, min(int(limit or 250), 250))
         clamped_offset = max(0, int(offset or 0))
+        photos_health: Dict[str, Any] = {}
+        heal_actions: List[str] = []
+        if self.enable_photos and sys.platform == "darwin":
+            photos_health = self._inspect_icloud_photos_health()
+            if photos_health.get("needsHeal"):
+                heal_res = self._heal_icloud_photos_daemons(
+                    reason=",".join(photos_health.get("healReasons") or ["manual_sync"]),
+                    min_interval_seconds=120,
+                )
+                heal_actions = list(heal_res.get("actions") or [])
+                if heal_actions:
+                    photos_health = self._inspect_icloud_photos_health()
         batch = self.query_icloud_photos(
             limit=clamped_limit + 1,
             offset=clamped_offset,
@@ -4424,11 +5090,20 @@ class BluePillEngine:
             guid = p.get("guid") or ""
             if not guid:
                 continue
+            is_evicted = p.get("isCloudEvicted", False)
+            is_video = bool(p.get("isVideo"))
+            if is_evicted and p.get("source") == "photos_library" and p.get("canUnpurge") is False:
+                # Optimize Mac Storage videos keep poster previews local while originals stream on demand from iCloud
+                processed_count += 1
+                continue
             processed_count += 1
             photo_failed = False
-            is_evicted = p.get("isCloudEvicted", False)
             if is_evicted:
-                res = self.download_cloud_attachment(guid)
+                res = self.download_cloud_attachment(
+                    guid,
+                    wait_attempts=1,
+                    allow_helper=(p.get("source") != "photos_library"),
+                )
                 if res.get("downloaded"):
                     unpurged_count += 1
                 else:
@@ -4442,32 +5117,33 @@ class BluePillEngine:
                     if len(errors) < 20:
                         errors.append({"guid": guid, "error": err_msg})
             # Check on-disk file and populate unified conversion cache
-            resolved = self.resolve_attachment_file(guid, convert_heic=False)
-            if resolved:
-                src_path, src_mime = resolved
-                ext = os.path.splitext(src_path)[1].lower()
-                if sys.platform == "darwin" and ext in (".heic", ".heif", ".tiff", ".tif") and os.path.exists("/usr/bin/sips"):
-                    cached_target = self._cached_converted_jpeg_path(src_path, None)
-                    try:
-                        out_path, _ = self._postprocess_resolved_attachment(
-                            src_path, src_mime, convert_heic=True, resize=None
-                        )
-                    except (OSError, subprocess.SubprocessError) as exc:
-                        out_path = ""
-                        if not photo_failed:
-                            failed_count += 1
-                            photo_failed = True
-                        if len(errors) < 20:
-                            errors.append({"guid": guid, "error": f"Failed to convert photo {guid}: {exc}"})
-                    else:
-                        if out_path == cached_target and os.path.exists(cached_target) and os.path.getsize(cached_target) > 0:
-                            transcoded_count += 1
-                        else:
+            if not is_video:
+                resolved = self.resolve_attachment_file(guid, convert_heic=False)
+                if resolved:
+                    src_path, src_mime = resolved
+                    ext = os.path.splitext(src_path)[1].lower()
+                    if sys.platform == "darwin" and ext in (".heic", ".heif", ".tiff", ".tif") and os.path.exists("/usr/bin/sips"):
+                        cached_target = self._cached_converted_jpeg_path(src_path, None)
+                        try:
+                            out_path, _ = self._postprocess_resolved_attachment(
+                                src_path, src_mime, convert_heic=True, resize=None
+                            )
+                        except (OSError, subprocess.SubprocessError) as exc:
+                            out_path = ""
                             if not photo_failed:
                                 failed_count += 1
                                 photo_failed = True
                             if len(errors) < 20:
-                                errors.append({"guid": guid, "error": f"Failed to convert photo {guid} to JPEG"})
+                                errors.append({"guid": guid, "error": f"Failed to convert photo {guid}: {exc}"})
+                        else:
+                            if out_path == cached_target and os.path.exists(cached_target) and os.path.getsize(cached_target) > 0:
+                                transcoded_count += 1
+                            else:
+                                if not photo_failed:
+                                    failed_count += 1
+                                    photo_failed = True
+                                if len(errors) < 20:
+                                    errors.append({"guid": guid, "error": f"Failed to convert photo {guid} to JPEG"})
 
         synced_count = unpurged_count + transcoded_count
         status_str = "ok" if failed_count == 0 else ("partial" if synced_count > 0 else "error")
@@ -4488,6 +5164,8 @@ class BluePillEngine:
             "limit": clamped_limit,
             "hasMore": has_more,
             "nextOffset": next_offset,
+            "healedDaemons": heal_actions,
+            "photosHealth": photos_health,
         }
 
     def start_icloud_photos_sync_job(
@@ -4498,11 +5176,22 @@ class BluePillEngine:
     ) -> Dict[str, Any]:
         clamped_limit = max(1, min(int(limit or 250), 250))
         clamped_offset = max(0, int(offset or 0))
+        nudge_res: Dict[str, Any] = {}
+        if self.enable_photos and sys.platform == "darwin":
+            nudge_res = self._nudge_cloudphotod(
+                reason="manual_sync",
+                min_interval_seconds=20,
+                min_sync_age=8.0,
+                wait_seconds=4.0,
+            )
         with self._photo_sync_lock:
             if self._active_photo_sync_job_id:
                 existing = self._photo_sync_jobs.get(self._active_photo_sync_job_id)
                 if existing and existing.get("state") == "running":
-                    return dict(existing)
+                    snap = dict(existing)
+                    if nudge_res:
+                        snap["nudge"] = nudge_res
+                    return snap
             job_id = f"psync-{int(time.time() * 1000)}-{len(self._photo_sync_jobs) + 1}"
             job: Dict[str, Any] = {
                 "jobId": job_id,
@@ -4571,6 +5260,17 @@ class BluePillEngine:
                         })
                         snapshot = dict(job)
                     self.broadcast_socketio("icloud-photos-sync", snapshot)
+                    if cur_offset == clamped_offset and has_more and (
+                        sync_acc > 0 or unp_acc > 0 or bool(nudge_res.get("dbChanged"))
+                    ):
+                        self.broadcast_socketio(
+                            "icloud-photos-updated",
+                            {
+                                "total": self.count_icloud_photos(),
+                                "synced": sync_acc,
+                                "timestampMs": int(time.time() * 1000),
+                            },
+                        )
                     if sync_all and has_more and isinstance(next_off, int) and next_off > cur_offset:
                         cur_offset = next_off
                     else:
@@ -4588,6 +5288,15 @@ class BluePillEngine:
                         self._active_photo_sync_job_id = None
                     final_snapshot = dict(job)
                 self.broadcast_socketio("icloud-photos-sync", final_snapshot)
+                if sync_acc > 0 or unp_acc > 0:
+                    self.broadcast_socketio(
+                        "icloud-photos-updated",
+                        {
+                            "total": self.count_icloud_photos(),
+                            "synced": sync_acc,
+                            "timestampMs": int(time.time() * 1000),
+                        },
+                    )
             except Exception as exc:  # noqa: BLE001
                 with self._photo_sync_lock:
                     job["status"] = "error"
@@ -5701,7 +6410,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill Web UI</span>
-      <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.2.1 · Zero-Electron macOS Relay</span>
+      <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.2.2 · Zero-Electron macOS Relay</span>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <button onclick="openNotesModal()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;display:flex;align-items:center;gap:4px;">📝 Notes</button>
@@ -6573,12 +7282,120 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     let photosPageSize = 48;
     let photosTotal = 0;
     let photosHasMore = false;
+    let photosPollTimer = null;
+    let photosRequestSeq = 0;
+    let photosSioSid = '';
+    let photosSioLoopActive = false;
+    let photosSioAbort = null;
+    function formatPhotoDuration(sec) {
+      const s = Math.max(0, Math.round(Number(sec) || 0));
+      const mins = Math.floor(s / 60);
+      const rem = s % 60;
+      return mins + ':' + (rem < 10 ? '0' : '') + rem;
+    }
+    function startPhotosSocketIo() {
+      if (photosSioLoopActive) return;
+      photosSioLoopActive = true;
+      (async () => {
+        while (photosSioLoopActive) {
+          try {
+            const modal = document.getElementById('photosModal');
+            if (!modal || modal.style.display === 'none') {
+              photosSioLoopActive = false;
+              break;
+            }
+            photosSioAbort = new AbortController();
+            if (!photosSioSid) {
+              const hs = await fetch(apiUrl('/socket.io?EIO=4&transport=polling'), { signal: photosSioAbort.signal });
+              const hsTxt = await hs.text();
+              if (hsTxt && hsTxt.startsWith('0')) {
+                const hsObj = JSON.parse(hsTxt.slice(1));
+                if (hsObj && hsObj.sid) photosSioSid = hsObj.sid;
+              }
+              if (photosSioSid) {
+                await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
+                  method: 'POST',
+                  body: '40',
+                  signal: photosSioAbort.signal
+                });
+              }
+            }
+            if (!photosSioSid) {
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+            }
+            const pr = await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
+              signal: photosSioAbort.signal
+            });
+            if (!pr.ok) {
+              photosSioSid = '';
+              await new Promise(r => setTimeout(r, 1500));
+              continue;
+            }
+            const raw = await pr.text();
+            if (raw) {
+              for (const pkt of raw.split(String.fromCharCode(0x1e))) {
+                if (!pkt) continue;
+                if (pkt === '2') {
+                  await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
+                    method: 'POST',
+                    body: '3',
+                    signal: photosSioAbort.signal
+                  });
+                } else if (pkt.startsWith('42')) {
+                  try {
+                    const arr = JSON.parse(pkt.slice(2));
+                    if (Array.isArray(arr) && arr[0] === 'icloud-photos-updated') {
+                      const evPayload = (arr.length > 1 && arr[1]) ? arr[1] : {};
+                      if (photosPage === 0) {
+                        loadPhotos(0);
+                      } else if (typeof evPayload.total === 'number') {
+                        photosTotal = Number(evPayload.total);
+                        const pageCount = Math.max(1, Math.ceil(photosTotal / photosPageSize));
+                        const metaEl = document.getElementById('photosPageMeta');
+                        if (metaEl) metaEl.textContent = 'Page ' + (photosPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
+                      }
+                    }
+                  } catch (_) {}
+                }
+              }
+            }
+            await new Promise(r => setTimeout(r, 1000));
+          } catch (e) {
+            if (!photosSioLoopActive || (e && e.name === 'AbortError')) break;
+            photosSioSid = '';
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        }
+      })();
+    }
+    function stopPhotosSocketIo() {
+      photosSioLoopActive = false;
+      photosSioSid = '';
+      if (photosSioAbort) {
+        try { photosSioAbort.abort(); } catch (_) {}
+        photosSioAbort = null;
+      }
+    }
     function openPhotosModal() {
       document.getElementById('photosModal').style.display = 'flex';
       loadPhotos(0);
+      startPhotosSocketIo();
+      if (photosPollTimer) clearInterval(photosPollTimer);
+      photosPollTimer = setInterval(() => {
+        const modal = document.getElementById('photosModal');
+        if (modal && modal.style.display !== 'none' && photosPage === 0) {
+          loadPhotos(0);
+        }
+      }, 15000);
     }
     function closePhotosModal() {
       document.getElementById('photosModal').style.display = 'none';
+      stopPhotosSocketIo();
+      if (photosPollTimer) {
+        clearInterval(photosPollTimer);
+        photosPollTimer = null;
+      }
     }
     function changePhotosPageSize(val) {
       photosPageSize = Math.max(12, Math.min(240, Number(val) || 48));
@@ -6591,41 +7408,48 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       loadPhotos(next);
     }
     async function loadPhotos(page = photosPage) {
+      const reqSeq = ++photosRequestSeq;
+      const targetPage = Math.max(0, page);
+      photosPage = targetPage;
       try {
-        photosPage = Math.max(0, page);
-        const off = photosPage * photosPageSize;
+        const off = targetPage * photosPageSize;
         const resp = await fetch(apiUrl('/api/v1/icloud/photos?limit=' + photosPageSize + '&offset=' + off));
+        if (!resp.ok) return;
         const j = await resp.json();
+        if (reqSeq !== photosRequestSeq) return;
         const photos = j.data || [];
-        photosTotal = Number(j.total || photos.length);
+        photosTotal = Number(typeof j.total === 'number' ? j.total : photos.length);
         photosHasMore = Boolean(j.hasMore);
         const pageCount = Math.max(1, Math.ceil(photosTotal / photosPageSize));
         const metaEl = document.getElementById('photosPageMeta');
-        if (metaEl) metaEl.textContent = 'Page ' + (photosPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
+        if (metaEl) metaEl.textContent = 'Page ' + (targetPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
         const prevBtn = document.getElementById('photosPrevBtn');
-        if (prevBtn) prevBtn.disabled = (photosPage <= 0);
+        if (prevBtn) prevBtn.disabled = (targetPage <= 0);
         const nextBtn = document.getElementById('photosNextBtn');
-        if (nextBtn) nextBtn.disabled = (!photosHasMore && (photosPage + 1) >= pageCount);
+        if (nextBtn) nextBtn.disabled = (!photosHasMore && (targetPage + 1) >= pageCount);
         const grid = document.getElementById('photosGrid');
         grid.innerHTML = '';
         grid.scrollTop = 0;
         for (const p of photos) {
           const card = document.createElement('div');
           card.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px;';
-          const imgUrl = apiUrl('/api/v1/attachment/' + encodeURIComponent(p.guid) + '/live');
+          const liveUrl = apiUrl('/api/v1/attachment/' + encodeURIComponent(p.guid) + '/live');
           const isEvicted = Boolean(p.isCloudEvicted);
+          const isVideo = Boolean(p.isVideo) || String(p.mediaType || '') === 'video';
+          const hasPreview = isVideo ? Boolean(p.hasPreview && p.previewUrl) : !isEvicted;
+          const thumbUrl = p.previewUrl ? apiUrl(p.previewUrl) : liveUrl;
           const isPortrait = Boolean(p.isPortrait);
           const previewBox = document.createElement('div');
           previewBox.style.cssText = 'width:100%;height:' + (isPortrait ? '210px' : '140px') + ';border-radius:6px;background:#151b23;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;cursor:pointer;';
           previewBox.addEventListener('click', () => {
-            if (!isEvicted) window.open(imgUrl, '_blank');
+            if (!isEvicted) window.open(liveUrl, '_blank');
           });
           const fallbackIcon = document.createElement('div');
-          fallbackIcon.style.cssText = 'color:var(--muted);font-size:24px;' + (isEvicted ? 'display:block;' : 'display:none;');
-          fallbackIcon.textContent = '🖼';
-          if (!isEvicted) {
+          fallbackIcon.style.cssText = 'color:var(--muted);font-size:24px;' + (!hasPreview ? 'display:block;' : 'display:none;');
+          fallbackIcon.textContent = isVideo ? '🎬' : '🖼';
+          if (hasPreview) {
             const imgEl = document.createElement('img');
-            imgEl.src = imgUrl;
+            imgEl.src = thumbUrl;
             imgEl.style.cssText = 'max-width:100%;max-height:100%;object-fit:cover;';
             imgEl.addEventListener('error', () => {
               imgEl.style.display = 'none';
@@ -6634,6 +7458,12 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
             previewBox.appendChild(imgEl);
           }
           previewBox.appendChild(fallbackIcon);
+          if (isVideo) {
+            const vidTag = document.createElement('div');
+            vidTag.style.cssText = 'position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,0.78);color:#fff;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;';
+            vidTag.textContent = '🎬 ' + (Number(p.duration || 0) > 0 ? formatPhotoDuration(p.duration) : 'Video');
+            previewBox.appendChild(vidTag);
+          }
 
           const nameEl = document.createElement('div');
           nameEl.style.cssText = 'font-size:11px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
@@ -6645,7 +7475,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           badgesWrapper.style.cssText = 'display:flex;align-items:center;gap:4px;';
           const badgeEl = document.createElement('span');
           badgeEl.style.cssText = 'font-size:10px;padding:1px 6px;border-radius:4px;' + (isEvicted ? 'background:#3d2c12;color:#d29922;' : 'background:#1c3322;color:#3fb950;');
-          badgeEl.textContent = isEvicted ? '☁️ iCloud' : '✓ Local';
+          badgeEl.textContent = isEvicted ? '☁️ iCloud' : (isVideo ? '▶ Local' : '✓ Local');
           const orientBadge = document.createElement('span');
           orientBadge.style.cssText = 'font-size:9px;padding:1px 5px;border-radius:4px;background:#161b22;color:var(--muted);border:1px solid var(--border);';
           orientBadge.textContent = isPortrait ? '▯ Portrait' : '▭ Landscape';
@@ -6655,11 +7485,17 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           const canUnpurge = p.canUnpurge !== false;
           liveBtn.style.cssText = 'background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:10px;' + ((isEvicted && !canUnpurge) ? 'opacity:0.5;cursor:not-allowed;' : 'cursor:pointer;');
           if (isEvicted && !canUnpurge) {
-            liveBtn.textContent = '☁️ iCloud Only';
+            liveBtn.textContent = isVideo ? '🎬 iCloud Only' : '☁️ iCloud Only';
             liveBtn.disabled = true;
           } else {
-            liveBtn.textContent = isEvicted ? '☁️ Unpurge' : '⬇ Live';
-            liveBtn.addEventListener('click', () => downloadAttachmentLive(p.guid));
+            liveBtn.textContent = isEvicted ? '☁️ Unpurge' : (isVideo ? '▶ Play' : '⬇ Live');
+            liveBtn.addEventListener('click', () => {
+              if (isVideo && !isEvicted) {
+                window.open(liveUrl, '_blank');
+              } else {
+                downloadAttachmentLive(p.guid);
+              }
+            });
           }
           footerRow.appendChild(badgesWrapper);
           footerRow.appendChild(liveBtn);
@@ -6729,8 +7565,33 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
 
     async function downloadAttachmentLive(guid) {
-      await fetch(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/download'), { method: 'POST' });
-      window.open(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/live'), '_blank');
+      const statusBanner = document.getElementById('photosSyncStatusBanner');
+      if (statusBanner) { statusBanner.style.display = 'none'; statusBanner.textContent = ''; }
+      try {
+        const resp = await fetch(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/download'), { method: 'POST' });
+        let j = null;
+        try { j = await resp.json(); } catch (_) { j = null; }
+        const d = (j && j.data) ? j.data : {};
+        if (!resp.ok || d.downloaded !== true) {
+          const msg = (d && (d.error || d.message)) || (j && j.message) || ('Attachment download failed (HTTP ' + resp.status + ')');
+          if (statusBanner) {
+            statusBanner.style.background = '#3d1518';
+            statusBanner.style.color = '#f85149';
+            statusBanner.textContent = '⚠ ' + msg;
+            statusBanner.style.display = 'block';
+          }
+          return;
+        }
+        window.open(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/live'), '_blank');
+        await loadPhotos(photosPage);
+      } catch (e) {
+        if (statusBanner) {
+          statusBanner.style.background = '#3d1518';
+          statusBanner.style.color = '#f85149';
+          statusBanner.textContent = '⚠ ' + ((e && e.message) ? e.message : String(e));
+          statusBanner.style.display = 'block';
+        }
+      }
     }
   </script>
 
@@ -6914,6 +7775,16 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                     fields[field_name] = payload.decode("utf-8", errors="replace")
         return fields
 
+    def _send_attachment_common_headers(self, mime: str, file_path: str, content_len: int) -> None:
+        self.send_header("Content-Type", mime)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(content_len))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if mime.lower().startswith("image/svg") or file_path.lower().endswith(".svg"):
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+            self.send_header("Content-Disposition", 'attachment; filename="attachment.svg"')
+
     def do_OPTIONS(self) -> None:
         self._req_t0 = time.time()
         self._send_json(200, None)
@@ -6941,12 +7812,13 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             if not self._check_auth(parsed):
                 self._send_json(401, None, "Unauthorized")
                 return
+            icloud_auth = bool(self.engine.password) and self._check_auth(parsed) and self._is_secure_or_loopback()
             qs = urllib.parse.parse_qs(parsed.query)
             sid = (qs.get("sid") or [""])[0]
             if not sid:
                 sid = uuid.uuid4().hex
                 with self.engine._sessions_lock:
-                    self.engine._sessions[sid] = SocketIOSession(sid)
+                    self.engine._sessions[sid] = SocketIOSession(sid, icloud_authorized=icloud_auth)
                 handshake = "0" + json.dumps(
                     {
                         "sid": sid,
@@ -6966,9 +7838,22 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             with self.engine._sessions_lock:
                 sess = self.engine._sessions.get(sid)
                 if not sess:
-                    sess = SocketIOSession(sid)
+                    sess = SocketIOSession(sid, icloud_authorized=icloud_auth)
                     self.engine._sessions[sid] = sess
+                else:
+                    sess.icloud_authorized = icloud_auth
             pkts = sess.pop_packets(timeout=0.05)
+            if not icloud_auth:
+                pkts = [
+                    pkt
+                    for pkt in pkts
+                    if not (
+                        pkt.startswith('42["icloud-photos-updated"')
+                        or pkt.startswith('42["icloud-photos-sync"')
+                    )
+                ]
+                if not pkts:
+                    pkts = ["2"]
             out = "\x1e".join(pkts).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=UTF-8")
@@ -7037,6 +7922,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             att_guid = urllib.parse.unquote(m_att.group(1))
             qs = urllib.parse.parse_qs(parsed.query)
             original_flag = str((qs.get("raw_heic") or ["false"])[0]).lower() == "true"
+            preview_flag = str((qs.get("preview") or ["0"])[0] or "0").strip().lower() in ("1", "true", "yes")
             resize_val = int((qs.get("height") or qs.get("width") or ["0"])[0] or 0) or None
             try:
                 resolved = self.engine.resolve_attachment_file(
@@ -7044,6 +7930,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                     convert_heic=not original_flag,
                     resize=resize_val,
                     allow_photos_library=False,
+                    preview_only=preview_flag,
                 )
             except FileNotFoundError:
                 resolved = None
@@ -7057,27 +7944,91 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                         convert_heic=not original_flag,
                         resize=resize_val,
                         allow_photos_library=True,
+                        preview_only=preview_flag,
                     )
                 except FileNotFoundError:
                     resolved = None
+                if (
+                    not resolved
+                    and sys.platform == "darwin"
+                    and (resize_val is not None or preview_flag)
+                    and self.engine.is_recent_photos_library_asset(att_guid, max_age_seconds=120.0)
+                ):
+                    for _ in range(5):
+                        time.sleep(0.4)
+                        try:
+                            resolved = self.engine.resolve_attachment_file(
+                                att_guid,
+                                convert_heic=not original_flag,
+                                resize=resize_val,
+                                allow_photos_library=True,
+                                preview_only=preview_flag,
+                            )
+                        except FileNotFoundError:
+                            resolved = None
+                        if resolved:
+                            break
             if not resolved:
                 self._send_json(404, None, "Attachment not found")
                 return
             file_path, mime = resolved
-            with open(file_path, "rb") as f:
-                raw = f.read()
-            self._log_http(200)
-            self.send_response(200)
-            self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            if mime.lower().startswith("image/svg") or file_path.lower().endswith(".svg"):
-                self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
-                self.send_header("Content-Disposition", 'attachment; filename="attachment.svg"')
-            self.end_headers()
-            self.wfile.write(raw)
-            return
+            if_range_hdr = str(self.headers.get("If-Range") or "").strip()
+            range_hdr = "" if if_range_hdr else str(self.headers.get("Range") or "").strip()
+            range_match = re.match(r"^bytes=(\d*)-(\d*)$", range_hdr) if range_hdr else None
+            try:
+                f = open(file_path, "rb")
+            except FileNotFoundError:
+                self._send_json(404, None, "Attachment not found")
+                return
+            with f:
+                file_size = int(os.fstat(f.fileno()).st_size)
+                if range_match and file_size > 0:
+                    start_s, end_s = range_match.groups()
+                    start_b = int(start_s) if start_s else 0
+                    end_b = int(end_s) if end_s else (file_size - 1)
+                    if not start_s and end_s:
+                        # suffix-byte-range-spec
+                        suffix_len = int(end_s)
+                        start_b = max(0, file_size - suffix_len)
+                        end_b = file_size - 1
+                    end_b = min(end_b, file_size - 1)
+                    if start_b < 0 or start_b >= file_size or end_b < start_b:
+                        self._log_http(416)
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{file_size}")
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.end_headers()
+                        return
+                    remaining = (end_b - start_b) + 1
+                    f.seek(start_b)
+                    self._log_http(206)
+                    self.send_response(206)
+                    self.send_header("Content-Range", f"bytes {start_b}-{end_b}/{file_size}")
+                    self._send_attachment_common_headers(mime, file_path, remaining)
+                    self.end_headers()
+                    try:
+                        while remaining > 0:
+                            buf = f.read(min(65536, remaining))
+                            if not buf:
+                                break
+                            self.wfile.write(buf)
+                            remaining -= len(buf)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
+                self._log_http(200)
+                self.send_response(200)
+                self._send_attachment_common_headers(mime, file_path, file_size)
+                self.end_headers()
+                try:
+                    while True:
+                        buf = f.read(65536)
+                        if not buf:
+                            break
+                        self.wfile.write(buf)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
 
         m_wave = re.match(r"^/api/v1/attachment/([^/]+)/waveform$", path)
         if m_wave:
@@ -7131,6 +8082,27 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                     os.path.expanduser(self.engine.photos_library_path), "database", "Photos.sqlite"
                 )
                 src_param = "photos_library" if os.path.exists(photos_db_cand) else "all"
+            refresh_flag = str(
+                (qs.get("refresh") or qs.get("nudge") or [""])[0] or ""
+            ).strip().lower() in ("1", "true", "yes")
+            if off == 0 and sys.platform == "darwin" and self.engine.enable_photos and src_param in ("photos_library", "all"):
+                if refresh_flag:
+                    self.engine._nudge_cloudphotod(
+                        reason="photos_refresh",
+                        min_interval_seconds=15,
+                        min_sync_age=8.0,
+                        wait_seconds=4.0,
+                    )
+                else:
+                    p_health = self.engine._inspect_icloud_photos_health()
+                    p_age = p_health.get("lastSyncAgeSeconds")
+                    if p_age is not None and float(p_age) >= 15.0:
+                        self.engine._nudge_cloudphotod(
+                            reason="photos_page0",
+                            min_interval_seconds=25,
+                            min_sync_age=15.0,
+                            wait_seconds=4.0,
+                        )
             fetched = self.engine.query_icloud_photos(
                 limit=lim + 1,
                 offset=off,
@@ -8012,6 +8984,229 @@ def run_selftest(engine: BluePillEngine) -> int:
         all_after = test_eng.query_chats(limit=50, offset=0)
         unkeyed_guids = {c["guid"] for c in all_after if c.get("displayName") == "OverlapTest"}
         assert unkeyed_guids == {"RCS;+;unkeyed_a", "RCS;+;unkeyed_b", "RCS;+;keyed_same_name"}, f"Unkeyed/keyed groups wrongly merged: {all_after}"
+
+        # Verify iCloud Photos health inspection (#21), chronological ordering & Photos.sqlite watcher (#22),
+        # and video metadata + poster previews + HTTP Range streaming (#23)
+        photos_test_root = os.path.join(test_eng._config_dir, "photos_v2_test")
+        os.makedirs(os.path.join(photos_test_root, "database"), exist_ok=True)
+        os.makedirs(os.path.join(photos_test_root, "originals", "0"), exist_ok=True)
+        os.makedirs(os.path.join(photos_test_root, "resources", "derivatives", "masters", "0"), exist_ok=True)
+        os.makedirs(os.path.join(photos_test_root, "resources", "cpl", "cloudsync.noindex"), exist_ok=True)
+        test_eng.photos_library_path = photos_test_root
+        test_eng._photos_library_assets.clear()
+        test_eng._photos_poster_cache.clear()
+        test_eng.db_path = os.path.join(test_eng._config_dir, "nonexistent_chat.db")
+        launchctl_calls: List[List[str]] = []
+        test_eng._run_launchctl = lambda args: (
+            launchctl_calls.append(list(args)) or subprocess.CompletedProcess(args, 0, "", "")
+        )
+        test_eng._get_photolibraryd_cpu_pct = lambda: 5.0
+        test_eng._check_icloud_photos_daemons = lambda uid=None: {
+            "com.apple.cloudd": True,
+            "com.apple.photolibraryd": True,
+            "com.apple.cloudphotod": True,
+        }
+
+        stale_plist = os.path.join(photos_test_root, "resources", "cpl", "cloudsync.noindex", "syncstatus.plist")
+        stale_dt = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(hours=3)
+        with open(stale_plist, "wb") as spf:
+            plistlib.dump({"lastSyncDate": stale_dt, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
+        p_health = test_eng._inspect_icloud_photos_health()
+        assert p_health["cloudSyncStale"] is True and p_health["needsHeal"] is True, f"Expected stale health: {p_health}"
+        assert p_health["cloudAssetCount"] == 12, f"Expected 12 cloud assets: {p_health}"
+        assert p_health["cloudImageCount"] == 10 and p_health["cloudVideoCount"] == 2, f"Expected split cloud counts: {p_health}"
+        pf_stale = test_eng.run_preflight(fix=False)
+        assert pf_stale["modules"]["photos"]["cloudSyncStale"] is True, f"Preflight missing cloudSyncStale: {pf_stale}"
+        assert pf_stale["modules"]["photos"]["cloudImageCount"] == 10 and pf_stale["modules"]["photos"]["cloudVideoCount"] == 2
+        # Verify high-CPU wedge streak ignores rapid duplicate checks & resets if lastSyncDate advances (and UTI cloudAssetCountPerType keys)
+        obs_t0 = time.time()
+        orig_selftest_stale = test_eng.photos_sync_stale_seconds
+        test_eng.photos_sync_stale_seconds = 1800
+        try:
+            fresh_dt1 = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(minutes=6)
+            with open(stale_plist, "wb") as spf:
+                plistlib.dump({"lastSyncDate": fresh_dt1, "cloudAssetCountPerType": {"public.image": 10, "public.movie": 2}}, spf)
+            h_cpu1 = test_eng._inspect_icloud_photos_health(now_ts=obs_t0, cpu_pct_override=95.0)
+            assert h_cpu1["cloudImageCount"] == 10 and h_cpu1["cloudVideoCount"] == 2, f"Expected UTI split cloud counts: {h_cpu1}"
+            h_cpu_rapid = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 5.0, cpu_pct_override=95.0)
+            assert h_cpu1["wedged"] is False and h_cpu_rapid["wedged"] is False, f"Rapid high-CPU polls must not immediately wedge: {h_cpu_rapid}"
+            fresh_dt2 = fresh_dt1 + datetime.timedelta(minutes=2)
+            with open(stale_plist, "wb") as spf:
+                plistlib.dump({"lastSyncDate": fresh_dt2, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
+            h_cpu_prog = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 60.0, cpu_pct_override=95.0)
+            assert h_cpu_prog["wedged"] is False, f"Advancing lastSyncDate must reset wedge streak: {h_cpu_prog}"
+            h_cpu_wedged = test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 120.0, cpu_pct_override=95.0)
+            assert h_cpu_wedged["wedged"] is True, f"Sustained time-separated stalled high CPU must mark wedged: {h_cpu_wedged}"
+            test_eng._inspect_icloud_photos_health(now_ts=obs_t0 + 130.0, cpu_pct_override=5.0)
+        finally:
+            test_eng.photos_sync_stale_seconds = orig_selftest_stale
+        with open(stale_plist, "wb") as spf:
+            plistlib.dump({"lastSyncDate": stale_dt, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
+        if sys.platform == "darwin":
+            first_heal = test_eng._heal_icloud_photos_daemons(reason="selftest", min_interval_seconds=120, now_ts=1000.0)
+            assert first_heal.get("healed") is True and any(c[:2] == ["kickstart", "-k"] for c in launchctl_calls), f"Expected stubbed kickstart: {first_heal}"
+            second_heal = test_eng._heal_icloud_photos_daemons(reason="selftest_2", min_interval_seconds=120, now_ts=1200.0)
+            assert second_heal.get("healed") is False and second_heal.get("skippedReason") == "cooldown", f"Cooldown floor bypassed: {second_heal}"
+        else:
+            test_eng._last_photos_heal_ts = 1000.0
+            second_heal = test_eng._heal_icloud_photos_daemons(reason="selftest_2", min_interval_seconds=120, now_ts=1200.0)
+            assert second_heal.get("skippedReason") == "cooldown", f"Cooldown floor bypassed: {second_heal}"
+            test_eng._last_photos_heal_ts = 0.0
+
+        shutil.copy2(sample_jpg, os.path.join(photos_test_root, "originals", "0", "IMG_OLD_LOCAL.JPG"))
+        shutil.copy2(sample_jpg, os.path.join(photos_test_root, "resources", "derivatives", "masters", "0", "VID-CLOUD-001_4_5005_c.jpeg"))
+        shutil.copy2(sample_jpg, os.path.join(photos_test_root, "resources", "derivatives", "masters", "0", "VID-LOCAL-002_4_5005_c.jpeg"))
+        local_mov_path = os.path.join(photos_test_root, "originals", "0", "IMG_LOCAL_002.MOV")
+        with open(local_mov_path, "wb") as mvf:
+            mvf.write(b"ftypqt  0123456789ABCDEF")
+        noposter_mov_path = os.path.join(photos_test_root, "originals", "0", "IMG_NO_POSTER.MOV")
+        with open(noposter_mov_path, "wb") as npf:
+            npf.write(b"ftypqt  NOPOSTER")
+
+        vdb_path = os.path.join(photos_test_root, "database", "Photos.sqlite")
+        vconn = sqlite3.connect(vdb_path)
+        try:
+            vconn.execute(
+                "CREATE TABLE ZASSET (ZUUID TEXT, ZFILENAME TEXT, ZUNIFORMTYPEIDENTIFIER TEXT, ZDIRECTORY TEXT, ZTRASHEDSTATE INTEGER, ZDATECREATED REAL, ZADDEDDATE REAL, ZKIND INTEGER, ZDURATION REAL, ZWIDTH INTEGER, ZHEIGHT INTEGER);"
+            )
+            vconn.execute(
+                "INSERT INTO ZASSET VALUES ('IMG-OLD-000', 'IMG_OLD_LOCAL.JPG', 'public.jpeg', '0', 0, 1000.0, 1000.0, 0, 0.0, 100, 100);"
+            )
+            vconn.execute(
+                "INSERT INTO ZASSET VALUES ('VID-LOCAL-002', 'IMG_LOCAL_002.MOV', 'com.apple.quicktime-movie', '0', 0, 2000.0, 2000.0, 1, 7.5, 1920, 1080);"
+            )
+            vconn.execute(
+                "INSERT INTO ZASSET VALUES ('VID-NOPOSTER', 'IMG_NO_POSTER.MOV', 'com.apple.quicktime-movie', '0', 0, 3000.0, 3000.0, 1, 3.0, 1920, 1080);"
+            )
+            vconn.execute(
+                "INSERT INTO ZASSET VALUES ('VID-CLOUD-001', 'IMG_CLOUD_001.MOV', 'com.apple.quicktime-movie', '0', 0, 5000.0, 5000.0, 1, 12.5, 1080, 1920);"
+            )
+            vconn.commit()
+        finally:
+            vconn.close()
+
+        v_items = test_eng.query_icloud_photos(limit=10, offset=0, source="photos_library")
+        assert [it["guid"] for it in v_items] == ["VID-CLOUD-001", "VID-NOPOSTER", "VID-LOCAL-002", "IMG-OLD-000"], f"Chronological order broken: {v_items}"
+        assert test_eng.count_icloud_photos(source="photos_library") == 4
+        assert v_items[0]["isVideo"] is True and v_items[0]["mediaType"] == "video" and v_items[0]["duration"] == 12.5
+        assert v_items[0]["isCloudEvicted"] is True and v_items[0]["hasPreview"] is True
+        assert v_items[0]["previewUrl"].endswith("/live?preview=1")
+        assert v_items[1]["isVideo"] is True and v_items[1]["hasPreview"] is False and v_items[1]["previewUrl"] == "", f"Local video without poster must not advertise video as preview: {v_items[1]}"
+        assert v_items[2]["isVideo"] is True and v_items[2]["isCloudEvicted"] is False and v_items[2]["hasPreview"] is True
+        assert test_eng.resolve_attachment_file("VID-CLOUD-001", preview_only=False) is None
+        poster_res = test_eng.resolve_attachment_file("VID-CLOUD-001", preview_only=True)
+        assert poster_res is not None and poster_res[1] == "image/jpeg", f"Expected video poster JPEG: {poster_res}"
+
+        vid_sync = test_eng.sync_icloud_photos(limit=10, offset=0)
+        assert vid_sync["failed"] == 0 and vid_sync["status"] == "ok", f"Optimize-storage video must not fail sync: {vid_sync}"
+
+        # Verify HTTP ?preview=1, Range: bytes=0-3, and If-Range fallback against running selftest HTTP server
+        orig_srv_engine_lib = engine.photos_library_path
+        orig_srv_assets = dict(engine._photos_library_assets)
+        orig_srv_posters = dict(engine._photos_poster_cache)
+        orig_srv_db = engine.db_path
+        engine.photos_library_path = photos_test_root
+        engine.db_path = test_eng.db_path
+        engine._photos_library_assets.clear()
+        engine._photos_poster_cache.clear()
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/v1/attachment/VID-CLOUD-001/live?preview=1&password=selftest-secret",
+                timeout=5.0,
+            ) as presp:
+                assert presp.status == 200 and presp.headers.get("Content-Type") == "image/jpeg"
+                assert len(presp.read()) > 0
+            r_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/v1/attachment/VID-LOCAL-002/live?password=selftest-secret",
+                headers={"Range": "bytes=0-3"},
+            )
+            with urllib.request.urlopen(r_req, timeout=5.0) as rresp:
+                assert rresp.status == 206, f"Expected 206 Partial Content, got {rresp.status}"
+                assert rresp.headers.get("X-Content-Type-Options") == "nosniff"
+                assert rresp.read() == b"ftyp"
+            ir_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/v1/attachment/VID-LOCAL-002/live?password=selftest-secret",
+                headers={"Range": "bytes=0-3", "If-Range": "\"stale-validator\""},
+            )
+            with urllib.request.urlopen(ir_req, timeout=5.0) as irresp:
+                assert irresp.status == 200, f"Expected 200 full body when If-Range present without validator, got {irresp.status}"
+                assert irresp.read() == b"ftypqt  0123456789ABCDEF"
+        finally:
+            engine.photos_library_path = orig_srv_engine_lib
+            engine.db_path = orig_srv_db
+            engine._photos_library_assets.clear()
+            engine._photos_library_assets.update(orig_srv_assets)
+            engine._photos_poster_cache.clear()
+            engine._photos_poster_cache.update(orig_srv_posters)
+
+        # Verify SocketIO iCloud Photos broadcast gating (unauth session must not receive icloud-photos-updated)
+        unauth_sess = SocketIOSession("unauth-test", icloud_authorized=False)
+        auth_sess = SocketIOSession("auth-test", icloud_authorized=True)
+        with test_eng._sessions_lock:
+            test_eng._sessions["unauth-test"] = unauth_sess
+            test_eng._sessions["auth-test"] = auth_sess
+        try:
+            test_eng.broadcast_socketio("icloud-photos-updated", {"total": 4})
+            assert len(unauth_sess.queue) == 0, f"Unauthorized session received icloud-photos-updated: {unauth_sess.queue}"
+            assert len(auth_sess.queue) == 1, f"Authorized session missed icloud-photos-updated: {auth_sess.queue}"
+        finally:
+            with test_eng._sessions_lock:
+                test_eng._sessions.pop("unauth-test", None)
+                test_eng._sessions.pop("auth-test", None)
+
+        # Verify Photos.sqlite watcher detects new asset and broadcasts icloud-photos-updated
+        watch_state: Dict[str, Any] = {}
+        photo_events: List[Tuple[str, Any]] = []
+        orig_emit_p = test_eng.broadcast_socketio
+        test_eng.broadcast_socketio = lambda ev, payload: photo_events.append((ev, payload))
+        try:
+            assert test_eng._poll_photos_db_once(watch_state, now_ts=100.0) is False
+            vconn2 = sqlite3.connect(vdb_path)
+            try:
+                vconn2.execute(
+                    "INSERT INTO ZASSET VALUES ('IMG-NEW-003', 'IMG_OLD_LOCAL.JPG', 'public.jpeg', '0', 0, 6000.0, 6000.0, 0, 0.0, 100, 100);"
+                )
+                vconn2.commit()
+            finally:
+                vconn2.close()
+            os.utime(vdb_path, (time.time() + 2, time.time() + 2))
+            assert test_eng._poll_photos_db_once(watch_state, now_ts=125.0) is True
+            assert any(ev == "icloud-photos-updated" and pl.get("total") == 5 for ev, pl in photo_events), f"Missing socket event: {photo_events}"
+        finally:
+            test_eng.broadcast_socketio = orig_emit_p
+
+        # Verify Sonoma/Sequoia non-masters derivative fallback, non-stub canUnpurge gating, and _nudge_cloudphotod guards
+        nonmaster_dir = os.path.join(photos_test_root, "resources", "derivatives", "9")
+        os.makedirs(nonmaster_dir, exist_ok=True)
+        shutil.copy2(sample_jpg, os.path.join(nonmaster_dir, "99999999-NONMASTER_1_105_c.jpeg"))
+        vconn3 = sqlite3.connect(vdb_path)
+        try:
+            vconn3.execute(
+                "INSERT INTO ZASSET VALUES ('99999999-NONMASTER', 'IMG_NM.HEIC', 'public.heic', '9', 0, 7000.0, 7000.0, 0, 0.0, 100, 100);"
+            )
+            vconn3.execute(
+                "INSERT INTO ZASSET VALUES ('88888888-EVICTED', 'IMG_EVICT.HEIC', 'public.heic', '8', 0, 6500.0, 6500.0, 0, 0.0, 100, 100);"
+            )
+            vconn3.commit()
+        finally:
+            vconn3.close()
+        q_nm = test_eng.query_icloud_photos(limit=10, offset=0, source="photos_library")
+        nm_item = next(it for it in q_nm if it.get("guid") == "99999999-NONMASTER")
+        ev_item = next(it for it in q_nm if it.get("guid") == "88888888-EVICTED")
+        assert nm_item["isCloudEvicted"] is False, f"Expected non-master derivative to resolve: {nm_item}"
+        assert ev_item["isCloudEvicted"] is True and ev_item["canUnpurge"] is False, f"Evicted photos_library asset without .icloud stub must have canUnpurge=False: {ev_item}"
+        ev_sync = test_eng.sync_icloud_photos(limit=10, offset=0)
+        assert ev_sync["failed"] == 0 and ev_sync["status"] == "ok", f"Evicted non-stub photos_library item must not stall/fail batch sync: {ev_sync}"
+        test_eng._last_photos_nudge_ts = 0.0
+        nudge_recent_plist = os.path.join(photos_test_root, "resources", "cpl", "cloudsync.noindex", "syncstatus.plist")
+        fresh_now_dt = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        with open(nudge_recent_plist, "wb") as spf:
+            plistlib.dump({"lastSyncDate": fresh_now_dt, "cloudAssetCountPerType": {"image": 10, "video": 2}}, spf)
+        nudge_skip = test_eng._nudge_cloudphotod(reason="selftest_fresh", min_sync_age=30.0)
+        if sys.platform == "darwin":
+            assert nudge_skip.get("nudged") is False and nudge_skip.get("skippedReason") == "recently_synced", f"Expected recently_synced skip: {nudge_skip}"
+        else:
+            assert nudge_skip.get("nudged") is False and nudge_skip.get("skippedReason") == "non_darwin", f"Unexpected non-darwin nudge result: {nudge_skip}"
     finally:
         srv.shutdown()
         srv.server_close()
@@ -8117,7 +9312,7 @@ def run_status_or_doctor(engine: BluePillEngine, mode: str, as_json: bool) -> in
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="bluepill-server",
-        description="BluePill Headless macOS Relay Server + Web UI (v1.2.1)",
+        description="BluePill Headless macOS Relay Server + Web UI (v1.2.2)",
     )
     parser.add_argument(
         "command",

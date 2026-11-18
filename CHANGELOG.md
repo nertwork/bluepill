@@ -2,6 +2,13 @@
 
 All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this file.
 
+## [1.2.2] - 2026-11-18
+
+### Fixed
+- **iCloud Photos Daemon Auto-Heal & Live Watcher Push:** Added `cloudsync.noindex/syncstatus.plist` inspection (with `public.image` / `public.movie` UTI splits), time-separated high-CPU wedge detection, automatic `cloudd`/`photolibraryd`/`cloudphotod` healing, lightweight `_nudge_cloudphotod()` on `Refresh` (`?refresh=1`), `Sync All`, and 120s background watchdog intervals, plus Socket.IO `icloud-photos-updated` push delivery across both Qt6 and Web UI clients.
+- **Native Video Support & HTTP Range Streaming:** Added iCloud Photos library video classification, duration badges, derivative poster thumbnails (`?preview=1`), `If-Range` / chunked HTTP `206 Partial Content` streaming, and native video playback in Qt6 & Web UI.
+- **Fast Batch Sync & Thumbnail Retry Resilience:** Stopped calling the Messages unpurge helper on non-stub `Photos.sqlite` assets during `Sync All`, added brief server-side materialization retries for brand-new photos, and added Qt tile error retries for transient download races.
+
 ## [1.2.1] - 2026-11-16
 
 ### Fixed
