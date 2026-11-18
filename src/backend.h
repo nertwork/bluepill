@@ -113,6 +113,14 @@ class Backend : public QObject {
     Q_PROPERTY(bool recordingVoice READ recordingVoice NOTIFY voiceRecordingChanged)
     Q_PROPERTY(int voiceRecordingSeconds READ voiceRecordingSeconds NOTIFY voiceRecordingChanged)
     Q_PROPERTY(QVariantList voiceRecordingWaveform READ voiceRecordingWaveform NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(bool hasRecordedVoiceMemo READ hasRecordedVoiceMemo NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(int recordedVoiceDurationSeconds READ recordedVoiceDurationSeconds NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(QVariantList recordedVoiceWaveform READ recordedVoiceWaveform NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(QString recordedVoicePath READ recordedVoicePath NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(QVariantList audioInputDevices READ audioInputDevices NOTIFY audioDevicesChanged)
+    Q_PROPERTY(QVariantList audioOutputDevices READ audioOutputDevices NOTIFY audioDevicesChanged)
+    Q_PROPERTY(QString selectedAudioInputDevice READ selectedAudioInputDevice WRITE setSelectedAudioInputDevice NOTIFY audioDevicesChanged)
+    Q_PROPERTY(QString selectedAudioOutputDevice READ selectedAudioOutputDevice WRITE setSelectedAudioOutputDevice NOTIFY audioDevicesChanged)
     Q_PROPERTY(QVariantList scheduledMessages READ scheduledMessages NOTIFY scheduledMessagesChanged)
     Q_PROPERTY(QStringList selectedChatParticipants READ selectedChatParticipants NOTIFY selectedChatChanged)
     Q_PROPERTY(QVariantList icloudNotes READ icloudNotes NOTIFY icloudNotesChanged)
@@ -183,6 +191,16 @@ public:
     bool recordingVoice() const { return m_recordingVoice; }
     int voiceRecordingSeconds() const { return m_voiceRecordingSeconds; }
     QVariantList voiceRecordingWaveform() const { return m_voiceRecordingWaveform; }
+    bool hasRecordedVoiceMemo() const { return m_hasRecordedVoiceMemo; }
+    int recordedVoiceDurationSeconds() const { return m_recordedVoiceDurationSeconds; }
+    QVariantList recordedVoiceWaveform() const { return m_recordedVoiceWaveform; }
+    QString recordedVoicePath() const { return m_recordedVoicePath; }
+    QVariantList audioInputDevices() const { return m_audioInputDevices; }
+    QVariantList audioOutputDevices() const { return m_audioOutputDevices; }
+    QString selectedAudioInputDevice() const { return m_selectedAudioInputDevice; }
+    QString selectedAudioOutputDevice() const { return m_selectedAudioOutputDevice; }
+    void setSelectedAudioInputDevice(const QString &deviceId);
+    void setSelectedAudioOutputDevice(const QString &deviceId);
     QVariantList scheduledMessages() const { return m_scheduledMessages; }
     QStringList selectedChatParticipants() const;
     QVariantList icloudNotes() const { return m_icloudNotes; }
@@ -294,8 +312,12 @@ public:
     Q_INVOKABLE void toggleAudioPlayback(const QString &attachmentGuid, const QString &sourceUrl = QString());
     Q_INVOKABLE void seekAudioPlayback(const QString &attachmentGuid, double ratio);
     Q_INVOKABLE void startVoiceRecording();
+    Q_INVOKABLE void stopVoiceRecordingForPreview();
+    Q_INVOKABLE void togglePreviewRecordedVoiceMemo();
+    Q_INVOKABLE void sendRecordedVoiceMemo();
     Q_INVOKABLE void stopAndSendVoiceRecording();
     Q_INVOKABLE void cancelVoiceRecording();
+    Q_INVOKABLE void refreshAudioDevices();
     Q_INVOKABLE void sendMessageWithEffect(const QString &text, const QString &effectId);
     Q_INVOKABLE void scheduleMessage(const QString &text, qint64 sendAtMs);
     Q_INVOKABLE void cancelScheduledMessage(const QString &scheduleId);
@@ -376,6 +398,13 @@ public:
     static bool isImageMimeOrExt(const QString &mime, const QString &fileName);
     static QJsonArray deduplicateMessageAttachments(const QJsonArray &atts);
     static bool isMessageDeletedOrRetracted(const QJsonObject &m);
+    static QString computeOutgoingReceiptText(
+        const QJsonObject &msgObj,
+        bool hasLaterIncomingReply = false,
+        qint64 nowMs = 0);
+    static int wavDurationSeconds(const QString &filePath);
+    static QVariantList computeAudioFileWaveformBars(const QString &filePath, const QString &seed, int count = 28);
+    static QVariantList parsePactlDeviceList(const QByteArray &rawOutput, bool filterMonitorSources);
     static QVariantList buildMessageListFromApi(
         const QJsonArray &rawMessagesDesc,
         const QHash<QString, QString> &contactNames,
@@ -411,6 +440,9 @@ public:
     QString socketSid() const { return m_socketSid; }
     QString resolveCanonicalChatGuidForTest(const QString &chatGuid) const { return resolveCanonicalChatGuid(chatGuid); }
     QString resolveActiveSendChatGuidForTest(const QString &chatGuid) const { return resolveActiveSendChatGuid(chatGuid); }
+    QString currentVoiceRecordingPathForTest() const { return m_currentVoiceRecordingPath; }
+    int pendingDeliveryCountForTest() const { return m_pendingDeliveryMessages.size(); }
+    void checkPendingDeliveryStatusesForTest() { checkPendingDeliveryStatuses(); }
 
     // Headless CLI entrypoints
     int runCliStatus(bool asJson);
@@ -442,6 +474,7 @@ signals:
     void syncingHistoryChanged();
     void audioPlaybackChanged();
     void voiceRecordingChanged();
+    void audioDevicesChanged();
     void scheduledMessagesChanged();
 
     void toastMessage(const QString &text);
@@ -488,6 +521,13 @@ private:
     QString computeGroupMergeKey(const ChatEntry &entry) const;
     void unifySiblingChats(bool *selectedMigrated = nullptr, bool *chatsMerged = nullptr);
     void checkPendingDeliveryStatuses();
+    void stopAudioPlaybackProcess();
+    void startLocalAudioProcess(const QString &localFile, quint64 playbackGen);
+    void stopVoiceRecordProcess(bool waitForFlush);
+    QString finalizeCapturedVoiceWav(const QString &recPath);
+    void clearStagedVoiceMemo(bool removeFile);
+    void saveAudioDeviceConfig() const;
+    static QString formatAudioDuration(int totalSeconds);
     void rebuildChatPresentation(ChatEntry &entry) const;
     void sortChats();
     bool shouldNotifyForIncomingMessage(const QJsonObject &m, const QString &chatGuid, qint64 dateCreated, qint64 rowId) const;
@@ -611,6 +651,8 @@ private:
     QTimer m_audioPlaybackTimer;
     int m_audioPlaybackElapsedMs = 0;
     int m_audioPlaybackDurationMs = 15000;
+    quint64 m_audioPlaybackGen = 0;
+    QString m_currentAudioLocalFile;
     QPointer<QProcess> m_audioProcess;
 
     bool m_recordingVoice = false;
@@ -618,6 +660,15 @@ private:
     QVariantList m_voiceRecordingWaveform;
     QTimer m_voiceRecordingTimer;
     QString m_currentVoiceRecordingPath;
+    bool m_hasRecordedVoiceMemo = false;
+    int m_recordedVoiceDurationSeconds = 0;
+    QVariantList m_recordedVoiceWaveform;
+    QString m_recordedVoicePath;
+    QPointer<QProcess> m_voiceRecordProcess;
+    QVariantList m_audioInputDevices;
+    QVariantList m_audioOutputDevices;
+    QString m_selectedAudioInputDevice;
+    QString m_selectedAudioOutputDevice;
 
     QVariantList m_scheduledMessages;
     QVariantList m_icloudNotes;

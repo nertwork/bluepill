@@ -4900,7 +4900,7 @@ private slots:
             {QStringLiteral("isSent"), false},
             {QStringLiteral("isDelivered"), false},
             {QStringLiteral("error"), 0},
-            {QStringLiteral("dateCreated"), 1794350000000LL},
+            {QStringLiteral("dateCreated"), QDateTime::currentMSecsSinceEpoch()},
             {QStringLiteral("chats"), QJsonArray{chatObj}}
         };
         b.ingestMessagesForTest(QJsonArray{pendingReply}, false);
@@ -4921,6 +4921,477 @@ private slots:
         QCOMPARE(msgVm.value(QStringLiteral("errorCode")).toInt(), 4);
         QCOMPARE(msgVm.value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
         QVERIFY(!toastSpy.isEmpty());
+    }
+
+    void testStuckSendingRecoveryAndBatchedQuery() {
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        QJsonObject freshSending{
+            {QStringLiteral("guid"), QStringLiteral("g-fresh")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), false},
+            {QStringLiteral("isDelivered"), false},
+            {QStringLiteral("error"), 0},
+            {QStringLiteral("dateCreated"), nowMs - 5000}
+        };
+        QCOMPARE(Backend::computeOutgoingReceiptText(freshSending, false, nowMs), QStringLiteral("Sending..."));
+        QCOMPARE(Backend::computeOutgoingReceiptText(freshSending, true, nowMs), QStringLiteral("Sent"));
+
+        QJsonObject staleSending = freshSending;
+        staleSending.insert(QStringLiteral("guid"), QStringLiteral("g-stale"));
+        staleSending.insert(QStringLiteral("dateCreated"), nowMs - 180000);
+        QCOMPARE(Backend::computeOutgoingReceiptText(staleSending, false, nowMs), QStringLiteral("Sent"));
+
+        QJsonObject failedMsg = freshSending;
+        failedMsg.insert(QStringLiteral("error"), 4);
+        QCOMPARE(Backend::computeOutgoingReceiptText(failedMsg, false, nowMs), QStringLiteral("⚠ Not Delivered"));
+
+        QJsonObject noFlagsMsg{{QStringLiteral("guid"), QStringLiteral("g-noflags")}, {QStringLiteral("isFromMe"), true}};
+        QCOMPARE(Backend::computeOutgoingReceiptText(noFlagsMsg, false, nowMs), QStringLiteral("Delivered"));
+
+        // Timeline with outgoing isSent=false followed by incoming reply must render Sent, not Sending...
+        QJsonObject incomingReply{
+            {QStringLiteral("guid"), QStringLiteral("g-reply")},
+            {QStringLiteral("text"), QStringLiteral("Got it!")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), nowMs - 1000}
+        };
+        QJsonObject outBeforeReply = freshSending;
+        outBeforeReply.insert(QStringLiteral("text"), QStringLiteral("Ping"));
+        const QVariantList built = Backend::buildMessageListFromApi(QJsonArray{incomingReply, outBeforeReply}, {}, {});
+        QCOMPARE(built.size(), 2);
+        QCOMPARE(built.first().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sent"));
+
+        // Verify checkPendingDeliveryStatuses batches GUIDs into a single IN (:g0,:g1) query and expires stale items
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = server.serverPort();
+        int queryCount = 0;
+        QString capturedStatement;
+        const QString chatGuid = QStringLiteral("iMessage;-;+15550009999");
+        QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("Batch Test")}, {QStringLiteral("style"), 45}};
+        QJsonObject pendFresh{
+            {QStringLiteral("guid"), QStringLiteral("pend-fresh-1")},
+            {QStringLiteral("text"), QStringLiteral("Fresh pending")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), false},
+            {QStringLiteral("isDelivered"), false},
+            {QStringLiteral("dateCreated"), nowMs - 2000},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        QJsonObject pendFresh2 = pendFresh;
+        pendFresh2.insert(QStringLiteral("guid"), QStringLiteral("pend-fresh-2"));
+        QJsonObject pendStale = pendFresh;
+        pendStale.insert(QStringLiteral("guid"), QStringLiteral("pend-stale-3"));
+        pendStale.insert(QStringLiteral("dateCreated"), nowMs - 180000);
+
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (server.hasPendingConnections()) {
+                QTcpSocket *sock = server.nextPendingConnection();
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, &queryCount, &capturedStatement, pendFresh, pendFresh2]() {
+                    const QByteArray raw = sock->readAll();
+                    if (raw.contains("POST /api/v1/message/query")) {
+                        const int sep = raw.indexOf("\r\n\r\n");
+                        const QJsonObject body = QJsonDocument::fromJson(raw.mid(sep + 4)).object();
+                        const QJsonArray where = body.value(QStringLiteral("where")).toArray();
+                        const QString stmt = where.isEmpty() ? QString() : where.first().toObject().value(QStringLiteral("statement")).toString();
+                        if (stmt.contains(QStringLiteral("message.guid"))) {
+                            ++queryCount;
+                            capturedStatement = stmt;
+                            const QJsonArray respData{
+                                QJsonObject{{QStringLiteral("guid"), QStringLiteral("pend-fresh-1")}, {QStringLiteral("isFromMe"), true}, {QStringLiteral("isSent"), true}, {QStringLiteral("isDelivered"), true}, {QStringLiteral("dateDelivered"), QDateTime::currentMSecsSinceEpoch()}}
+                            };
+                            const QByteArray json = QJsonDocument(QJsonObject{{QStringLiteral("status"), 200}, {QStringLiteral("data"), respData}}).toJson(QJsonDocument::Compact);
+                            sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        } else {
+                            const QByteArray json = QJsonDocument(QJsonObject{{QStringLiteral("status"), 200}, {QStringLiteral("data"), QJsonArray{pendFresh, pendFresh2}}}).toJson(QJsonDocument::Compact);
+                            sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        }
+                        sock->disconnectFromHost();
+                    } else {
+                        const QByteArray json = R"({"status":200,"data":[]})";
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        sock->disconnectFromHost();
+                    }
+                });
+            }
+        });
+
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_batch.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_batch.json")));
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(port), QString(), QStringLiteral("pw"));
+
+        b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+        b.ingestMessagesForTest(QJsonArray{pendFresh, pendFresh2, pendStale}, false);
+        b.selectChat(chatGuid);
+        // pendStale (>120s) is immediately excluded; only pendFresh and pendFresh2 stay tracked
+        QCOMPARE(b.pendingDeliveryCountForTest(), 2);
+
+        b.checkPendingDeliveryStatusesForTest();
+        QTRY_COMPARE_WITH_TIMEOUT(queryCount, 1, 1000);
+        QVERIFY2(capturedStatement.contains(QStringLiteral("message.guid IN (")),
+                 qPrintable(QStringLiteral("Expected batched IN query, got: ") + capturedStatement));
+        // pend-fresh-1 resolved to Delivered from server response, leaving pend-fresh-2
+        QTRY_COMPARE_WITH_TIMEOUT(b.pendingDeliveryCountForTest(), 1, 1000);
+
+        // Once a later incoming reply arrives, pend-fresh-2 expires locally without another network query
+        QJsonObject laterReply{
+            {QStringLiteral("guid"), QStringLiteral("later-reply-batch-1")},
+            {QStringLiteral("text"), QStringLiteral("Reply arrived")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), nowMs},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        b.ingestMessagesForTest(QJsonArray{laterReply}, false);
+        b.checkPendingDeliveryStatusesForTest();
+        QCOMPARE(b.pendingDeliveryCountForTest(), 0);
+        QCOMPARE(queryCount, 1);
+    }
+
+    void testVoiceMemoCapturePreviewCancelAndPlayback() {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = server.serverPort();
+        QByteArray uploadedMultipart;
+        QByteArray downloadableWav;
+        const QString chatGuid = QStringLiteral("iMessage;-;+15550008888");
+        const QJsonObject seedChatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("Voice Test")}, {QStringLiteral("style"), 45}};
+        const QJsonObject seedMsgObj{
+            {QStringLiteral("guid"), QStringLiteral("seed-msg-vm")},
+            {QStringLiteral("text"), QStringLiteral("Hi")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), QDateTime::currentMSecsSinceEpoch() - 10000},
+            {QStringLiteral("chats"), QJsonArray{seedChatObj}}
+        };
+        QJsonObject sentMsgObj;
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (server.hasPendingConnections()) {
+                QTcpSocket *sock = server.nextPendingConnection();
+                auto buf = std::make_shared<QByteArray>();
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, buf, &uploadedMultipart, &downloadableWav, seedChatObj, seedMsgObj, &sentMsgObj]() {
+                    buf->append(sock->readAll());
+                    const int hdrEnd = buf->indexOf("\r\n\r\n");
+                    if (hdrEnd < 0) return;
+                    const QByteArray hdr = buf->left(hdrEnd);
+                    int contentLen = 0;
+                    for (const QByteArray &line : hdr.split('\n')) {
+                        if (line.toLower().startsWith("content-length:")) {
+                            contentLen = line.mid(15).trimmed().toInt();
+                        }
+                    }
+                    if (buf->size() < hdrEnd + 4 + contentLen) return;
+                    if (hdr.startsWith("POST /api/v1/message/attachment")) {
+                        uploadedMultipart = buf->mid(hdrEnd + 4, contentLen);
+                        QJsonObject att{
+                            {QStringLiteral("guid"), QStringLiteral("srv-att-voice-1")},
+                            {QStringLiteral("mimeType"), QStringLiteral("audio/wav")},
+                            {QStringLiteral("transferName"), QStringLiteral("voice_memo_test.wav")},
+                            {QStringLiteral("durationSeconds"), 1},
+                            {QStringLiteral("waveform"), QJsonArray{0.4, 0.8, 0.6}}
+                        };
+                        sentMsgObj = QJsonObject{
+                            {QStringLiteral("guid"), QStringLiteral("srv-msg-voice-1")},
+                            {QStringLiteral("text"), QString()},
+                            {QStringLiteral("isFromMe"), true},
+                            {QStringLiteral("isSent"), true},
+                            {QStringLiteral("isDelivered"), true},
+                            {QStringLiteral("dateCreated"), QDateTime::currentMSecsSinceEpoch()},
+                            {QStringLiteral("attachments"), QJsonArray{att}},
+                            {QStringLiteral("chats"), QJsonArray{seedChatObj}}
+                        };
+                        const QByteArray json = QJsonDocument(QJsonObject{{QStringLiteral("status"), 200}, {QStringLiteral("data"), sentMsgObj}}).toJson(QJsonDocument::Compact);
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        sock->disconnectFromHost();
+                    } else if (hdr.startsWith("POST /api/v1/message/query")) {
+                        QJsonArray arr{seedMsgObj};
+                        if (!sentMsgObj.isEmpty()) arr.prepend(sentMsgObj);
+                        const QByteArray json = QJsonDocument(QJsonObject{{QStringLiteral("status"), 200}, {QStringLiteral("data"), arr}}).toJson(QJsonDocument::Compact);
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        sock->disconnectFromHost();
+                    } else if (hdr.contains("GET /api/v1/attachment/remote-voice-att-1/download")) {
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: " + QByteArray::number(downloadableWav.size()) + "\r\nConnection: close\r\n\r\n" + downloadableWav);
+                        sock->disconnectFromHost();
+                    } else {
+                        const QByteArray json = R"({"status":200,"data":[]})";
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        sock->disconnectFromHost();
+                    }
+                });
+            }
+        });
+
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_vm.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_vm.json")));
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(port), QString(), QStringLiteral("pw"));
+
+        b.ingestChatsMetadataForTest(QJsonArray{seedChatObj});
+        b.ingestMessagesForTest(QJsonArray{seedMsgObj}, false);
+        b.selectChat(chatGuid);
+
+        // 1. Start -> Stop for preview -> Listen -> Cancel discards temp file and stops preview playback
+        b.startVoiceRecording();
+        QVERIFY(b.recordingVoice());
+        b.stopVoiceRecordingForPreview();
+        QVERIFY(!b.recordingVoice());
+        QVERIFY(b.hasRecordedVoiceMemo());
+        QVERIFY(b.recordedVoiceDurationSeconds() >= 1);
+        QCOMPARE(b.recordedVoiceWaveform().size(), 28);
+        const QString stagedPath = b.recordedVoicePath();
+        QVERIFY(QFileInfo::exists(stagedPath));
+        QVERIFY(QFileInfo(stagedPath).size() > 44);
+        QVERIFY(Backend::wavDurationSeconds(stagedPath) >= 1);
+
+        // Read WAV bytes for remote download check later
+        QFile f(stagedPath);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        downloadableWav = f.readAll();
+        f.close();
+
+        b.togglePreviewRecordedVoiceMemo();
+        QCOMPARE(b.playingAudioGuid(), QStringLiteral("voice-memo-preview"));
+        QCOMPARE(b.audioPlaying(), true);
+
+        b.cancelVoiceRecording();
+        QVERIFY(!b.hasRecordedVoiceMemo());
+        QVERIFY(!b.audioPlaying());
+        QVERIFY(!QFileInfo::exists(stagedPath));
+
+        // 2. Start -> Stop for preview -> Send recorded voice memo (no duplicate "Voice Memo" caption!)
+        b.startVoiceRecording();
+        b.stopVoiceRecordingForPreview();
+        QVERIFY(b.hasRecordedVoiceMemo());
+        b.sendRecordedVoiceMemo();
+        QVERIFY(!b.hasRecordedVoiceMemo());
+
+        QTRY_VERIFY_WITH_TIMEOUT(!uploadedMultipart.isEmpty(), 1500);
+        QVERIFY(!uploadedMultipart.contains("name=\"message\""));
+        QTRY_VERIFY_WITH_TIMEOUT(!b.messages().isEmpty() &&
+                                 b.messages().last().toMap().value(QStringLiteral("guid")).toString() == QStringLiteral("srv-msg-voice-1"),
+                                 1500);
+        const QVariantMap sentVm = b.messages().last().toMap();
+        QCOMPARE(sentVm.value(QStringLiteral("receiptText")).toString(), QStringLiteral("Delivered"));
+        QCOMPARE(sentVm.value(QStringLiteral("attachments")).toList().size(), 1);
+        QCOMPARE(sentVm.value(QStringLiteral("fileAttachments")).toList().size(), 1);
+        const QVariantMap sentAtt = sentVm.value(QStringLiteral("attachments")).toList().first().toMap();
+        QCOMPARE(sentAtt.value(QStringLiteral("guid")).toString(), QStringLiteral("srv-att-voice-1"));
+        QCOMPARE(sentAtt.value(QStringLiteral("isAudio")).toBool(), true);
+        QVERIFY(!sentAtt.value(QStringLiteral("localUrl")).toString().isEmpty());
+
+        // 3. Playback of just-sent attachment works immediately, and remote attachment downloads & updates duration
+        b.toggleAudioPlayback(QStringLiteral("srv-att-voice-1"), sentAtt.value(QStringLiteral("sourceUrl")).toString());
+        QCOMPARE(b.playingAudioGuid(), QStringLiteral("srv-att-voice-1"));
+        QCOMPARE(b.audioPlaying(), true);
+        b.toggleAudioPlayback(QStringLiteral("srv-att-voice-1"), sentAtt.value(QStringLiteral("sourceUrl")).toString());
+        QCOMPARE(b.audioPlaying(), false);
+
+        b.toggleAudioPlayback(QStringLiteral("remote-voice-att-1"), QStringLiteral("/api/v1/attachment/remote-voice-att-1/download"));
+        QCOMPARE(b.playingAudioGuid(), QStringLiteral("remote-voice-att-1"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.audioDurationText(), QStringLiteral("0:01"), 1500);
+    }
+
+    void testAudioDeviceSelectionAndPersistence() {
+        const QByteArray sampleSources =
+            "41\talsa_output.pci-0000_00_1f.3.analog-stereo.monitor\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED\n"
+            "42\talsa_input.usb-Blue_Microphones-00.mono-fallback\tPipeWire\ts16le 1ch 48000Hz\tRUNNING\n";
+        const QVariantList filtered = Backend::parsePactlDeviceList(sampleSources, true);
+        QCOMPARE(filtered.size(), 1);
+        QCOMPARE(filtered.first().toMap().value(QStringLiteral("id")).toString(),
+                 QStringLiteral("alsa_input.usb-Blue_Microphones-00.mono-fallback"));
+
+        const QVariantList unfiltered = Backend::parsePactlDeviceList(sampleSources, false);
+        QCOMPARE(unfiltered.size(), 2);
+
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString cfgPath = tempDir.filePath(QStringLiteral("config_audio.json"));
+        {
+            Backend b1(false);
+            b1.setConfigFilePath(cfgPath);
+            b1.setSelectedAudioInputDevice(QStringLiteral("alsa_input.usb-mic"));
+            b1.setSelectedAudioOutputDevice(QStringLiteral("alsa_output.headphones"));
+        }
+        Backend b2(false);
+        b2.setConfigFilePath(cfgPath);
+        b2.loadCredentials();
+        QCOMPARE(b2.selectedAudioInputDevice(), QStringLiteral("alsa_input.usb-mic"));
+        QCOMPARE(b2.selectedAudioOutputDevice(), QStringLiteral("alsa_output.headphones"));
+    }
+
+    void testQmlComposerStagingAndVoiceMemoUiControls() {
+        QFile qmlFile(QStringLiteral(":/Main.qml"));
+        if (!qmlFile.exists()) qmlFile.setFileName(QStringLiteral("../../src/Main.qml"));
+        if (!qmlFile.exists()) qmlFile.setFileName(QStringLiteral("../src/Main.qml"));
+        QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QString qml = QString::fromUtf8(qmlFile.readAll());
+
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"stagedAttachmentBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"voiceMemoBar\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"voiceMemoPreviewPlayBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"voiceMemoCancelBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"voiceMemoStopPreviewBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"voiceMemoSendBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"audioInputDeviceCombo\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"audioOutputDeviceCombo\"")));
+        QVERIFY(qml.contains(QStringLiteral("backend.recordingVoice || backend.hasRecordedVoiceMemo")));
+        QVERIFY(qml.contains(QStringLiteral("root.stagedAttachmentPath = pastedPath")));
+    }
+
+    void testDuplicateOptimisticMessagePrevented() {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = server.serverPort();
+        const QString chatGuid = QStringLiteral("iMessage;-;+15550007777");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("Dedup Test")}, {QStringLiteral("style"), 45}};
+        QTcpSocket *pendingSendSocket = nullptr;
+        QString pendingTempGuid;
+        QByteArray pendingBody;
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (server.hasPendingConnections()) {
+                QTcpSocket *sock = server.nextPendingConnection();
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, &pendingSendSocket, &pendingTempGuid, &pendingBody]() {
+                    const QByteArray raw = sock->readAll();
+                    if (raw.contains("POST /api/v1/message/text")) {
+                        pendingSendSocket = sock;
+                        pendingBody = raw.mid(raw.indexOf("\r\n\r\n") + 4);
+                        pendingTempGuid = QJsonDocument::fromJson(pendingBody).object().value(QStringLiteral("tempGuid")).toString();
+                    } else {
+                        const QByteArray json = R"({"status":200,"data":[]})";
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        sock->disconnectFromHost();
+                    }
+                });
+            }
+        });
+
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_dup.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_dup.json")));
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(port), QString(), QStringLiteral("pw"));
+        b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+        b.selectChat(chatGuid);
+
+        b.sendMessage(chatGuid, QStringLiteral("Single send check"));
+        QTRY_VERIFY_WITH_TIMEOUT(pendingSendSocket != nullptr, 1500);
+        QCOMPARE(b.messages().size(), 1);
+
+        // Simulate SocketIO / pollDelta delivering realGuid while tempGuid is already in m_messages,
+        // BEFORE the HTTP /api/v1/message/text response arrives
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        QJsonObject realMsg{
+            {QStringLiteral("guid"), QStringLiteral("real-dedup-guid-1")},
+            {QStringLiteral("tempGuid"), pendingTempGuid},
+            {QStringLiteral("text"), QStringLiteral("Single send check")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), true},
+            {QStringLiteral("isDelivered"), true},
+            {QStringLiteral("dateCreated"), nowMs},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        b.ingestMessagesForTest(QJsonArray{realMsg}, false);
+        QCOMPARE(b.messages().size(), 1);
+        QCOMPARE(b.messages().first().toMap().value(QStringLiteral("guid")).toString(), QStringLiteral("real-dedup-guid-1"));
+
+        // Now complete the delayed HTTP response with the same realGuid
+        const QByteArray json = QJsonDocument(QJsonObject{{QStringLiteral("status"), 200}, {QStringLiteral("data"), realMsg}}).toJson(QJsonDocument::Compact);
+        pendingSendSocket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+        pendingSendSocket->disconnectFromHost();
+
+        QTRY_COMPARE_WITH_TIMEOUT(b.messages().first().toMap().value(QStringLiteral("receiptText")).toString(),
+                                  QStringLiteral("Delivered"), 1500);
+        QCOMPARE(b.messages().size(), 1);
+    }
+
+    void testQmlPhotosAndPhotoViewerLayoutNoClipping() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend backend(false);
+        backend.setStateFilePath(tempDir.filePath(QStringLiteral("state_ui.json")));
+        backend.setConfigFilePath(tempDir.filePath(QStringLiteral("config_ui.json")));
+        const QString chatGuid = QStringLiteral("iMessage;-;+15550006666");
+        backend.ingestChatsMetadataForTest(QJsonArray{
+            QJsonObject{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("Viewer Chat")}, {QStringLiteral("style"), 45}}
+        });
+        backend.selectChat(chatGuid);
+
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.setOutputWarningsToStandardError(false);
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+
+        auto *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win != nullptr);
+        win->setWidth(640);
+        win->setHeight(520);
+        QCoreApplication::processEvents();
+
+        auto *photosGrid = win->findChild<QQuickItem *>(QStringLiteral("photosGridView"));
+        QVERIFY(photosGrid != nullptr);
+        QVERIFY(photosGrid->property("cellWidth").toInt() >= 172);
+        QVERIFY(photosGrid->property("cellHeight").toInt() >= 234);
+
+        // Verify openPhotoViewer preserves sourceUrl and photoViewerTopBar controls never clip even at 640px window width
+        QVariantList items;
+        items.append(QVariantMap{
+            {QStringLiteral("guid"), QStringLiteral("att-view-1")},
+            {QStringLiteral("name"), QStringLiteral("Very_Long_Photo_Filename_From_Conversation_Attachment_2026_Test.jpg")},
+            {QStringLiteral("sourceUrl"), QStringLiteral("http://127.0.0.1:1234/api/v1/attachment/att-view-1/download")},
+            {QStringLiteral("isCloudEvicted"), false}
+        });
+        items.append(QVariantMap{
+            {QStringLiteral("guid"), QStringLiteral("att-view-2")},
+            {QStringLiteral("name"), QStringLiteral("Second.jpg")},
+            {QStringLiteral("localUrl"), QStringLiteral("file:///tmp/nonexistent-second.jpg")},
+            {QStringLiteral("isCloudEvicted"), false}
+        });
+        QMetaObject::invokeMethod(win, "openPhotoViewer", Q_ARG(QVariant, QVariant::fromValue(items)), Q_ARG(QVariant, 0));
+        QCoreApplication::processEvents();
+
+        QCOMPARE(win->property("showPhotoViewer").toBool(), true);
+        auto *card = win->findChild<QQuickItem *>(QStringLiteral("photoViewerCard"));
+        auto *sendBtn = win->findChild<QQuickItem *>(QStringLiteral("photoViewerSendBtn"));
+        auto *fsBtn = win->findChild<QQuickItem *>(QStringLiteral("photoViewerFullScreenBtn"));
+        auto *fullImg = win->findChild<QQuickItem *>(QStringLiteral("fullPhotoImage"));
+        QVERIFY(card != nullptr);
+        QVERIFY(sendBtn != nullptr);
+        QVERIFY(fsBtn != nullptr);
+        QVERIFY(fullImg != nullptr);
+        QTRY_VERIFY_WITH_TIMEOUT(card->width() >= 360 && card->width() <= win->width(), 1000);
+        QCOMPARE(sendBtn->isVisible(), true);
+        QVERIFY(sendBtn->width() > 16);
+        QVERIFY(fsBtn->x() + fsBtn->width() <= card->width());
+        QVERIFY(fullImg->property("source").toUrl().toString().contains(QStringLiteral("att-view-1")));
+
+        // Panning MouseArea must sit on photoCanvasArea (parent of fullPhotoImage), not inside fullPhotoImage
+        QVERIFY(fullImg->parentItem() != nullptr);
+        bool hasCanvasMouseArea = false;
+        for (QQuickItem *ch : fullImg->parentItem()->childItems()) {
+            if (ch && ch->inherits("QQuickMouseArea")) {
+                hasCanvasMouseArea = true;
+                break;
+            }
+        }
+        QVERIFY(hasCanvasMouseArea);
+
+        // Also check QML string guards for card send button & header minimumWidth
+        QFile qmlFile(QStringLiteral(":/Main.qml"));
+        if (!qmlFile.exists()) qmlFile.setFileName(QStringLiteral("../src/Main.qml"));
+        QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QString qml = QString::fromUtf8(qmlFile.readAll());
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photoCardSendBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"photoViewerSendBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("Layout.minimumWidth: 40")));
     }
 
 };

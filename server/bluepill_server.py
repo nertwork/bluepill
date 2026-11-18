@@ -2669,6 +2669,23 @@ class BluePillEngine:
                         join_chat = True
                     sub_parts = re.split(r"\s+AND\s+", stmt, flags=re.IGNORECASE)
                     for sp in sub_parts:
+                        m_in = re.match(
+                            r"^\s*([a-zA-Z0-9_.]+)\s+IN\s*\(([^)]+)\)\s*$",
+                            sp.strip(),
+                            flags=re.IGNORECASE,
+                        )
+                        if m_in and m_in.group(1) in allowed_cols:
+                            arg_names = [
+                                a.strip()[1:]
+                                for a in m_in.group(2).split(",")
+                                if a.strip().startswith(":")
+                            ]
+                            vals = [args[an] for an in arg_names if an in args]
+                            if vals:
+                                ph = ",".join("?" for _ in vals)
+                                clauses.append(f"{allowed_cols[m_in.group(1)]} IN ({ph})")
+                                params.extend(vals)
+                                continue
                         m = re.match(
                             r"^\s*([a-zA-Z0-9_.]+)\s*(=|>|>=|<|<=)\s*:([a-zA-Z0-9_]+)\s*$",
                             sp.strip(),
@@ -3257,13 +3274,13 @@ class BluePillEngine:
             helper_guid=helper_guid,
             expected_text=message,
             require_attachment=False,
-            timeout_s=2.5 if (sent and os.path.exists(self.db_path)) else 0.05,
+            timeout_s=(0.6 if helper_guid else 1.2) if (sent and os.path.exists(self.db_path)) else 0.05,
         )
         # Brief settle window if chat.db row just inserted with isSent=0,error=0 so immediate carrier rejections surface synchronously
         if db_msg is not None and os.path.exists(self.db_path):
             rid = int(db_msg.get("originalROWID") or 0)
             if rid > 0 and int(db_msg.get("error") or 0) == 0 and not db_msg.get("isSent"):
-                settle_deadline = time.time() + 0.35
+                settle_deadline = time.time() + (0.2 if helper_guid else 0.3)
                 while time.time() < settle_deadline:
                     time.sleep(0.07)
                     try:
@@ -3398,10 +3415,47 @@ class BluePillEngine:
             f.write(att_bytes)
 
         mime_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+        ext_lower = os.path.splitext(safe_name)[1].lower()
+        if mime_type == "application/octet-stream":
+            ext_mime_map = {
+                ".wav": "audio/wav",
+                ".caf": "audio/x-caf",
+                ".m4a": "audio/mp4",
+                ".aac": "audio/aac",
+                ".mp3": "audio/mpeg",
+                ".ogg": "audio/ogg",
+                ".opus": "audio/opus",
+                ".flac": "audio/flac",
+                ".amr": "audio/amr",
+            }
+            mime_type = ext_mime_map.get(ext_lower, mime_type)
+
+        is_aud_att = is_audio_attachment(mime_type, safe_name)
+        helper_file_path = abs_file_path
+        if is_aud_att and sys.platform == "darwin" and ext_lower == ".wav":
+            caf_path = os.path.join(target_dir, os.path.splitext(safe_name)[0] + ".caf")
+            m4a_path = os.path.join(target_dir, os.path.splitext(safe_name)[0] + ".m4a")
+            for fmt_flag, out_path, out_mime in (
+                ("caff", caf_path, "audio/x-caf"),
+                ("m4af", m4a_path, "audio/mp4"),
+            ):
+                try:
+                    conv = subprocess.run(
+                        ["afconvert", "-f", fmt_flag, "-d", "aac", abs_file_path, out_path],
+                        capture_output=True,
+                        timeout=15,
+                    )
+                    if conv.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                        helper_file_path = out_path
+                        mime_type = out_mime
+                        break
+                except Exception:
+                    pass
+
         synth_att_guid = f"att-{folder_uuid}"
-        self._outbound_attachments[synth_att_guid] = (abs_file_path, mime_type)
+        self._outbound_attachments[synth_att_guid] = (helper_file_path, mime_type)
         if temp_guid:
-            self._outbound_attachments[temp_guid] = (abs_file_path, mime_type)
+            self._outbound_attachments[temp_guid] = (helper_file_path, mime_type)
 
         pre_max_rowid = self._get_max_message_rowid()
         sent = False
@@ -3413,8 +3467,8 @@ class BluePillEngine:
                 "send-attachment",
                 {
                     "chatGuid": chat_guid,
-                    "filePath": abs_file_path,
-                    "isAudioMessage": 0,
+                    "filePath": helper_file_path,
+                    "isAudioMessage": 1 if is_aud_att else 0,
                     "attributedBody": None,
                     "subject": None,
                     "effectId": None,
@@ -3450,11 +3504,11 @@ class BluePillEngine:
                 temp_guid=temp_guid,
                 helper_guid=helper_guid,
                 require_attachment=True,
-                timeout_s=1.8,
+                timeout_s=0.6 if helper_guid else 1.2,
             )
 
-        if (not sent or (db_msg is None and not helper_guid)) and sys.platform == "darwin" and os.path.exists(self.db_path):
-            as_sent = self._send_via_applescript(chat_guid, caption, file_path=abs_file_path)
+        if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
+            as_sent = self._send_via_applescript(chat_guid, caption, file_path=helper_file_path)
             if as_sent:
                 sent = True
                 used_method = "apple-script"
@@ -3464,10 +3518,9 @@ class BluePillEngine:
                         chat_guid=chat_guid,
                         temp_guid=temp_guid,
                         require_attachment=True,
-                        timeout_s=3.0,
+                        timeout_s=1.8,
                     )
 
-        is_aud_att = is_audio_attachment(mime_type, safe_name)
         synth_att_obj: Dict[str, Any] = {
             "originalROWID": 1,
             "guid": synth_att_guid,
@@ -3491,13 +3544,23 @@ class BluePillEngine:
         elapsed_ms = int((time.time() - t0) * 1000)
         if db_msg is not None:
             db_msg["tempGuid"] = temp_guid
+            if is_aud_att:
+                db_msg["isAudioMessage"] = True
             if not db_msg.get("attachments"):
                 db_msg["attachments"] = [synth_att_obj]
             else:
                 for att in db_msg["attachments"]:
                     ag = str(att.get("guid") or "")
                     if ag:
-                        self._outbound_attachments[ag] = (abs_file_path, mime_type)
+                        self._outbound_attachments[ag] = (helper_file_path, mime_type)
+                    if is_aud_att:
+                        att["isAudio"] = True
+                        if not att.get("waveform") or not att.get("durationSeconds"):
+                            bars, dur = compute_audio_waveform(abs_file_path, seed_key=ag or synth_att_guid)
+                            if not att.get("waveform"):
+                                att["waveform"] = bars
+                            if not att.get("durationSeconds"):
+                                att["durationSeconds"] = dur
             self._register_tracked_outgoing(db_msg)
             self.logger.info(
                 "[send_attachment] chat=%s tempGuid=%s file=%s bytes=%d method=%s guid=%s rowid=%s elapsed_ms=%d",
@@ -3541,6 +3604,7 @@ class BluePillEngine:
             "handle": None,
             "chats": [{"guid": chat_guid}],
             "attachments": [synth_att_obj],
+            "isAudioMessage": is_aud_att,
             "error": 0 if (sent or sys.platform != "darwin") else 4,
             "dateCreated": now_ms,
             "dateRead": 0,
@@ -8537,6 +8601,78 @@ def run_selftest(engine: BluePillEngine) -> int:
         ) as dl_resp:
             dl_bytes = dl_resp.read()
         assert dl_bytes == png_bytes, "Downloaded attachment bytes mismatch"
+
+        # Verify WAV audio attachment upload produces isAudio=True, waveform, durationSeconds, and audible download
+        wav_pcm = b"\x00\x10\x00\x20" * 8000
+        wav_bytes = (
+            b"RIFF"
+            + struct.pack("<I", 36 + len(wav_pcm))
+            + b"WAVEfmt "
+            + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16)
+            + b"data"
+            + struct.pack("<I", len(wav_pcm))
+            + wav_pcm
+        )
+        wav_parts = [
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"chatGuid\"\r\n\r\niMessage;-;+15550001111\r\n".encode("utf-8"),
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"tempGuid\"\r\n\r\ntemp-att-wav-1\r\n".encode("utf-8"),
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nvoice_memo.wav\r\n".encode("utf-8"),
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"voice_memo.wav\"\r\nContent-Type: audio/wav\r\n\r\n".encode("utf-8")
+            + wav_bytes
+            + f"\r\n--{boundary}--\r\n".encode("utf-8"),
+        ]
+        wav_req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/message/attachment?password=selftest-secret",
+            data=b"".join(wav_parts),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(wav_req, timeout=5.0) as wresp:
+            wav_json = json.loads(wresp.read().decode("utf-8"))
+        assert wav_json["status"] == 200, f"WAV upload failed: {wav_json}"
+        assert wav_json["data"].get("isAudioMessage") is True, f"WAV missing isAudioMessage=True: {wav_json['data']}"
+        wav_att = wav_json["data"]["attachments"][0]
+        assert wav_att.get("isAudio") is True, f"WAV attachment missing isAudio=True: {wav_att}"
+        assert len(wav_att.get("waveform") or []) == 28, f"WAV missing waveform: {wav_att}"
+        assert wav_att.get("durationSeconds", 0) >= 1, f"WAV missing durationSeconds: {wav_att}"
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/v1/attachment/{wav_att['guid']}/download?password=selftest-secret",
+            timeout=5.0,
+        ) as wdl:
+            assert wdl.read() == wav_bytes, "Downloaded WAV attachment bytes mismatch"
+
+        # Verify query_messages IN (:g0,:g1) batching against an ephemeral SQLite chat.db
+        tmp_db_fd, tmp_db_path = tempfile.mkstemp(prefix="bp_selftest_", suffix=".db")
+        os.close(tmp_db_fd)
+        try:
+            db_conn = sqlite3.connect(tmp_db_path)
+            db_conn.executescript(
+                """
+                CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, display_name TEXT, group_id TEXT, original_group_id TEXT, service_name TEXT, is_archived INTEGER, last_read_message_timestamp INTEGER, properties BLOB);
+                CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT, country TEXT);
+                CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB, subject TEXT, handle_id INTEGER, error INTEGER, date INTEGER, date_read INTEGER, date_delivered INTEGER, is_from_me INTEGER, is_read INTEGER, is_delivered INTEGER, is_sent INTEGER, item_type INTEGER, service TEXT, date_edited INTEGER, date_retracted INTEGER, expressive_send_style_id TEXT, associated_message_guid TEXT, associated_message_type INTEGER, associated_message_emoji TEXT, reply_to_guid TEXT, thread_originator_guid TEXT, thread_originator_part TEXT, was_delivered_quietly INTEGER, did_notify_recipient INTEGER, has_dd_results INTEGER, is_audio_message INTEGER, is_archive INTEGER, other_handle INTEGER, group_title TEXT, group_action_type INTEGER, cache_roomnames TEXT, cache_has_attachments INTEGER);
+                CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER, message_date INTEGER);
+                CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, guid TEXT, original_guid TEXT, created_date INTEGER, uti TEXT, mime_type TEXT, transfer_name TEXT, total_bytes INTEGER, transfer_state INTEGER, is_outgoing INTEGER, hide_attachment INTEGER, is_sticker INTEGER, filename TEXT);
+                CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+                INSERT INTO chat VALUES (1, 'iMessage;-;+15550002222', '+15550002222', 45, '', '', '', 'iMessage', 0, 0, NULL);
+                INSERT INTO message VALUES (10, 'msg-batch-a', 'alpha', NULL, '', 0, 0, 700000000000000000, 0, 0, 1, 1, 1, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);
+                INSERT INTO message VALUES (11, 'msg-batch-b', 'beta', NULL, '', 0, 0, 700000001000000000, 0, 0, 1, 1, 0, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);
+                INSERT INTO message VALUES (12, 'msg-batch-c', 'gamma', NULL, '', 0, 0, 700000002000000000, 0, 0, 1, 1, 0, 0, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);
+                INSERT INTO chat_message_join VALUES (1, 10, 700000000000000000), (1, 11, 700000001000000000), (1, 12, 700000002000000000);
+                """
+            )
+            db_conn.commit()
+            db_conn.close()
+            db_eng = BluePillEngine(db_path=tmp_db_path, password="p", enable_background_daemons=False)
+            batched = db_eng.query_messages({
+                "limit": 10,
+                "where": [{"statement": "message.guid IN (:g0,:g1)", "args": {"g0": "msg-batch-a", "g1": "msg-batch-c"}}],
+            })
+            batched_guids = {m["guid"] for m in batched}
+            assert batched_guids == {"msg-batch-a", "msg-batch-c"}, f"IN query mismatch: {batched_guids}"
+        finally:
+            if os.path.exists(tmp_db_path):
+                os.remove(tmp_db_path)
 
         del_req = urllib.request.Request(
             f"http://127.0.0.1:{port}/api/v1/chat/iMessage%3B-%3B%2B15550001111?password=selftest-secret",
