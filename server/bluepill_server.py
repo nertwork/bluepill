@@ -7350,7 +7350,20 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     let photosRequestSeq = 0;
     let photosSioSid = '';
     let photosSioLoopActive = false;
+    let photosSioGen = 0;
     let photosSioAbort = null;
+    function updatePhotosPagination(targetPage, hasMoreOverride) {
+      const pageCount = Math.max(1, Math.ceil(photosTotal / photosPageSize));
+      photosHasMore = (typeof hasMoreOverride === 'boolean')
+        ? hasMoreOverride
+        : (((targetPage + 1) * photosPageSize) < photosTotal);
+      const metaEl = document.getElementById('photosPageMeta');
+      if (metaEl) metaEl.textContent = 'Page ' + (targetPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
+      const prevBtn = document.getElementById('photosPrevBtn');
+      if (prevBtn) prevBtn.disabled = (targetPage <= 0);
+      const nextBtn = document.getElementById('photosNextBtn');
+      if (nextBtn) nextBtn.disabled = (!photosHasMore && (targetPage + 1) >= pageCount);
+    }
     function formatPhotoDuration(sec) {
       const s = Math.max(0, Math.round(Number(sec) || 0));
       const mins = Math.floor(s / 60);
@@ -7360,81 +7373,94 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     function startPhotosSocketIo() {
       if (photosSioLoopActive) return;
       photosSioLoopActive = true;
+      const myGen = ++photosSioGen;
       (async () => {
-        while (photosSioLoopActive) {
-          try {
-            const modal = document.getElementById('photosModal');
-            if (!modal || modal.style.display === 'none') {
-              photosSioLoopActive = false;
-              break;
-            }
-            photosSioAbort = new AbortController();
-            if (!photosSioSid) {
-              const hs = await fetch(apiUrl('/socket.io?EIO=4&transport=polling'), { signal: photosSioAbort.signal });
-              const hsTxt = await hs.text();
-              if (hsTxt && hsTxt.startsWith('0')) {
-                const hsObj = JSON.parse(hsTxt.slice(1));
-                if (hsObj && hsObj.sid) photosSioSid = hsObj.sid;
+        try {
+          while (photosSioLoopActive && myGen === photosSioGen) {
+            try {
+              const modal = document.getElementById('photosModal');
+              if (!modal || modal.style.display === 'none') {
+                if (myGen === photosSioGen) photosSioLoopActive = false;
+                break;
               }
-              if (photosSioSid) {
-                await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
-                  method: 'POST',
-                  body: '40',
-                  signal: photosSioAbort.signal
-                });
-              }
-            }
-            if (!photosSioSid) {
-              await new Promise(r => setTimeout(r, 2000));
-              continue;
-            }
-            const pr = await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
-              signal: photosSioAbort.signal
-            });
-            if (!pr.ok) {
-              photosSioSid = '';
-              await new Promise(r => setTimeout(r, 1500));
-              continue;
-            }
-            const raw = await pr.text();
-            if (raw) {
-              for (const pkt of raw.split(String.fromCharCode(0x1e))) {
-                if (!pkt) continue;
-                if (pkt === '2') {
+              const sioCtrl = new AbortController();
+              photosSioAbort = sioCtrl;
+              if (!photosSioSid) {
+                const hs = await fetch(apiUrl('/socket.io?EIO=4&transport=polling'), { signal: sioCtrl.signal });
+                if (!photosSioLoopActive || myGen !== photosSioGen) break;
+                const hsTxt = await hs.text();
+                if (!photosSioLoopActive || myGen !== photosSioGen) break;
+                if (hsTxt && hsTxt.startsWith('0')) {
+                  const hsObj = JSON.parse(hsTxt.slice(1));
+                  if (hsObj && hsObj.sid) photosSioSid = hsObj.sid;
+                }
+                if (photosSioSid) {
                   await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
                     method: 'POST',
-                    body: '3',
-                    signal: photosSioAbort.signal
+                    body: '40',
+                    signal: sioCtrl.signal
                   });
-                } else if (pkt.startsWith('42')) {
-                  try {
-                    const arr = JSON.parse(pkt.slice(2));
-                    if (Array.isArray(arr) && arr[0] === 'icloud-photos-updated') {
-                      const evPayload = (arr.length > 1 && arr[1]) ? arr[1] : {};
-                      if (photosPage === 0) {
-                        loadPhotos(0);
-                      } else if (typeof evPayload.total === 'number') {
-                        photosTotal = Number(evPayload.total);
-                        const pageCount = Math.max(1, Math.ceil(photosTotal / photosPageSize));
-                        const metaEl = document.getElementById('photosPageMeta');
-                        if (metaEl) metaEl.textContent = 'Page ' + (photosPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
-                      }
-                    }
-                  } catch (_) {}
+                  if (!photosSioLoopActive || myGen !== photosSioGen) break;
                 }
               }
+              if (!photosSioSid) {
+                await new Promise(r => setTimeout(r, 2000));
+                if (!photosSioLoopActive || myGen !== photosSioGen) break;
+                continue;
+              }
+              const pr = await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
+                signal: sioCtrl.signal
+              });
+              if (!photosSioLoopActive || myGen !== photosSioGen) break;
+              if (!pr.ok) {
+                photosSioSid = '';
+                await new Promise(r => setTimeout(r, 1500));
+                if (!photosSioLoopActive || myGen !== photosSioGen) break;
+                continue;
+              }
+              const raw = await pr.text();
+              if (!photosSioLoopActive || myGen !== photosSioGen) break;
+              if (raw) {
+                for (const pkt of raw.split(String.fromCharCode(0x1e))) {
+                  if (!pkt) continue;
+                  if (pkt === '2') {
+                    await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
+                      method: 'POST',
+                      body: '3',
+                      signal: sioCtrl.signal
+                    });
+                    if (!photosSioLoopActive || myGen !== photosSioGen) break;
+                  } else if (pkt.startsWith('42')) {
+                    try {
+                      const arr = JSON.parse(pkt.slice(2));
+                      if (Array.isArray(arr) && arr[0] === 'icloud-photos-updated') {
+                        const evPayload = (arr.length > 1 && arr[1]) ? arr[1] : {};
+                        if (photosPage === 0) {
+                          loadPhotos(0);
+                        } else if (typeof evPayload.total === 'number') {
+                          photosTotal = Number(evPayload.total);
+                          updatePhotosPagination(photosPage);
+                        }
+                      }
+                    } catch (_) {}
+                  }
+                }
+              }
+              await new Promise(r => setTimeout(r, 1000));
+            } catch (e) {
+              if (!photosSioLoopActive || myGen !== photosSioGen || (e && e.name === 'AbortError')) break;
+              photosSioSid = '';
+              await new Promise(r => setTimeout(r, 2000));
             }
-            await new Promise(r => setTimeout(r, 1000));
-          } catch (e) {
-            if (!photosSioLoopActive || (e && e.name === 'AbortError')) break;
-            photosSioSid = '';
-            await new Promise(r => setTimeout(r, 2000));
           }
+        } finally {
+          if (myGen === photosSioGen) photosSioLoopActive = false;
         }
       })();
     }
     function stopPhotosSocketIo() {
       photosSioLoopActive = false;
+      photosSioGen += 1;
       photosSioSid = '';
       if (photosSioAbort) {
         try { photosSioAbort.abort(); } catch (_) {}
@@ -7483,14 +7509,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         if (reqSeq !== photosRequestSeq) return;
         const photos = j.data || [];
         photosTotal = Number(typeof j.total === 'number' ? j.total : photos.length);
-        photosHasMore = Boolean(j.hasMore);
-        const pageCount = Math.max(1, Math.ceil(photosTotal / photosPageSize));
-        const metaEl = document.getElementById('photosPageMeta');
-        if (metaEl) metaEl.textContent = 'Page ' + (targetPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
-        const prevBtn = document.getElementById('photosPrevBtn');
-        if (prevBtn) prevBtn.disabled = (targetPage <= 0);
-        const nextBtn = document.getElementById('photosNextBtn');
-        if (nextBtn) nextBtn.disabled = (!photosHasMore && (targetPage + 1) >= pageCount);
+        updatePhotosPagination(targetPage, Boolean(j.hasMore));
         const grid = document.getElementById('photosGrid');
         grid.innerHTML = '';
         grid.scrollTop = 0;
@@ -7843,6 +7862,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", mime)
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(content_len))
+        self.send_header("Cache-Control", "private, no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("X-Content-Type-Options", "nosniff")
         if mime.lower().startswith("image/svg") or file_path.lower().endswith(".svg"):
@@ -8564,6 +8584,16 @@ def run_selftest(engine: BluePillEngine) -> int:
     )
     test_eng.photos_library_path = os.path.join(test_eng._config_dir, "Photos Library.photoslibrary")
     test_eng.icloud_photos_cache_dir = os.path.join(test_eng._config_dir, "icloud-photos-cache")
+    launchctl_calls: List[List[str]] = []
+    test_eng._run_launchctl = lambda args: (
+        launchctl_calls.append(list(args)) or subprocess.CompletedProcess(args, 0, "", "")
+    )
+    test_eng._get_photolibraryd_cpu_pct = lambda: 5.0
+    test_eng._check_icloud_photos_daemons = lambda uid=None: {
+        "com.apple.cloudd": True,
+        "com.apple.photolibraryd": True,
+        "com.apple.cloudphotod": True,
+    }
     BluePillHTTPHandler.engine = test_eng
     srv = FastThreadingHTTPServer(("127.0.0.1", 0), BluePillHTTPHandler)
     port = srv.server_address[1]
@@ -8956,13 +8986,18 @@ def run_selftest(engine: BluePillEngine) -> int:
         assert batch2["hasMore"] is False and batch2["processed"] == 28, f"Expected 28 remaining photos, got {batch2}"
 
         # Verify background sync job processes all 278 unique photos across both pages
-        job_snap = test_eng.start_icloud_photos_sync_job(limit=250, offset=0, sync_all=True)
-        for _ in range(40):
-            if job_snap.get("state") != "running":
-                break
-            time.sleep(0.05)
-            job_snap = test_eng.get_icloud_photos_sync_job(job_snap["jobId"])
-        assert job_snap["state"] == "completed" and job_snap["processed"] == 278, f"Expected 278 processed in job, got {job_snap}"
+        orig_nudge_cb = test_eng._nudge_cloudphotod
+        test_eng._nudge_cloudphotod = lambda *a, **kw: {"nudged": False, "skippedReason": "selftest_stub", "dbChanged": False}
+        try:
+            job_snap = test_eng.start_icloud_photos_sync_job(limit=250, offset=0, sync_all=True)
+            for _ in range(40):
+                if job_snap.get("state") != "running":
+                    break
+                time.sleep(0.05)
+                job_snap = test_eng.get_icloud_photos_sync_job(job_snap["jobId"])
+            assert job_snap["state"] == "completed" and job_snap["processed"] == 278, f"Expected 278 processed in job, got {job_snap}"
+        finally:
+            test_eng._nudge_cloudphotod = orig_nudge_cb
 
         # Verify failed photo download is propagated in sync_icloud_photos result
         mconn = sqlite3.connect(mixed_chat_db)
@@ -9132,16 +9167,7 @@ def run_selftest(engine: BluePillEngine) -> int:
         test_eng._photos_library_assets.clear()
         test_eng._photos_poster_cache.clear()
         test_eng.db_path = os.path.join(test_eng._config_dir, "nonexistent_chat.db")
-        launchctl_calls: List[List[str]] = []
-        test_eng._run_launchctl = lambda args: (
-            launchctl_calls.append(list(args)) or subprocess.CompletedProcess(args, 0, "", "")
-        )
-        test_eng._get_photolibraryd_cpu_pct = lambda: 5.0
-        test_eng._check_icloud_photos_daemons = lambda uid=None: {
-            "com.apple.cloudd": True,
-            "com.apple.photolibraryd": True,
-            "com.apple.cloudphotod": True,
-        }
+        assert len(launchctl_calls) == 0, f"Selftest touched real launchctl before heal test: {launchctl_calls}"
 
         stale_plist = os.path.join(photos_test_root, "resources", "cpl", "cloudsync.noindex", "syncstatus.plist")
         stale_dt = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(hours=3)
@@ -9259,6 +9285,7 @@ def run_selftest(engine: BluePillEngine) -> int:
             with urllib.request.urlopen(r_req, timeout=5.0) as rresp:
                 assert rresp.status == 206, f"Expected 206 Partial Content, got {rresp.status}"
                 assert rresp.headers.get("X-Content-Type-Options") == "nosniff"
+                assert rresp.headers.get("Cache-Control") == "private, no-store"
                 assert rresp.read() == b"ftyp"
             ir_req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/api/v1/attachment/VID-LOCAL-002/live?password=selftest-secret",
