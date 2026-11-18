@@ -7319,11 +7319,13 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
                 if (myGen === photosSioGen) photosSioLoopActive = false;
                 break;
               }
-              photosSioAbort = new AbortController();
+              const sioCtrl = new AbortController();
+              photosSioAbort = sioCtrl;
               if (!photosSioSid) {
-                const hs = await fetch(apiUrl('/socket.io?EIO=4&transport=polling'), { signal: photosSioAbort.signal });
+                const hs = await fetch(apiUrl('/socket.io?EIO=4&transport=polling'), { signal: sioCtrl.signal });
                 if (!photosSioLoopActive || myGen !== photosSioGen) break;
                 const hsTxt = await hs.text();
+                if (!photosSioLoopActive || myGen !== photosSioGen) break;
                 if (hsTxt && hsTxt.startsWith('0')) {
                   const hsObj = JSON.parse(hsTxt.slice(1));
                   if (hsObj && hsObj.sid) photosSioSid = hsObj.sid;
@@ -7332,7 +7334,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
                   await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
                     method: 'POST',
                     body: '40',
-                    signal: photosSioAbort.signal
+                    signal: sioCtrl.signal
                   });
                   if (!photosSioLoopActive || myGen !== photosSioGen) break;
                 }
@@ -7343,7 +7345,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
                 continue;
               }
               const pr = await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
-                signal: photosSioAbort.signal
+                signal: sioCtrl.signal
               });
               if (!photosSioLoopActive || myGen !== photosSioGen) break;
               if (!pr.ok) {
@@ -7361,7 +7363,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
                     await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
                       method: 'POST',
                       body: '3',
-                      signal: photosSioAbort.signal
+                      signal: sioCtrl.signal
                     });
                     if (!photosSioLoopActive || myGen !== photosSioGen) break;
                   } else if (pkt.startsWith('42')) {
@@ -8848,13 +8850,18 @@ def run_selftest(engine: BluePillEngine) -> int:
         assert batch2["hasMore"] is False and batch2["processed"] == 28, f"Expected 28 remaining photos, got {batch2}"
 
         # Verify background sync job processes all 278 unique photos across both pages
-        job_snap = test_eng.start_icloud_photos_sync_job(limit=250, offset=0, sync_all=True)
-        for _ in range(40):
-            if job_snap.get("state") != "running":
-                break
-            time.sleep(0.05)
-            job_snap = test_eng.get_icloud_photos_sync_job(job_snap["jobId"])
-        assert job_snap["state"] == "completed" and job_snap["processed"] == 278, f"Expected 278 processed in job, got {job_snap}"
+        orig_nudge_cb = test_eng._nudge_cloudphotod
+        test_eng._nudge_cloudphotod = lambda *a, **kw: {"nudged": False, "skippedReason": "selftest_stub", "dbChanged": False}
+        try:
+            job_snap = test_eng.start_icloud_photos_sync_job(limit=250, offset=0, sync_all=True)
+            for _ in range(40):
+                if job_snap.get("state") != "running":
+                    break
+                time.sleep(0.05)
+                job_snap = test_eng.get_icloud_photos_sync_job(job_snap["jobId"])
+            assert job_snap["state"] == "completed" and job_snap["processed"] == 278, f"Expected 278 processed in job, got {job_snap}"
+        finally:
+            test_eng._nudge_cloudphotod = orig_nudge_cb
 
         # Verify failed photo download is propagated in sync_icloud_photos result
         mconn = sqlite3.connect(mixed_chat_db)
