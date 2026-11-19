@@ -11809,13 +11809,22 @@ def run_selftest(engine: BluePillEngine) -> int:
                 scripts = re.findall(r"<script>\s*([\s\S]*?)\s*</script>", WEB_UI_HTML)
                 assert len(scripts) >= 2, f"Expected Web UI script blocks, got {len(scripts)}"
                 for s_idx, script_src in enumerate(scripts):
-                    chk_proc = subprocess.run(
-                        [node_bin, "--check"],
-                        input=script_src,
-                        text=True,
-                        capture_output=True,
-                        timeout=5.0,
-                    )
+                    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as js_tmp:
+                        js_tmp.write(script_src)
+                        js_tmp_path = js_tmp.name
+                    try:
+                        chk_proc = subprocess.run(
+                            [node_bin, "--check", js_tmp_path],
+                            stdin=subprocess.DEVNULL,
+                            text=True,
+                            capture_output=True,
+                            timeout=15.0,
+                        )
+                    finally:
+                        try:
+                            os.remove(js_tmp_path)
+                        except OSError:
+                            pass
                     assert chk_proc.returncode == 0, f"Web UI script #{s_idx} syntax check failed: {chk_proc.stderr}"
                 web_harness = r"""
 const assert = require('assert');
