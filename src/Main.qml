@@ -148,16 +148,28 @@ ApplicationWindow {
         return 0
     }
 
+    function hasNonFallbackAudioDevice(list) {
+        if (!list || list.length === 0) return false
+        for (var i = 0; i < list.length; i++) {
+            if ((list[i].id || "").length > 0) return true
+        }
+        return false
+    }
+
     function reconcileAudioDeviceSelections() {
         if (root._reconcilingAudioDevices) return
         root._reconcilingAudioDevices = true
         try {
             var inList = backend.audioInputDevices
-            if (inList && inList.length > 0 && backend.selectedAudioInputDevice && backend.selectedAudioInputDevice.length > 0 && !root.hasAudioDeviceId(inList, backend.selectedAudioInputDevice)) {
+            if (backend.audioInputDiscoverySucceeded && root.hasNonFallbackAudioDevice(inList) &&
+                backend.selectedAudioInputDevice && backend.selectedAudioInputDevice.length > 0 &&
+                !root.hasAudioDeviceId(inList, backend.selectedAudioInputDevice)) {
                 backend.selectedAudioInputDevice = root.hasAudioDeviceId(inList, "") ? "" : (inList[0].id || "")
             }
             var outList = backend.audioOutputDevices
-            if (outList && outList.length > 0 && backend.selectedAudioOutputDevice && backend.selectedAudioOutputDevice.length > 0 && !root.hasAudioDeviceId(outList, backend.selectedAudioOutputDevice)) {
+            if (backend.audioOutputDiscoverySucceeded && root.hasNonFallbackAudioDevice(outList) &&
+                backend.selectedAudioOutputDevice && backend.selectedAudioOutputDevice.length > 0 &&
+                !root.hasAudioDeviceId(outList, backend.selectedAudioOutputDevice)) {
                 backend.selectedAudioOutputDevice = root.hasAudioDeviceId(outList, "") ? "" : (outList[0].id || "")
             }
         } finally {

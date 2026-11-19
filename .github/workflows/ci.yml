@@ -30,15 +30,20 @@ jobs:
           body = os.environ.get("PR_BODY") or ""
           repo = os.environ["REPO"]
           token = os.environ["GH_TOKEN"]
-          pattern = re.compile(
-              r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|ref(?:s|erences?)?)"
-              r"(?:[ \t]*/[ \t]*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|ref(?:s|erences?)?)|[ \t]*\([^)\r\n]*\)|[ \t]*\*{1,2}|[ \t]*:)*"
-              r"\s*(?:https://github\.com/"
-              + re.escape(repo)
-              + r"/issues/|#)(\d+)",
+          kw = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|ref(?:s|erences?)?)"
+          ref_rx = re.compile(
+              rf"(?:https://github\.com/{re.escape(repo)}/issues/|#)(\d+)",
               re.IGNORECASE,
           )
-          nums = sorted(set(pattern.findall(body)))
+          kw_prefix_rx = re.compile(
+              rf"\b{kw}(?:[ \t]*/[ \t]*{kw}){{0,4}}(?:[ \t]*\([^()\r\n]*\)){{0,2}}[ \t*:]*(?:\r?\n[ \t*]*)?\Z",
+              re.IGNORECASE,
+          )
+          nums = sorted({
+              m.group(1)
+              for m in ref_rx.finditer(body)
+              if kw_prefix_rx.search(body[max(0, m.start() - 256):m.start()])
+          })
           if not nums:
               print("ERROR: Pull Request must reference a GitHub issue (e.g., 'Closes #123' or 'Fixes #123').")
               sys.exit(1)

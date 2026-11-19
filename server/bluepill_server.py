@@ -421,6 +421,8 @@ class BluePillEngine:
         self._pending_caption_lock = threading.Lock()
         self._pending_captions: Dict[str, Dict[str, Any]] = {}
         self._delayed_caption_wait_s: float = 4.0
+        self._delayed_caption_retry_delay_s: float = 0.15
+        self._last_delayed_caption_thread: Optional[threading.Thread] = None
         self._tx_events: Dict[str, threading.Event] = {}
         self._tx_results: Dict[str, Dict[str, Any]] = {}
         self._tx_lock = threading.Lock()
@@ -3226,6 +3228,7 @@ class BluePillEngine:
         expected_text: str = "",
         require_attachment: bool = False,
         timeout_s: float = 2.5,
+        advance_rowid: bool = True,
     ) -> Optional[Dict[str, Any]]:
         if not os.path.exists(self.db_path):
             return None
@@ -3281,7 +3284,7 @@ class BluePillEngine:
                         if temp_guid and m_guid:
                             self.temp_guid_by_guid[m_guid] = temp_guid
                             m["tempGuid"] = temp_guid
-                        if m_rowid > self._last_max_rowid:
+                        if advance_rowid and m_rowid > self._last_max_rowid:
                             self._last_max_rowid = m_rowid
                         best_candidate = m
                     if require_attachment and not has_attachments and (time.time() - found_at) < att_join_wait_s:
@@ -3516,9 +3519,35 @@ class BluePillEngine:
         preserve_wav_metrics: bool = False,
         measured_bars: Optional[List[float]] = None,
         measured_dur: float = 0.0,
+        served_transfer_name: str = "",
+        served_total_bytes: int = 0,
+        helper_guid: str = "",
+        safe_name: str = "",
     ) -> str:
         caption_key = f"{temp_guid or 'cap'}:{uuid.uuid4().hex[:8]}"
         sent_guard = threading.Event()
+        eff_served_name = served_transfer_name or (os.path.basename(helper_file_path) if helper_file_path else "") or safe_name
+        expected_names = {
+            os.path.basename(n).strip().lower()
+            for n in (eff_served_name, os.path.basename(helper_file_path) if helper_file_path else "", safe_name)
+            if n and os.path.basename(n).strip()
+        }
+        expected_stems = {os.path.splitext(n)[0] for n in expected_names if os.path.splitext(n)[0]}
+        upload_is_audio = (
+            bool(preserve_wav_metrics)
+            or mime_type.lower().startswith("audio/")
+            or is_audio_attachment(mime_type, eff_served_name or safe_name)
+        )
+        match_meta: Dict[str, Any] = {
+            "chatGuid": chat_guid,
+            "helperGuid": helper_guid.strip(),
+            "expectedNames": expected_names,
+            "expectedStems": expected_stems,
+            "servedTotalBytes": int(served_total_bytes or 0),
+            "servedExt": os.path.splitext(eff_served_name.lower())[1] if eff_served_name else "",
+            "uploadIsAudio": upload_is_audio,
+            "preserveWavMetrics": bool(preserve_wav_metrics),
+        }
         entry: Dict[str, Any] = {
             "key": caption_key,
             "chatGuid": chat_guid,
@@ -3528,16 +3557,56 @@ class BluePillEngine:
             "createdAt": time.time(),
             "sentGuard": sent_guard,
             "dispatched": False,
+            "retryable": False,
+            "attempts": 0,
+            "matchMeta": match_meta,
         }
         with self._pending_caption_lock:
             self._pending_captions[caption_key] = entry
+
+        def _att_matches_meta(att: Dict[str, Any], meta: Dict[str, Any]) -> bool:
+            tname_raw = str(att.get("transferName") or "").strip()
+            att_name = os.path.basename(tname_raw).lower() if tname_raw else ""
+            if not att_name:
+                return False
+            att_stem, att_ext = os.path.splitext(att_name)
+            att_bytes = int(att.get("totalBytes") or 0)
+            att_mime = str(att.get("mimeType") or "").lower()
+            att_is_audio = (
+                bool(att.get("isAudio"))
+                or att_mime.startswith("audio/")
+                or att_ext in (".wav", ".caf", ".m4a", ".aac", ".mp3", ".ogg", ".opus", ".flac", ".amr")
+            )
+            exact_name = att_name in (meta.get("expectedNames") or set())
+            stem_audio_match = bool(
+                att_stem
+                and att_stem in (meta.get("expectedStems") or set())
+                and att_is_audio
+                and meta.get("uploadIsAudio")
+            )
+            if not exact_name and not stem_audio_match:
+                return False
+            meta_bytes = int(meta.get("servedTotalBytes") or 0)
+            if att_bytes > 0 and meta_bytes > 0:
+                if att_bytes == meta_bytes:
+                    return True
+                if stem_audio_match and (
+                    meta.get("preserveWavMetrics") or att_ext != str(meta.get("servedExt") or "")
+                ):
+                    return True
+                return False
+            return True
 
         def _dispatch_once(reason: str) -> bool:
             with self._pending_caption_lock:
                 if sent_guard.is_set() or entry.get("dispatched"):
                     return False
                 entry["dispatched"] = True
+                entry["retryable"] = False
                 sent_guard.set()
+            dispatch_pre_rowid = self._get_max_message_rowid() if os.path.exists(self.db_path) else 0
+            ok = False
+            cap_guid = ""
             try:
                 ok, cap_guid = self._send_helper_payload_with_tx(
                     "send-message",
@@ -3552,18 +3621,82 @@ class BluePillEngine:
                     },
                     wait_timeout=0.5,
                 )
-                self.logger.info(
-                    "[send_attachment] delayed caption dispatched reason=%s chat=%s tempGuid=%s sent=%s guid=%s",
+            except Exception as exc:
+                self.logger.warning(
+                    "[send_attachment] delayed caption send exception reason=%s chat=%s tempGuid=%s err=%s",
                     reason,
                     chat_guid,
                     temp_guid,
-                    ok,
+                    exc,
+                )
+                ok = False
+                cap_guid = ""
+
+            if ok:
+                self.logger.info(
+                    "[send_attachment] delayed caption dispatched reason=%s chat=%s tempGuid=%s sent=True guid=%s",
+                    reason,
+                    chat_guid,
+                    temp_guid,
                     cap_guid or "-",
                 )
-                return ok
-            finally:
                 with self._pending_caption_lock:
                     self._pending_captions.pop(caption_key, None)
+                return True
+
+            if os.path.exists(self.db_path) and not self._stop_event.is_set():
+                db_cap = self._poll_sent_message_from_db(
+                    pre_max_rowid=dispatch_pre_rowid,
+                    chat_guid=chat_guid,
+                    temp_guid="",
+                    helper_guid=cap_guid,
+                    expected_text=caption,
+                    require_attachment=False,
+                    timeout_s=0.15,
+                    advance_rowid=False,
+                )
+                if (
+                    db_cap is not None
+                    and str(db_cap.get("text") or "").strip() == caption.strip()
+                    and int(db_cap.get("originalROWID") or 0) > dispatch_pre_rowid
+                ):
+                    self.logger.info(
+                        "[send_attachment] delayed caption confirmed in chat.db after ok=False reason=%s chat=%s tempGuid=%s rowid=%s",
+                        reason,
+                        chat_guid,
+                        temp_guid,
+                        db_cap.get("originalROWID"),
+                    )
+                    with self._pending_caption_lock:
+                        self._pending_captions.pop(caption_key, None)
+                    return True
+
+            if sys.platform == "darwin" and not self._stop_event.is_set():
+                if self._send_via_applescript(chat_guid, caption):
+                    self.logger.info(
+                        "[send_attachment] delayed caption sent via AppleScript fallback reason=%s chat=%s tempGuid=%s",
+                        reason,
+                        chat_guid,
+                        temp_guid,
+                    )
+                    with self._pending_caption_lock:
+                        self._pending_captions.pop(caption_key, None)
+                    return True
+
+            with self._pending_caption_lock:
+                entry["dispatched"] = False
+                entry["retryable"] = True
+                entry["attempts"] = int(entry.get("attempts") or 0) + 1
+                sent_guard.clear()
+                attempt_no = entry["attempts"]
+            self.logger.warning(
+                "[send_attachment] delayed caption dispatch failed reason=%s chat=%s tempGuid=%s attempt=%d (kept retryable)",
+                reason,
+                chat_guid,
+                temp_guid,
+                attempt_no,
+            )
+            return False
 
         def _waiter() -> None:
             try:
@@ -3573,19 +3706,44 @@ class BluePillEngine:
                     confirmed_msg = self._poll_sent_message_from_db(
                         pre_max_rowid=pre_max_rowid,
                         chat_guid=chat_guid,
-                        temp_guid=temp_guid,
-                        helper_guid="",
+                        temp_guid="",
+                        helper_guid=helper_guid,
                         require_attachment=True,
                         timeout_s=wait_s,
+                        advance_rowid=False,
                     )
                 if self._stop_event.is_set():
                     with self._pending_caption_lock:
                         self._pending_captions.pop(caption_key, None)
                     return
                 if confirmed_msg is not None:
-                    for att in confirmed_msg.get("attachments") or []:
+                    msg_guid = str(confirmed_msg.get("guid") or "").strip()
+                    guid_matches = bool(helper_guid and msg_guid and msg_guid == helper_guid.strip())
+                    atts = confirmed_msg.get("attachments") or []
+                    msg_correlated = guid_matches
+                    with self._pending_caption_lock:
+                        peer_metas = [
+                            other.get("matchMeta") or {}
+                            for other_key, other in self._pending_captions.items()
+                            if other_key != caption_key
+                            and other.get("chatGuid") == chat_guid
+                            and not other.get("dispatched")
+                        ]
+                    for att in atts:
+                        if guid_matches:
+                            att_correlated = True
+                        else:
+                            att_correlated = _att_matches_meta(att, match_meta) and not any(
+                                _att_matches_meta(att, pm) for pm in peer_metas
+                            )
+                        if not att_correlated:
+                            continue
+                        msg_correlated = True
                         ag = str(att.get("guid") or "")
                         if ag:
+                            existing = self._outbound_attachments.get(ag)
+                            if existing is not None and existing[0] != helper_file_path:
+                                continue
                             self._outbound_attachments[ag] = (helper_file_path, mime_type)
                             if preserve_wav_metrics and measured_bars and measured_dur > 0:
                                 self._cache_audio_metrics(
@@ -3593,9 +3751,26 @@ class BluePillEngine:
                                     measured_bars,
                                     measured_dur,
                                 )
-                    _dispatch_once("db_confirmed")
-                else:
-                    _dispatch_once("grace_timeout")
+                    if msg_correlated and temp_guid and msg_guid:
+                        self.temp_guid_by_guid[msg_guid] = temp_guid
+
+                reason = "db_confirmed" if confirmed_msg is not None else "grace_timeout"
+                sent_ok = _dispatch_once(reason)
+                retry_num = 0
+                base_delay = max(0.01, float(getattr(self, "_delayed_caption_retry_delay_s", 0.15)))
+                while not sent_ok and retry_num < 2 and not self._stop_event.is_set():
+                    retry_num += 1
+                    if self._stop_event.wait(base_delay * retry_num):
+                        break
+                    sent_ok = _dispatch_once(f"retry_{retry_num}")
+                if not sent_ok:
+                    with self._pending_caption_lock:
+                        self._pending_captions.pop(caption_key, None)
+                    self.logger.warning(
+                        "[send_attachment] delayed caption retries exhausted chat=%s tempGuid=%s",
+                        chat_guid,
+                        temp_guid,
+                    )
             except Exception as exc:
                 self.logger.warning(
                     "[send_attachment] delayed caption waiter failed chat=%s tempGuid=%s err=%s",
@@ -3609,6 +3784,8 @@ class BluePillEngine:
         entry["dispatchFn"] = _dispatch_once
         t = threading.Thread(target=_waiter, daemon=True)
         entry["thread"] = t
+        with self._pending_caption_lock:
+            self._last_delayed_caption_thread = t
         t.start()
         return caption_key
 
@@ -3756,6 +3933,10 @@ class BluePillEngine:
                     preserve_wav_metrics=preserve_wav_metrics,
                     measured_bars=measured_bars,
                     measured_dur=measured_dur,
+                    served_transfer_name=served_transfer_name,
+                    served_total_bytes=served_total_bytes,
+                    helper_guid=helper_guid,
+                    safe_name=safe_name,
                 )
 
         if not sent and not helper_socket_sent and sys.platform == "darwin" and os.path.exists(self.db_path):
@@ -6824,10 +7005,13 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           await loadContacts();
           await loadPinned();
           await loadChats();
+          startChatSocketIo();
         } else {
+          stopChatSocketIo();
           document.getElementById('serverBadge').textContent = 'Auth Required';
         }
       } catch (e) {
+        stopChatSocketIo();
         document.getElementById('serverBadge').textContent = 'Connection Error';
       }
     }
@@ -6895,63 +7079,310 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       await loadChats();
     }
 
+    const pendingMessagesByChat = {};
+    let pendingReconcileTimer = null;
+    let pendingReconcileChat = '';
+    let pendingReconcileRemaining = 0;
+    let selectChatSeq = 0;
+    let chatSioSid = '';
+    let chatSioLoopActive = false;
+    let chatSioGen = 0;
+    let chatSioAbort = null;
+
+    function msgMatches(a, b) {
+      if (!a || !b) return false;
+      if (a.guid && b.guid && a.guid === b.guid) return true;
+      if (a.tempGuid && (b.tempGuid === a.tempGuid || b.guid === a.tempGuid)) return true;
+      if (b.tempGuid && a.guid === b.tempGuid) return true;
+      if (!a._hasRealGuid && a.isFromMe && b.isFromMe) {
+        const at = (a.text || '').trim();
+        const bt = (b.text || '').trim();
+        if (at && at === bt && (b.dateCreated || 0) >= (a.dateCreated || 0) - 5000) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function clearPendingReconcile() {
+      if (pendingReconcileTimer) {
+        clearTimeout(pendingReconcileTimer);
+        pendingReconcileTimer = null;
+      }
+      pendingReconcileChat = '';
+      pendingReconcileRemaining = 0;
+    }
+
+    function reconcilePendingForChat(chatGuid, serverMsgs) {
+      const list = pendingMessagesByChat[chatGuid];
+      if (!list || !list.length) return;
+      const remaining = list.filter(pm => !serverMsgs.some(sm => msgMatches(pm, sm)));
+      if (remaining.length) {
+        pendingMessagesByChat[chatGuid] = remaining;
+      } else {
+        delete pendingMessagesByChat[chatGuid];
+        if (pendingReconcileChat === chatGuid) {
+          clearPendingReconcile();
+        }
+      }
+    }
+
+    function schedulePendingReconcile(chatGuid) {
+      clearPendingReconcile();
+      if (!chatGuid || !(pendingMessagesByChat[chatGuid] && pendingMessagesByChat[chatGuid].length)) return;
+      pendingReconcileChat = chatGuid;
+      pendingReconcileRemaining = 2;
+      const scheduleNext = (delayMs) => {
+        if (pendingReconcileRemaining <= 0 || pendingReconcileChat !== chatGuid || activeChatGuid !== chatGuid) {
+          clearPendingReconcile();
+          return;
+        }
+        pendingReconcileTimer = setTimeout(async () => {
+          pendingReconcileTimer = null;
+          if (pendingReconcileChat !== chatGuid || activeChatGuid !== chatGuid) {
+            clearPendingReconcile();
+            return;
+          }
+          const curPending = pendingMessagesByChat[chatGuid];
+          if (!curPending || !curPending.length) {
+            clearPendingReconcile();
+            return;
+          }
+          pendingReconcileRemaining -= 1;
+          try {
+            await selectChat(chatGuid, document.getElementById('chatHeaderTitle').textContent);
+          } catch (e) {
+            console.warn('Pending reconcile refresh failed:', e);
+          }
+          if (
+            pendingReconcileRemaining > 0 &&
+            pendingReconcileChat === chatGuid &&
+            activeChatGuid === chatGuid &&
+            pendingMessagesByChat[chatGuid] &&
+            pendingMessagesByChat[chatGuid].length
+          ) {
+            scheduleNext(2000);
+          } else {
+            clearPendingReconcile();
+          }
+        }, delayMs);
+      };
+      scheduleNext(1200);
+    }
+
+    function renderMessageBubble(m, guid) {
+      const d = document.createElement('div');
+      const isSms = (m.service || '').toUpperCase() === 'SMS' || (guid || '').startsWith('SMS;');
+      d.className = 'msg' + (m.isFromMe ? ' me' : '') + (isSms ? ' sms' : '');
+      d.dataset.guid = m.guid || '';
+      d.dataset.tempGuid = m.tempGuid || '';
+      d.dataset.pending = m.pending ? '1' : '0';
+      if (m.text) {
+        const t = document.createElement('div');
+        t.textContent = m.text;
+        d.appendChild(t);
+      }
+      const hasAtt = m.attachments && m.attachments.length > 0;
+      if (hasAtt) {
+        m.attachments.forEach(a => {
+          if ((a.mimeType || '').startsWith('image/') || /\.(heic|heif|jpg|jpeg|png|gif|webp)$/i.test(a.transferName || '')) {
+            const img = document.createElement('img');
+            img.src = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/download?height=600`);
+            d.appendChild(img);
+          }
+        });
+      }
+      const otp = extractOtp(m.text || '');
+      if (otp) {
+        const btn = document.createElement('button');
+        btn.className = 'otp-btn';
+        btn.textContent = `🔑 Copy ${otp}`;
+        btn.onclick = () => navigator.clipboard.writeText(otp);
+        d.appendChild(btn);
+      }
+      if (m.expressiveSendStyleId) {
+        const effBadge = document.createElement('button');
+        effBadge.className = 'otp-btn';
+        effBadge.style.background = 'rgba(10, 132, 255, 0.28)';
+        effBadge.style.border = '1px solid rgba(10, 132, 255, 0.5)';
+        effBadge.textContent = '✨ ' + formatEffectName(m.expressiveSendStyleId);
+        effBadge.onclick = (e) => { e.stopPropagation(); playWebEffect(m.expressiveSendStyleId); };
+        d.appendChild(effBadge);
+      }
+      const meta = document.createElement('div');
+      meta.className = 'msg-meta';
+      const dt = m.dateCreated ? new Date(m.dateCreated).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
+      let badge = dt;
+      if (m.pending && !(m.error > 0)) badge += ' · Sending…';
+      if (m.dateEdited > 0) badge += ' · Edited';
+      if (m.error > 0) badge += ' · ⚠ Not Delivered';
+      meta.textContent = badge;
+      d.appendChild(meta);
+      return d;
+    }
+
+    function upsertMessageInPane(m, chatGuid) {
+      if (!m || chatGuid !== activeChatGuid) return;
+      if (m.associatedMessageType && m.associatedMessageType >= 2000) return;
+      const hasAtt = m.attachments && m.attachments.length > 0;
+      if (!m.text && !hasAtt) return;
+      const pane = document.getElementById('messagesPane');
+      if (!pane) return;
+      const nearBottom = (pane.scrollHeight - pane.scrollTop - pane.clientHeight) < 80;
+      const bubble = renderMessageBubble(m, chatGuid);
+      const children = Array.from(pane.children);
+      let existing = children.find(el => {
+        const eg = el.dataset.guid || '';
+        const et = el.dataset.tempGuid || '';
+        if (m.guid && eg && eg === m.guid) return true;
+        if (m.tempGuid && (et === m.tempGuid || eg === m.tempGuid)) return true;
+        if (et && m.guid && et === m.guid) return true;
+        return false;
+      });
+      if (!existing && !m.pending && m.isFromMe && m.text) {
+        const mt = m.text.trim();
+        existing = children.find(el => el.dataset.pending === '1' && (el.firstChild && el.firstChild.textContent || '').trim() === mt);
+      }
+      if (existing) {
+        pane.replaceChild(bubble, existing);
+      } else {
+        pane.appendChild(bubble);
+      }
+      if (nearBottom || m.isFromMe) {
+        pane.scrollTop = pane.scrollHeight;
+      }
+    }
+
+    function handleIncomingSocketMessage(evMsg) {
+      if (!evMsg || typeof evMsg !== 'object') return;
+      const chatGuids = (evMsg.chats || []).map(c => c && c.guid).filter(Boolean);
+      const targets = chatGuids.length ? chatGuids : (activeChatGuid ? [activeChatGuid] : []);
+      for (const cg of targets) {
+        if (pendingMessagesByChat[cg]) {
+          reconcilePendingForChat(cg, [evMsg]);
+        }
+        if (cg === activeChatGuid) {
+          upsertMessageInPane(evMsg, cg);
+        }
+      }
+    }
+
+    function stopChatSocketIo() {
+      chatSioLoopActive = false;
+      chatSioGen += 1;
+      chatSioSid = '';
+      if (chatSioAbort) {
+        try { chatSioAbort.abort(); } catch (_) {}
+        chatSioAbort = null;
+      }
+    }
+
+    function startChatSocketIo() {
+      stopChatSocketIo();
+      if (!apiKey) return;
+      chatSioLoopActive = true;
+      const myGen = ++chatSioGen;
+      (async () => {
+        try {
+          while (chatSioLoopActive && myGen === chatSioGen) {
+            try {
+              const sioCtrl = new AbortController();
+              chatSioAbort = sioCtrl;
+              if (!chatSioSid) {
+                const hs = await fetch(apiUrl('/socket.io?EIO=4&transport=polling'), { signal: sioCtrl.signal });
+                if (!chatSioLoopActive || myGen !== chatSioGen) break;
+                const hsTxt = await hs.text();
+                if (!chatSioLoopActive || myGen !== chatSioGen) break;
+                if (hsTxt && hsTxt.startsWith('0')) {
+                  const hsObj = JSON.parse(hsTxt.slice(1));
+                  if (hsObj && hsObj.sid) chatSioSid = hsObj.sid;
+                }
+                if (chatSioSid) {
+                  await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(chatSioSid)), {
+                    method: 'POST',
+                    body: '40',
+                    signal: sioCtrl.signal
+                  });
+                  if (!chatSioLoopActive || myGen !== chatSioGen) break;
+                }
+              }
+              if (!chatSioSid) {
+                await new Promise(r => setTimeout(r, 2000));
+                continue;
+              }
+              const pr = await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(chatSioSid)), {
+                signal: sioCtrl.signal
+              });
+              if (!chatSioLoopActive || myGen !== chatSioGen) break;
+              if (!pr.ok) {
+                chatSioSid = '';
+                await new Promise(r => setTimeout(r, 1500));
+                continue;
+              }
+              const raw = await pr.text();
+              if (!chatSioLoopActive || myGen !== chatSioGen) break;
+              if (raw) {
+                for (const pkt of raw.split(String.fromCharCode(0x1e))) {
+                  if (!pkt) continue;
+                  if (pkt === '2') {
+                    await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(chatSioSid)), {
+                      method: 'POST',
+                      body: '3',
+                      signal: sioCtrl.signal
+                    });
+                    if (!chatSioLoopActive || myGen !== chatSioGen) break;
+                  } else if (pkt.startsWith('42')) {
+                    try {
+                      const arr = JSON.parse(pkt.slice(2));
+                      if (Array.isArray(arr) && (arr[0] === 'new-message' || arr[0] === 'updated-message' || arr[0] === 'message-send-error')) {
+                        handleIncomingSocketMessage(arr[1]);
+                      }
+                    } catch (_) {}
+                  }
+                }
+              }
+              await new Promise(r => setTimeout(r, 900));
+            } catch (e) {
+              if (!chatSioLoopActive || myGen !== chatSioGen || (e && e.name === 'AbortError')) break;
+              chatSioSid = '';
+              await new Promise(r => setTimeout(r, 2000));
+            }
+          }
+        } finally {
+          if (myGen === chatSioGen) chatSioLoopActive = false;
+        }
+      })();
+    }
+
     async function selectChat(guid, title) {
+      const isSwitch = (guid !== activeChatGuid);
+      if (isSwitch) {
+        clearPendingReconcile();
+      }
       activeChatGuid = guid;
+      const reqSeq = ++selectChatSeq;
       document.getElementById('chatHeaderTitle').textContent = title || guid;
       document.getElementById('deleteChatBtn').style.display = guid ? 'inline-block' : 'none';
       const pane = document.getElementById('messagesPane');
-      pane.innerHTML = '';
+      if (isSwitch) {
+        pane.innerHTML = '';
+      }
       const res = await fetch(apiUrl(`/api/v1/chat/${encodeURIComponent(guid)}/message?limit=100&sort=DESC`));
       const j = await res.json();
+      if (reqSeq !== selectChatSeq || activeChatGuid !== guid) return;
       const msgs = (j.data || []).slice().reverse();
-      msgs.forEach(m => {
+      reconcilePendingForChat(guid, msgs);
+      const pendingLeft = (pendingMessagesByChat[guid] || []).filter(pm => !msgs.some(sm => msgMatches(pm, sm)));
+      const combined = msgs.concat(pendingLeft);
+      const frag = document.createDocumentFragment();
+      combined.forEach(m => {
         if (m.associatedMessageType && m.associatedMessageType >= 2000) return;
         const hasAtt = m.attachments && m.attachments.length > 0;
         if (!m.text && !hasAtt) return;
-        const d = document.createElement('div');
-        const isSms = (m.service || '').toUpperCase() === 'SMS' || guid.startsWith('SMS;');
-        d.className = 'msg' + (m.isFromMe ? ' me' : '') + (isSms ? ' sms' : '');
-        if (m.text) {
-          const t = document.createElement('div');
-          t.textContent = m.text;
-          d.appendChild(t);
-        }
-        if (hasAtt) {
-          m.attachments.forEach(a => {
-            if ((a.mimeType || '').startsWith('image/') || /\.(heic|heif|jpg|jpeg|png|gif|webp)$/i.test(a.transferName || '')) {
-              const img = document.createElement('img');
-              img.src = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/download?height=600`);
-              d.appendChild(img);
-            }
-          });
-        }
-        const otp = extractOtp(m.text || '');
-        if (otp) {
-          const btn = document.createElement('button');
-          btn.className = 'otp-btn';
-          btn.textContent = `🔑 Copy ${otp}`;
-          btn.onclick = () => navigator.clipboard.writeText(otp);
-          d.appendChild(btn);
-        }
-        if (m.expressiveSendStyleId) {
-          const effBadge = document.createElement('button');
-          effBadge.className = 'otp-btn';
-          effBadge.style.background = 'rgba(10, 132, 255, 0.28)';
-          effBadge.style.border = '1px solid rgba(10, 132, 255, 0.5)';
-          effBadge.textContent = '✨ ' + formatEffectName(m.expressiveSendStyleId);
-          effBadge.onclick = (e) => { e.stopPropagation(); playWebEffect(m.expressiveSendStyleId); };
-          d.appendChild(effBadge);
-        }
-        const meta = document.createElement('div');
-        meta.className = 'msg-meta';
-        const dt = m.dateCreated ? new Date(m.dateCreated).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
-        let badge = dt;
-        if (m.dateEdited > 0) badge += ' · Edited';
-        if (m.error > 0) badge += ' · ⚠ Not Delivered';
-        meta.textContent = badge;
-        d.appendChild(meta);
-        pane.appendChild(d);
+        frag.appendChild(renderMessageBubble(m, guid));
       });
+      pane.innerHTML = '';
+      pane.appendChild(frag);
       pane.scrollTop = pane.scrollHeight;
     }
 
@@ -6994,6 +7425,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       if (!text || !activeChatGuid) return;
       const submittedChat = activeChatGuid;
       const submittedText = text;
+      const clientTempGuid = 'web-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
       const effSel = document.getElementById('effectSelect');
       const effectId = effSel ? effSel.value : '';
       if (effectId) playWebEffect(effectId);
@@ -7001,7 +7433,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         const resp = await fetch(apiUrl('/api/v1/message/text'), {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({chatGuid: submittedChat, message: submittedText, tempGuid: 'web-' + Date.now(), effectId: effectId})
+          body: JSON.stringify({chatGuid: submittedChat, message: submittedText, tempGuid: clientTempGuid, effectId: effectId})
         });
         const j = await resp.json().catch(() => ({}));
         if (!resp.ok || (j.status && j.status !== 200)) {
@@ -7011,6 +7443,24 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         if (activeChatGuid === submittedChat && input.value.trim() === submittedText) {
           input.value = '';
           if (effSel) effSel.value = '';
+        }
+        const sentMsg = (j && j.data) ? Object.assign({}, j.data) : null;
+        if (sentMsg && sentMsg.pending === true) {
+          if (!sentMsg.tempGuid) sentMsg.tempGuid = clientTempGuid;
+          if (!sentMsg.guid) sentMsg.guid = sentMsg.tempGuid;
+          sentMsg._hasRealGuid = Boolean(sentMsg.guid && !sentMsg.guid.startsWith('temp-') && !sentMsg.guid.startsWith('web-'));
+          const list = pendingMessagesByChat[submittedChat] || [];
+          const filtered = list.filter(pm => !msgMatches(pm, sentMsg));
+          filtered.push(sentMsg);
+          pendingMessagesByChat[submittedChat] = filtered;
+          if (activeChatGuid === submittedChat) {
+            upsertMessageInPane(sentMsg, submittedChat);
+          }
+          schedulePendingReconcile(submittedChat);
+          return;
+        }
+        if (sentMsg) {
+          reconcilePendingForChat(submittedChat, [sentMsg]);
         }
         try {
           if (activeChatGuid === submittedChat) {
@@ -9279,9 +9729,12 @@ def run_selftest(engine: BluePillEngine) -> int:
                 "message": "Retained caption text",
                 "attachment_bytes": png_bytes,
             })
+            waiter_thread = db_eng._last_delayed_caption_thread
             assert delayed_cap_res.get("pending") is True, f"Expected pending response while awaiting DB confirmation: {delayed_cap_res}"
             assert caption_sent_ev.wait(timeout=2.0), "Delayed caption waiter did not dispatch caption after DB confirmation"
-            time.sleep(0.05)
+            assert waiter_thread is not None, "Expected delayed caption waiter thread reference"
+            waiter_thread.join(timeout=2.0)
+            assert not waiter_thread.is_alive(), "Delayed caption waiter thread did not finish"
             with helper_actions_lock:
                 att_sends = [a for a in helper_actions if a[0] == "send-attachment"]
                 cap_sends = [a for a in helper_actions if a[0] == "send-message"]
@@ -9300,8 +9753,11 @@ def run_selftest(engine: BluePillEngine) -> int:
                 "message": "Grace timeout caption",
                 "attachment_bytes": png_bytes,
             })
+            waiter_thread_t = db_eng._last_delayed_caption_thread
             assert caption_sent_ev.wait(timeout=2.0), "Delayed caption waiter did not dispatch caption on grace timeout"
-            time.sleep(0.05)
+            assert waiter_thread_t is not None, "Expected grace-timeout waiter thread reference"
+            waiter_thread_t.join(timeout=2.0)
+            assert not waiter_thread_t.is_alive(), "Grace-timeout waiter thread did not finish"
             with helper_actions_lock:
                 att_sends_t = [a for a in helper_actions if a[0] == "send-attachment"]
                 cap_sends_t = [a for a in helper_actions if a[0] == "send-message"]
@@ -9309,6 +9765,215 @@ def run_selftest(engine: BluePillEngine) -> int:
             assert len(cap_sends_t) == 1 and cap_sends_t[0][1].get("message") == "Grace timeout caption", f"Expected exactly-once grace-timeout caption: {cap_sends_t}"
             with db_eng._pending_caption_lock:
                 assert len(db_eng._pending_captions) == 0, f"Pending captions leaked: {db_eng._pending_captions}"
+
+            # REV3 (a): advance_rowid=False must leave _last_max_rowid unchanged (both direct and via caption waiter)
+            db_eng._last_max_rowid = 12
+            qual_row = {
+                "originalROWID": 160,
+                "guid": "msg-qual-160",
+                "isFromMe": True,
+                "chats": [{"guid": "iMessage;-;+14155550145"}],
+                "attachments": [{"guid": "att-qual-160", "mimeType": "image/png", "transferName": "adv_test.png", "totalBytes": len(png_bytes)}],
+            }
+            db_eng.query_messages = lambda _qb: [qual_row]
+            try:
+                no_adv_res = real_poll(
+                    pre_max_rowid=12,
+                    chat_guid="iMessage;-;+14155550145",
+                    temp_guid="temp-no-adv-160",
+                    helper_guid="",
+                    require_attachment=True,
+                    timeout_s=0.12,
+                    advance_rowid=False,
+                )
+                assert no_adv_res is not None and no_adv_res.get("originalROWID") == 160, f"Expected qualifying row: {no_adv_res}"
+                assert db_eng._last_max_rowid == 12, f"advance_rowid=False modified _last_max_rowid: {db_eng._last_max_rowid}"
+
+                seen_advance_flags: List[bool] = []
+                waiter_poll_calls = 0
+
+                def _spy_real_poll(**kw: Any) -> Optional[Dict[str, Any]]:
+                    nonlocal waiter_poll_calls
+                    waiter_poll_calls += 1
+                    if waiter_poll_calls == 1:
+                        return None
+                    seen_advance_flags.append(bool(kw.get("advance_rowid", True)))
+                    return real_poll(**kw)
+
+                db_eng._poll_sent_message_from_db = _spy_real_poll
+                helper_actions.clear()
+                caption_sent_ev.clear()
+                db_eng.send_attachment({
+                    "chatGuid": "iMessage;-;+14155550145",
+                    "tempGuid": "temp-waiter-no-adv",
+                    "name": "adv_test.png",
+                    "message": "No WAL advance caption",
+                    "attachment_bytes": png_bytes,
+                })
+                wt_adv = db_eng._last_delayed_caption_thread
+                assert caption_sent_ev.wait(timeout=2.0), "Waiter did not dispatch caption for advance_rowid=False check"
+                assert wt_adv is not None
+                wt_adv.join(timeout=2.0)
+                assert seen_advance_flags == [False], f"Caption waiter must pass advance_rowid=False: {seen_advance_flags}"
+                assert db_eng._last_max_rowid == 12, f"Caption waiter advanced _last_max_rowid: {db_eng._last_max_rowid}"
+            finally:
+                db_eng.query_messages = orig_qm_db
+
+            # REV3 (b): ambiguous/uncorrelated attachment row must NOT overwrite _outbound_attachments or audio metrics
+            db_eng._outbound_attachments["att-other-upload"] = ("/tmp/existing-other.wav", "audio/wav")
+            db_eng._cache_audio_metrics(["att-other-upload"], [0.9] * 28, 9.5)
+            ambig_calls = 0
+
+            def _ambig_poll(**kw: Any) -> Optional[Dict[str, Any]]:
+                nonlocal ambig_calls
+                ambig_calls += 1
+                if ambig_calls == 1:
+                    return None
+                return {
+                    "originalROWID": 161,
+                    "guid": "msg-other-upload",
+                    "isFromMe": True,
+                    "chats": [{"guid": "iMessage;-;+14155550146"}],
+                    "attachments": [{
+                        "guid": "att-other-upload",
+                        "originalGuid": "att-other-upload",
+                        "mimeType": "audio/x-caf",
+                        "transferName": "other_memo.caf",
+                        "totalBytes": 1234,
+                        "isAudio": True,
+                    }],
+                }
+
+            db_eng._poll_sent_message_from_db = _ambig_poll
+            helper_actions.clear()
+            caption_sent_ev.clear()
+            db_eng.send_attachment({
+                "chatGuid": "iMessage;-;+14155550146",
+                "tempGuid": "temp-ambig-wav",
+                "name": "voice_memo_ambig.wav",
+                "message": "Ambiguous audio caption",
+                "attachment_bytes": wav_bytes,
+            })
+            wt_ambig = db_eng._last_delayed_caption_thread
+            assert caption_sent_ev.wait(timeout=2.0), "Waiter did not dispatch caption in ambiguous attachment test"
+            assert wt_ambig is not None
+            wt_ambig.join(timeout=2.0)
+            assert db_eng._outbound_attachments["att-other-upload"] == ("/tmp/existing-other.wav", "audio/wav"), (
+                f"Uncorrelated attachment overwrote _outbound_attachments: {db_eng._outbound_attachments['att-other-upload']}"
+            )
+            assert db_eng._get_cached_audio_metrics(["att-other-upload"]) == ([0.9] * 28, 9.5), (
+                "Uncorrelated attachment overwrote cached audio metrics"
+            )
+
+            # Same filename with mismatched totalBytes must also NOT alias _outbound_attachments
+            db_eng._outbound_attachments.pop("att-mismatch-bytes", None)
+            mismatch_calls = 0
+
+            def _mismatch_poll(**kw: Any) -> Optional[Dict[str, Any]]:
+                nonlocal mismatch_calls
+                mismatch_calls += 1
+                if mismatch_calls == 1:
+                    return None
+                return {
+                    "originalROWID": 162,
+                    "guid": "msg-mismatch-bytes",
+                    "isFromMe": True,
+                    "chats": [{"guid": "iMessage;-;+14155550146"}],
+                    "attachments": [{
+                        "guid": "att-mismatch-bytes",
+                        "mimeType": "image/png",
+                        "transferName": "delayed_mismatch.png",
+                        "totalBytes": len(png_bytes) + 999,
+                    }],
+                }
+
+            db_eng._poll_sent_message_from_db = _mismatch_poll
+            caption_sent_ev.clear()
+            db_eng.send_attachment({
+                "chatGuid": "iMessage;-;+14155550146",
+                "tempGuid": "temp-mismatch-bytes",
+                "name": "delayed_mismatch.png",
+                "message": "Mismatched bytes caption",
+                "attachment_bytes": png_bytes,
+            })
+            wt_mm = db_eng._last_delayed_caption_thread
+            assert caption_sent_ev.wait(timeout=2.0)
+            assert wt_mm is not None
+            wt_mm.join(timeout=2.0)
+            assert "att-mismatch-bytes" not in db_eng._outbound_attachments, (
+                f"Mismatched totalBytes aliased _outbound_attachments: {db_eng._outbound_attachments.get('att-mismatch-bytes')}"
+            )
+
+            # REV3 (c): definite caption dispatch failure must preserve retryable state and retry without resending attachment
+            db_eng._delayed_caption_wait_s = 0.08
+            db_eng._delayed_caption_retry_delay_s = 0.02
+            db_eng._poll_sent_message_from_db = lambda **kw: None
+            db_eng._send_via_applescript = lambda *a, **kw: False
+            retry_actions: List[Tuple[str, Dict[str, Any]]] = []
+            retry_seen_states: List[bool] = []
+            retry_done_ev = threading.Event()
+            msg_tx_count = 0
+
+            def _flaky_helper_tx(act: str, data: Dict[str, Any], wait_timeout: float = 0.8) -> Tuple[bool, str]:
+                nonlocal msg_tx_count
+                retry_actions.append((act, dict(data)))
+                if act == "send-message":
+                    msg_tx_count += 1
+                    if msg_tx_count == 1:
+                        return False, ""
+                    with db_eng._pending_caption_lock:
+                        retry_seen_states.append(len(db_eng._pending_captions) == 1)
+                    retry_done_ev.set()
+                    return True, "cap-retry-ok"
+                return True, ""
+
+            db_eng._send_helper_payload_with_tx = _flaky_helper_tx
+            db_eng.send_attachment({
+                "chatGuid": "iMessage;-;+14155550147",
+                "tempGuid": "temp-retry-cap-1",
+                "name": "retry.png",
+                "message": "Retryable caption",
+                "attachment_bytes": png_bytes,
+            })
+            wt_retry = db_eng._last_delayed_caption_thread
+            assert retry_done_ev.wait(timeout=2.0), "Caption retry did not fire after definite dispatch failure"
+            assert wt_retry is not None
+            wt_retry.join(timeout=2.0)
+            retry_atts = [a for a in retry_actions if a[0] == "send-attachment"]
+            retry_msgs = [a for a in retry_actions if a[0] == "send-message"]
+            assert len(retry_atts) == 1, f"Must never resend attachment during caption retry: {retry_atts}"
+            assert len(retry_msgs) == 2, f"Expected initial + 1 retry send-message: {retry_msgs}"
+            assert retry_seen_states == [True], f"Caption must remain in _pending_captions while retryable: {retry_seen_states}"
+            with db_eng._pending_caption_lock:
+                assert len(db_eng._pending_captions) == 0, f"Pending captions leaked after retry success: {db_eng._pending_captions}"
+
+            # Exhausted retries (all 3 send-message attempts fail) must still never resend attachment and must clean up
+            retry_actions.clear()
+            db_eng._send_helper_payload_with_tx = lambda act, data, wait_timeout=0.8: (
+                retry_actions.append((act, dict(data))) or (False, "")
+            ) if act == "send-message" else (
+                retry_actions.append((act, dict(data))) or (True, "")
+            )
+            db_eng.send_attachment({
+                "chatGuid": "iMessage;-;+14155550147",
+                "tempGuid": "temp-retry-exhaust-1",
+                "name": "exhaust.png",
+                "message": "Exhausted retry caption",
+                "attachment_bytes": png_bytes,
+            })
+            wt_exh = db_eng._last_delayed_caption_thread
+            assert wt_exh is not None
+            wt_exh.join(timeout=2.0)
+            exh_atts = [a for a in retry_actions if a[0] == "send-attachment"]
+            exh_msgs = [a for a in retry_actions if a[0] == "send-message"]
+            assert len(exh_atts) == 1, f"Must never resend attachment when retries exhaust: {exh_atts}"
+            assert len(exh_msgs) == 3, f"Expected 1 initial + 2 retries = 3 caption attempts: {exh_msgs}"
+            with db_eng._pending_caption_lock:
+                assert len(db_eng._pending_captions) == 0, f"Pending captions leaked after retry exhaustion: {db_eng._pending_captions}"
+
+            # Verify Web UI includes pending text reconciliation & Socket.IO deduplication helpers
+            for ui_marker in ("pendingMessagesByChat", "schedulePendingReconcile", "reconcilePendingForChat", "startChatSocketIo", "dataset.pending"):
+                assert ui_marker in WEB_UI_HTML, f"Missing Web UI pending-text marker: {ui_marker}"
         finally:
             if os.path.exists(tmp_db_path):
                 os.remove(tmp_db_path)
