@@ -575,8 +575,9 @@ class BluePillEngine:
         self.chat_display_names_override: Dict[str, str] = {}
         self.group_participants_override: Dict[str, List[str]] = {}
         self.scheduled_messages: List[Dict[str, Any]] = []
-        self.chat_state: Dict[str, Any] = {"messageEffects": {}}
+        self.chat_state: Dict[str, Any] = {"messageEffects": {}, "customReactions": []}
         self.message_effects: Dict[str, str] = {}
+        self.custom_reactions: List[Dict[str, Any]] = []
         self._recent_effects: Dict[Tuple[str, str], Tuple[float, str]] = {}
         self._scheduled_lock = threading.Lock()
         self._cancelled_scheduled_ids: set[str] = set()
@@ -1401,6 +1402,10 @@ class BluePillEngine:
                         if isinstance(k, str) and isinstance(v, str):
                             self.message_effects[k] = v
                 self.chat_state["messageEffects"] = self.message_effects
+                creacts = data.get("customReactions")
+                if isinstance(creacts, list):
+                    self.custom_reactions = [dict(r) for r in creacts if isinstance(r, dict)]
+                self.chat_state["customReactions"] = self.custom_reactions
             except Exception:
                 pass
 
@@ -1410,8 +1415,10 @@ class BluePillEngine:
         try:
             os.makedirs(os.path.dirname(self.chat_state_path), exist_ok=True)
             self.chat_state["messageEffects"] = self.message_effects
+            self.chat_state["customReactions"] = self.custom_reactions
             payload = {
                 "pinnedChatGuids": list(self.pinned_chat_guids),
+                "customReactions": list(self.custom_reactions),
                 "mutedChatGuids": sorted(self.muted_chat_guids),
                 "archivedChatGuids": sorted(self.archived_chat_guids),
                 "displayNames": dict(self.chat_display_names_override),
@@ -2923,6 +2930,30 @@ class BluePillEngine:
             if mapped_temp:
                 msg_dict["tempGuid"] = mapped_temp
             out.append(msg_dict)
+        if self.custom_reactions and out:
+            seen_guids = {str(m.get("guid") or "") for m in out}
+            norm_seen_guids = {g.split("/", 1)[-1] if "/" in g else g for g in seen_guids if g}
+            existing_custom_keys = {
+                (
+                    str(m.get("associatedMessageGuid") or "").split("/", 1)[-1],
+                    str(m.get("associatedMessageEmoji") or ""),
+                )
+                for m in out
+                if m.get("associatedMessageEmoji")
+            }
+            for cr in list(self.custom_reactions):
+                cr_guid = str(cr.get("guid") or "")
+                cr_assoc = str(cr.get("associatedMessageGuid") or "")
+                cr_target = cr_assoc.split("/", 1)[-1] if "/" in cr_assoc else cr_assoc
+                cr_emoji = str(cr.get("associatedMessageEmoji") or "")
+                if (
+                    cr_guid
+                    and cr_target in norm_seen_guids
+                    and cr_guid not in seen_guids
+                    and (cr_target, cr_emoji) not in existing_custom_keys
+                ):
+                    out.append(dict(cr))
+                    seen_guids.add(cr_guid)
         return out
 
     def query_messages(self, body: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -4903,9 +4934,24 @@ class BluePillEngine:
         requested_chat_guid = (body.get("chatGuid") or "").strip()
         chat_guid = self._resolve_active_send_chat_guid(requested_chat_guid)
         selected_guid = (body.get("selectedMessageGuid") or "").strip()
-        reaction = (body.get("reaction") or "love").strip()
+        raw_reaction = (body.get("reaction") or "love").strip()
         part_index = int(body.get("partIndex", 0) or 0)
 
+        classic_emoji_aliases = {
+            "❤️": "love",
+            "👍": "like",
+            "👎": "dislike",
+            "😂": "laugh",
+            "‼️": "emphasize",
+            "❓": "question",
+            "-❤️": "-love",
+            "-👍": "-like",
+            "-👎": "-dislike",
+            "-😂": "-laugh",
+            "-‼️": "-emphasize",
+            "-❓": "-question",
+        }
+        reaction = classic_emoji_aliases.get(raw_reaction, raw_reaction)
         reaction_codes = {
             "love": 2000,
             "like": 2001,
@@ -4920,29 +4966,58 @@ class BluePillEngine:
             "-emphasize": 3004,
             "-question": 3005,
         }
+        reaction_lower = reaction.lower()
+        is_classic = reaction_lower in reaction_codes
+        assoc_emoji = ""
+        if is_classic:
+            reaction = reaction_lower
+            assoc_type = reaction_codes[reaction_lower]
+        else:
+            is_removal = reaction.startswith("-") and len(reaction) > 1
+            assoc_emoji = reaction[1:].strip() if is_removal else reaction
+            assoc_type = 3006 if is_removal else 2006
+
         target_react_chat = chat_guid
         if requested_chat_guid and chat_guid != requested_chat_guid and selected_guid:
             if not self._message_exists_in_chat(selected_guid, chat_guid) and self._message_exists_in_chat(selected_guid, requested_chat_guid):
                 # Reactions bind to the specific chat row containing selectedMessageGuid
                 target_react_chat = requested_chat_guid
-        self._send_helper_payload(
-            "send-reaction",
-            {
-                "chatGuid": target_react_chat,
-                "selectedMessageGuid": selected_guid,
-                "reactionType": reaction,
-                "partIndex": part_index,
-            },
-        )
+        helper_payload: Dict[str, Any] = {
+            "chatGuid": target_react_chat,
+            "selectedMessageGuid": selected_guid,
+            "reactionType": reaction,
+            "partIndex": part_index,
+        }
+        if assoc_emoji:
+            helper_payload["emoji"] = assoc_emoji
+        self._send_helper_payload("send-reaction", helper_payload)
         now_ms = int(time.time() * 1000)
-        return {
+        react_obj: Dict[str, Any] = {
             "guid": f"react-{uuid.uuid4()}",
             "chats": [{"guid": target_react_chat}],
             "associatedMessageGuid": f"p:{part_index}/{selected_guid}",
-            "associatedMessageType": reaction_codes.get(reaction, 2000),
+            "associatedMessageType": assoc_type,
+            "associatedMessageEmoji": assoc_emoji,
+            "text": (f"Removed {assoc_emoji} from message" if assoc_type == 3006 else f"Reacted {assoc_emoji} to message") if assoc_emoji else "",
             "isFromMe": True,
             "dateCreated": now_ms,
         }
+        if assoc_emoji and selected_guid:
+            norm_sel = selected_guid.split("/", 1)[-1] if "/" in selected_guid else selected_guid
+            self.custom_reactions = [
+                r for r in self.custom_reactions
+                if not (
+                    str(r.get("associatedMessageGuid") or "").endswith(norm_sel)
+                    and str(r.get("associatedMessageEmoji") or "") == assoc_emoji
+                    and bool(r.get("isFromMe", True))
+                )
+            ]
+            if assoc_type == 2006:
+                self.custom_reactions.append(dict(react_obj))
+                if len(self.custom_reactions) > 500:
+                    self.custom_reactions = self.custom_reactions[-500:]
+            self._save_chat_state()
+        return react_obj
 
     def _chat_guid_for_message(self, msg_guid: str) -> Optional[str]:
         """Chat a message belongs to in chat.db: "" when chat.db says it isn't
@@ -13658,6 +13733,29 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
                 subprocess.run = orig_sub_run
                 sys.platform = orig_r7_plat
                 r7_eng._poll_sent_message_from_db = orig_r7_poll
+                # Verify classic & custom emoji reactions in send_reaction + query_messages
+                cr_classic = r7_eng.send_reaction({
+                    "chatGuid": "iMessage;-;+14155550171",
+                    "selectedMessageGuid": "r7-text-1",
+                    "reaction": "love",
+                })
+                assert cr_classic["associatedMessageType"] == 2000 and cr_classic.get("associatedMessageEmoji", "") == ""
+                cr_custom = r7_eng.send_reaction({
+                    "chatGuid": "iMessage;-;+14155550171",
+                    "selectedMessageGuid": "r7-text-1",
+                    "reaction": "🔥",
+                })
+                assert cr_custom["associatedMessageType"] == 2006 and cr_custom["associatedMessageEmoji"] == "🔥"
+                q_msgs = r7_eng.query_messages({"chatGuid": "iMessage;-;+14155550171", "limit": 20})
+                assert any(m.get("associatedMessageEmoji") == "🔥" and m.get("associatedMessageType") == 2006 for m in q_msgs)
+                cr_remove = r7_eng.send_reaction({
+                    "chatGuid": "iMessage;-;+14155550171",
+                    "selectedMessageGuid": "r7-text-1",
+                    "reaction": "-🔥",
+                })
+                assert cr_remove["associatedMessageType"] == 3006 and cr_remove["associatedMessageEmoji"] == "🔥"
+                q_msgs_after = r7_eng.query_messages({"chatGuid": "iMessage;-;+14155550171", "limit": 20})
+                assert not any(m.get("associatedMessageEmoji") == "🔥" for m in q_msgs_after)
         finally:
             if os.path.exists(r7_db_path):
                 os.remove(r7_db_path)

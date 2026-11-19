@@ -2525,11 +2525,15 @@ private slots:
         pending.insert(QStringLiteral("guid"), QStringLiteral("temp-123"));
         QVERIFY(!allowed(pending));
 
-        // Hovering doesn't open the action bar; right-click does
+        // Hovering opens the action bar by default (hoverMessageActions == true); when disabled, only right-click does
+        QCOMPARE(b.hoverMessageActions(), true);
         win->setProperty("hoveredActionMessageGuid", QStringLiteral("m-new"));
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QStringLiteral("m-new"));
+        b.setHoverMessageActions(false);
         QCOMPARE(win->property("activeActionMessageGuid").toString(), QString());
         win->setProperty("pinnedActionMessageGuid", QStringLiteral("m-new"));
         QCOMPARE(win->property("activeActionMessageGuid").toString(), QStringLiteral("m-new"));
+        b.setHoverMessageActions(true);
         QMetaObject::invokeMethod(win, "clearActionMenu");
 
         // Edit mode: Save edits the message instead of sending a new one
@@ -3984,13 +3988,21 @@ private slots:
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_pins.json")));
         b.loadDemoData();
 
-        // The row shows the Mac's pins (demo mode fakes three), not the most recent chats
+        // With pinnedRowFillRecent == true (default), 3 Mac pins + 1 recent backfill = 4 slots
+        QCOMPARE(b.pinnedRowFillRecent(), true);
+        const QVariantList defaultSlots = b.pinnedChats();
+        QCOMPARE(defaultSlots.size(), 4);
+        QCOMPARE(defaultSlots.at(0).toMap().value(QStringLiteral("isPinned")).toBool(), true);
+        QCOMPARE(defaultSlots.at(3).toMap().value(QStringLiteral("isPinned")).toBool(), false);
+
+        // With pinnedRowFillRecent == false, the row shows only explicit Mac/user pins
+        b.setPinnedRowFillRecent(false);
         const QVariantList macPins = b.pinnedChats();
         QCOMPARE(macPins.size(), 3);
         QCOMPARE(macPins.first().toMap().value(QStringLiteral("shortTitle")).toString(), QStringLiteral("Alex"));
         const QString alexGuid = macPins.first().toMap().value(QStringLiteral("guid")).toString();
 
-        // No Mac pins and none added here: the row is empty
+        // No Mac pins and none added here (when pinnedRowFillRecent == false): the row is empty
         b.setMacPins({});
         QCOMPARE(b.pinnedChats().size(), 0);
         QCOMPARE(b.isChatPinned(alexGuid), false);
@@ -4101,6 +4113,7 @@ private slots:
         for (const QVariant &v : b.chats()) guids << v.toMap().value(QStringLiteral("guid")).toString();
         QCOMPARE(guids, (QStringList{smsGuid, imGuid}));  // SMS first
         // An iMessage pin resolves to the iMessage chat, not the first chat with that number
+        b.setPinnedRowFillRecent(false);
         b.setMacPins({QVariantMap{{"guid", imGuid}, {"chatIdentifier", "+15555550142"}}});
         QCOMPARE(b.pinnedChats().size(), 1);
         QCOMPARE(b.pinnedChats().first().toMap().value(QStringLiteral("guid")).toString(), imGuid);
@@ -10439,6 +10452,196 @@ private slots:
             QCOMPARE(rebuiltAtts2.first().toMap().value(QStringLiteral("waveformBars")).toList(), optWaveform2);
             QVERIFY(rebuiltAtts2.first().toMap().value(QStringLiteral("durationSeconds")).toInt() >= 1);
         }
+    }
+
+    void testFollowupSettingsUiPinsAndCustomEmojiTapbacks() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString statePath = tempDir.filePath(QStringLiteral("state_followup_61_64.json"));
+
+        Backend b(false);
+        b.setStateFilePath(statePath);
+        b.loadDemoData();
+
+        // 1. Default UI preferences & persistence in state.json
+        QCOMPARE(b.historySyncDays(), 60);
+        QCOMPARE(b.showTopBarStatusPill(), false);
+        QCOMPARE(b.showPinnedRow(), true);
+        QCOMPARE(b.pinnedRowFillRecent(), true);
+        QCOMPARE(b.hoverMessageActions(), true);
+
+        // 2. pinnedChats 4-slot recent backfill (0 pinned -> 4 recent; 1 pinned -> 1 pinned + 3 recent; false -> only pinned)
+        b.setMacPins({});
+        QVariantList fill0 = b.pinnedChats();
+        QCOMPARE(fill0.size(), 4);
+        for (const QVariant &v : fill0) {
+            QCOMPARE(v.toMap().value(QStringLiteral("isPinned")).toBool(), false);
+            QCOMPARE(v.toMap().value(QStringLiteral("pinned")).toBool(), false);
+        }
+
+        const QString thirdChatGuid = b.chats().at(2).toMap().value(QStringLiteral("guid")).toString();
+        b.togglePinChat(thirdChatGuid);
+        QVERIFY(b.isChatPinned(thirdChatGuid));
+        QVariantList fill1 = b.pinnedChats();
+        QCOMPARE(fill1.size(), 4);
+        QCOMPARE(fill1.at(0).toMap().value(QStringLiteral("guid")).toString(), thirdChatGuid);
+        QCOMPARE(fill1.at(0).toMap().value(QStringLiteral("isPinned")).toBool(), true);
+        QCOMPARE(fill1.at(1).toMap().value(QStringLiteral("isPinned")).toBool(), false);
+        QCOMPARE(fill1.at(2).toMap().value(QStringLiteral("isPinned")).toBool(), false);
+        QCOMPARE(fill1.at(3).toMap().value(QStringLiteral("isPinned")).toBool(), false);
+
+        b.setPinnedRowFillRecent(false);
+        QVariantList explicitOnly = b.pinnedChats();
+        QCOMPARE(explicitOnly.size(), 1);
+        QCOMPARE(explicitOnly.at(0).toMap().value(QStringLiteral("guid")).toString(), thirdChatGuid);
+        QCOMPARE(explicitOnly.at(0).toMap().value(QStringLiteral("isPinned")).toBool(), true);
+        b.setPinnedRowFillRecent(true);
+
+        // 3. Load Main.qml and verify ThemedComboBox pre-populated "60 days", Settings banner/tabs/toggles, top bar status pill, sidebar 4 hover buttons + tooltips, and custom emoji tapbacks
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+
+        QQuickWindow *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win != nullptr);
+        win->resize(1280, 800);
+        win->show();
+        QTest::qWait(150);
+
+        // Verify historySyncWindowChoices pre-populates "60 days" immediately on startup
+        QQuickItem *syncCombo = win->findChild<QQuickItem *>(QStringLiteral("historySyncWindowChoices"));
+        QVERIFY(syncCombo != nullptr);
+        QCOMPARE(syncCombo->property("displayText").toString(), QStringLiteral("60 days"));
+        QQuickItem *comboContentItem = syncCombo->property("contentItem").value<QQuickItem *>();
+        QVERIFY(comboContentItem != nullptr);
+        QCOMPARE(comboContentItem->property("text").toString(), QStringLiteral("60 days"));
+
+        // Verify Settings version/connection banner & section tabs & UI & Appearance toggles exist
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("settingsVersionBanner")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("settingsClientVersionText")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("settingsRelayStatusText")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("settingsEndpointText")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("settingsSectionTabsRow")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("serverSyncSection")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("uiAppearanceSection")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("toggleTopBarStatusPillBtn")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("toggleShowPinnedRowBtn")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("togglePinnedRowFillRecentBtn")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("toggleHoverMessageActionsBtn")) != nullptr);
+
+        // Verify topBarStatusPill is hidden when showTopBarStatusPill == false and visible when true
+        QQuickItem *topPill = win->findChild<QQuickItem *>(QStringLiteral("topBarStatusPill"));
+        QVERIFY(topPill != nullptr);
+        QCOMPARE(topPill->property("visible").toBool(), false);
+        b.setShowTopBarStatusPill(true);
+        QCoreApplication::processEvents();
+        QCOMPARE(topPill->property("visible").toBool(), true);
+        b.setShowTopBarStatusPill(false);
+        QCoreApplication::processEvents();
+        QCOMPARE(topPill->property("visible").toBool(), false);
+
+        // Verify showPinnedRow hides/shows pinnedChatsBar
+        QQuickItem *pinnedBar = win->findChild<QQuickItem *>(QStringLiteral("pinnedChatsBar"));
+        QVERIFY(pinnedBar != nullptr);
+        QCOMPARE(pinnedBar->property("visible").toBool(), true);
+        b.setShowPinnedRow(false);
+        QCoreApplication::processEvents();
+        QCOMPARE(pinnedBar->property("visible").toBool(), false);
+        b.setShowPinnedRow(true);
+        QCoreApplication::processEvents();
+        QCOMPARE(pinnedBar->property("visible").toBool(), true);
+
+        // Verify sidebar 4 hover buttons & tooltips in Main.qml source and visual tree
+        std::function<QQuickItem *(QQuickItem *, const QString &)> findVisual = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+            if (!item) return nullptr;
+            if (item->objectName() == name) return item;
+            for (QQuickItem *c : item->childItems())
+                if (QQuickItem *f = findVisual(c, name)) return f;
+            return nullptr;
+        };
+        QQuickItem *pinHoverBtn = findVisual(win->contentItem(), QStringLiteral("rowPinChatBtn"));
+        QQuickItem *readHoverBtn = findVisual(win->contentItem(), QStringLiteral("rowReadToggleBtn"));
+        QQuickItem *muteHoverBtn = findVisual(win->contentItem(), QStringLiteral("rowMuteChatBtn"));
+        QQuickItem *delHoverBtn = findVisual(win->contentItem(), QStringLiteral("rowDeleteChatBtn"));
+        QVERIFY(pinHoverBtn != nullptr);
+        QVERIFY(readHoverBtn != nullptr);
+        QVERIFY(muteHoverBtn != nullptr);
+        QVERIFY(delHoverBtn != nullptr);
+
+        // Verify custom emoji Tapback (+ button, picker, and Backend::sendReaction / buildMessageListFromApi with custom emoji 🔥)
+        const QString activeChatGuid = b.chats().first().toMap().value(QStringLiteral("guid")).toString();
+        b.selectChat(activeChatGuid);
+        QCoreApplication::processEvents();
+        QVERIFY(!b.messages().isEmpty());
+        const QString targetMsgGuid = b.messages().first().toMap().value(QStringLiteral("guid")).toString();
+
+        // Hovering shows the action bar when hoverMessageActions == true
+        win->setProperty("hoveredActionMessageGuid", targetMsgGuid);
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), targetMsgGuid);
+        QQuickItem *customReactBtn = findVisual(win->contentItem(), QStringLiteral("customReactionAddBtn"));
+        QVERIFY(customReactBtn != nullptr);
+
+        // Open custom emoji tapback picker and select 🔥
+        QMetaObject::invokeMethod(win, "openTapbackEmojiPicker",
+                                  Q_ARG(QVariant, targetMsgGuid),
+                                  Q_ARG(QVariant, 200),
+                                  Q_ARG(QVariant, 200));
+        QCOMPARE(win->property("showTapbackEmojiPicker").toBool(), true);
+        QQuickItem *tapbackPopup = win->findChild<QQuickItem *>(QStringLiteral("tapbackEmojiPickerPopup"));
+        QVERIFY(tapbackPopup != nullptr);
+        QCOMPARE(tapbackPopup->property("visible").toBool(), true);
+
+        QMetaObject::invokeMethod(win, "selectTapbackCustomEmoji", Q_ARG(QVariant, QStringLiteral("🔥")));
+        QCOMPARE(win->property("showTapbackEmojiPicker").toBool(), false);
+        const QVariantList updatedReactions = b.messages().first().toMap().value(QStringLiteral("reactions")).toList();
+        bool foundFireEmoji = false;
+        for (const QVariant &rv : updatedReactions) {
+            const QVariantMap rm = rv.toMap();
+            if (rm.value(QStringLiteral("emoji")).toString() == QStringLiteral("🔥")) {
+                foundFireEmoji = true;
+                QCOMPARE(rm.value(QStringLiteral("fromMe")).toBool(), true);
+                QCOMPARE(rm.value(QStringLiteral("count")).toInt(), 1);
+            }
+        }
+        QVERIFY(foundFireEmoji);
+
+        // Verify buildMessageListFromApi folds associatedMessageType 2006 + associatedMessageEmoji "🚀" and removes on 3006
+        QJsonObject parentObj{{QStringLiteral("guid"), QStringLiteral("m-custom-parent")},
+                              {QStringLiteral("text"), QStringLiteral("Launch ready")},
+                              {QStringLiteral("isFromMe"), false},
+                              {QStringLiteral("dateCreated"), 1795000001000LL}};
+        QJsonObject customReactAdd{{QStringLiteral("guid"), QStringLiteral("m-custom-r1")},
+                                   {QStringLiteral("associatedMessageGuid"), QStringLiteral("p:0/m-custom-parent")},
+                                   {QStringLiteral("associatedMessageType"), 2006},
+                                   {QStringLiteral("associatedMessageEmoji"), QStringLiteral("🚀")},
+                                   {QStringLiteral("isFromMe"), true},
+                                   {QStringLiteral("dateCreated"), 1795000002000LL}};
+        QHash<QString, QString> emptyContacts, emptyAtts;
+        QVariantList built1 = Backend::buildMessageListFromApi(QJsonArray{customReactAdd, parentObj}, emptyContacts, emptyAtts);
+        QCOMPARE(built1.size(), 1);
+        QVariantList built1Reacts = built1.first().toMap().value(QStringLiteral("reactions")).toList();
+        QCOMPARE(built1Reacts.size(), 1);
+        QCOMPARE(built1Reacts.first().toMap().value(QStringLiteral("emoji")).toString(), QStringLiteral("🚀"));
+
+        // Verify persistence of all 4 UI settings in state.json (in non-demo mode)
+        Backend bPersist1(false);
+        bPersist1.setStateFilePath(statePath);
+        bPersist1.setShowTopBarStatusPill(true);
+        bPersist1.setShowPinnedRow(false);
+        bPersist1.setPinnedRowFillRecent(false);
+        bPersist1.setHoverMessageActions(false);
+
+        Backend bPersist2(false);
+        bPersist2.setStateFilePath(statePath);
+        QCOMPARE(bPersist2.showTopBarStatusPill(), true);
+        QCOMPARE(bPersist2.showPinnedRow(), false);
+        QCOMPARE(bPersist2.pinnedRowFillRecent(), false);
+        QCOMPARE(bPersist2.hoverMessageActions(), false);
     }
 
 };

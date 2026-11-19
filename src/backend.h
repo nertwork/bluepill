@@ -118,6 +118,10 @@ class Backend : public QObject {
     Q_PROPERTY(bool loadingOlderMessages READ loadingOlderMessages NOTIFY olderMessagesChanged)
     Q_PROPERTY(int loadedMessageCount READ loadedMessageCount NOTIFY messagesChanged)
     Q_PROPERTY(int historySyncDays READ historySyncDays WRITE setHistorySyncDays NOTIFY historySyncDaysChanged)
+    Q_PROPERTY(bool showTopBarStatusPill READ showTopBarStatusPill WRITE setShowTopBarStatusPill NOTIFY uiPreferencesChanged)
+    Q_PROPERTY(bool showPinnedRow READ showPinnedRow WRITE setShowPinnedRow NOTIFY uiPreferencesChanged)
+    Q_PROPERTY(bool pinnedRowFillRecent READ pinnedRowFillRecent WRITE setPinnedRowFillRecent NOTIFY uiPreferencesChanged)
+    Q_PROPERTY(bool hoverMessageActions READ hoverMessageActions WRITE setHoverMessageActions NOTIFY uiPreferencesChanged)
     Q_PROPERTY(bool syncingHistory READ syncingHistory NOTIFY syncingHistoryChanged)
     Q_PROPERTY(QString playingAudioGuid READ playingAudioGuid NOTIFY audioPlaybackChanged)
     Q_PROPERTY(bool audioPlaying READ audioPlaying NOTIFY audioPlaybackChanged)
@@ -204,6 +208,14 @@ public:
     bool loadingOlderMessages() const { return m_loadingOlderMessages; }
     int loadedMessageCount() const { return m_messages.size(); }
     int historySyncDays() const { return m_historySyncDays; }
+    bool showTopBarStatusPill() const { return m_showTopBarStatusPill; }
+    void setShowTopBarStatusPill(bool enabled);
+    bool showPinnedRow() const { return m_showPinnedRow; }
+    void setShowPinnedRow(bool enabled);
+    bool pinnedRowFillRecent() const { return m_pinnedRowFillRecent; }
+    void setPinnedRowFillRecent(bool enabled);
+    bool hoverMessageActions() const { return m_hoverMessageActions; }
+    void setHoverMessageActions(bool enabled);
     bool syncingHistory() const { return m_syncingHistory; }
     QString playingAudioGuid() const { return m_playingAudioGuid; }
     bool audioPlaying() const { return m_audioPlaying; }
@@ -621,6 +633,7 @@ signals:
     void olderMessagesChanged();
     void windowActiveChanged();
     void historySyncDaysChanged();
+    void uiPreferencesChanged();
     void syncingHistoryChanged();
     void audioPlaybackChanged();
     void voiceRecordingChanged();
@@ -801,6 +814,10 @@ private:
     QString m_serverStatus = QStringLiteral("Connecting...");
     QString m_lastKnownServerStatus = QStringLiteral("Connected · Private API");
     int m_historySyncDays = 60;
+    bool m_showTopBarStatusPill = false;
+    bool m_showPinnedRow = true;
+    bool m_pinnedRowFillRecent = true;
+    bool m_hoverMessageActions = true;
     bool m_syncingHistory = false;
     int m_historySyncGeneration = 0;
     bool m_stayOnHomePage = false;

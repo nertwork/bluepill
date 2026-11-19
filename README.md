@@ -97,7 +97,7 @@ bluepill --webui
 - **Customizable Notifications, 6 Audio Ding Presets & Top-Left Red/Green Connection Indicator:**
   - Eliminates spurious startup/historical/self-echo audio alerts via startup baseline (`m_initialSyncComplete`, `m_startupTimestamp`, `m_startupHighestRowId`), persistent `notifiedMessageGuids` in `state.json`, and active-chat focus mute (`notificationMuteWhenActive`).
   - Configurable in **`⚙ Settings` (`Ctrl+,`) -> Notifications & Audio Ding** with toggles for **Desktop Banner**, **Audio Ding**, and **Mute Focused Chat**, **6 built-in synthesized `.wav` presets** (`Classic Chime`, `Crystal Ding`, `Tri-Tone Marimba`, `Soft Pop`, `Glass Ping`, `System Tone`), **`🔊 Preview Ding`**, and **`🔔 Test Alert`**.
-  - Top-left connection dot & status pill turn **Red (`Disconnected`)** immediately when offline and **Green (`Connected`)** when online.
+  - Top-left connection dot (and optional `showTopBarStatusPill` status pill) turn **Red (`Disconnected`)** immediately when offline and **Green (`Connected`)** when online, while **`⚙ Settings` (`Ctrl+,`)** includes a live **Client/Relay Version Banner**, **Server & Sync / UI & Appearance / Notifications & Audio** section tabs, configurable **4-slot Pinned Row Recent Backfill** (`pinnedRowFillRecent`), sidebar **`📌` Pin/Unpin** hover action with tooltips on all 4 hover actions, **Hover Tapback Action Bar** (`hoverMessageActions`), and **`➕` Custom Emoji Tapbacks**.
 - **High-Contrast Darker Emerald RCS Sent Bubbles (`#1B5E3A`):** Vivid contrast and WCAG AA legibility for sent RCS messages against dark backgrounds, paired with `<0.5ms` non-blocking async clipboard image copy/paste.
 - **Full Headless JSON CLI (`bluepill`, `imsg` & `bluepill-server`):**
   ```bash

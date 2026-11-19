@@ -11,7 +11,7 @@ ComboBox {
     contentItem: Text {
         leftPadding: 10
         rightPadding: control.indicator.width + 6
-        text: control.displayText
+        text: control.displayText !== "" ? control.displayText : control.currentText
         font: control.font
         color: control.enabled ? theme.brightForeground : theme.darkForeground
         verticalAlignment: Text.AlignVCenter

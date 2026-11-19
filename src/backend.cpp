@@ -385,6 +385,10 @@ void Backend::setStateFilePath(const QString &path) {
     m_icloudCalendarEnabled = true;
     m_icloudPhotosEnabled = true;
     m_historySyncDays = 60;
+    m_showTopBarStatusPill = false;
+    m_showPinnedRow = true;
+    m_pinnedRowFillRecent = true;
+    m_hoverMessageActions = true;
     m_stayOnHomePage = false;
     m_mutedChats.clear();
     m_readWatermarks.clear();
@@ -462,6 +466,18 @@ void Backend::loadAppState() {
     }
     if (obj.contains(QStringLiteral("historySyncDays"))) {
         m_historySyncDays = qBound(1, obj.value(QStringLiteral("historySyncDays")).toInt(60), 3650);
+    }
+    if (obj.contains(QStringLiteral("showTopBarStatusPill"))) {
+        m_showTopBarStatusPill = obj.value(QStringLiteral("showTopBarStatusPill")).toBool(false);
+    }
+    if (obj.contains(QStringLiteral("showPinnedRow"))) {
+        m_showPinnedRow = obj.value(QStringLiteral("showPinnedRow")).toBool(true);
+    }
+    if (obj.contains(QStringLiteral("pinnedRowFillRecent"))) {
+        m_pinnedRowFillRecent = obj.value(QStringLiteral("pinnedRowFillRecent")).toBool(true);
+    }
+    if (obj.contains(QStringLiteral("hoverMessageActions"))) {
+        m_hoverMessageActions = obj.value(QStringLiteral("hoverMessageActions")).toBool(true);
     }
     const QString savedStatus = obj.value(QStringLiteral("lastKnownServerStatus")).toString().trimmed();
     if (!savedStatus.isEmpty()) {
@@ -640,6 +656,7 @@ void Backend::loadAppState() {
 
     emit notificationsChanged();
     emit historySyncDaysChanged();
+    emit uiPreferencesChanged();
     emit chatsChanged();
     emit selectedChatChanged();
 }
@@ -697,6 +714,10 @@ bool Backend::saveAppState() const {
     root.insert(QStringLiteral("icloudCalendarEnabled"), m_icloudCalendarEnabled);
     root.insert(QStringLiteral("icloudPhotosEnabled"), m_icloudPhotosEnabled);
     root.insert(QStringLiteral("historySyncDays"), m_historySyncDays);
+    root.insert(QStringLiteral("showTopBarStatusPill"), m_showTopBarStatusPill);
+    root.insert(QStringLiteral("showPinnedRow"), m_showPinnedRow);
+    root.insert(QStringLiteral("pinnedRowFillRecent"), m_pinnedRowFillRecent);
+    root.insert(QStringLiteral("hoverMessageActions"), m_hoverMessageActions);
     root.insert(QStringLiteral("lastKnownServerStatus"), m_lastKnownServerStatus);
     QJsonArray pinnedArr;
     for (const QString &g : m_pinnedChats) {
@@ -1129,6 +1150,36 @@ void Backend::cycleHistorySyncDays() {
         }
     }
     setHistorySyncDays(next);
+}
+
+void Backend::setShowTopBarStatusPill(bool enabled) {
+    if (m_showTopBarStatusPill == enabled) return;
+    m_showTopBarStatusPill = enabled;
+    saveAppState();
+    emit uiPreferencesChanged();
+}
+
+void Backend::setShowPinnedRow(bool enabled) {
+    if (m_showPinnedRow == enabled) return;
+    m_showPinnedRow = enabled;
+    saveAppState();
+    emit uiPreferencesChanged();
+    emit chatsChanged();
+}
+
+void Backend::setPinnedRowFillRecent(bool enabled) {
+    if (m_pinnedRowFillRecent == enabled) return;
+    m_pinnedRowFillRecent = enabled;
+    saveAppState();
+    emit uiPreferencesChanged();
+    emit chatsChanged();
+}
+
+void Backend::setHoverMessageActions(bool enabled) {
+    if (m_hoverMessageActions == enabled) return;
+    m_hoverMessageActions = enabled;
+    saveAppState();
+    emit uiPreferencesChanged();
 }
 
 bool Backend::selectedChatMuted() const {
@@ -2832,11 +2883,18 @@ QString Backend::mapReactionEmoji(const QString &typeStr, const QString &text, b
     if (t == QStringLiteral("2005") || t == QStringLiteral("3005") || t == QStringLiteral("question") || t == QStringLiteral("-question"))
         return QStringLiteral("❓");
     if (t == QStringLiteral("2006") || t == QStringLiteral("3006")) {
-        // iOS 18 / RCS custom emoji reaction: "Reacted 🤍 to “...”"
-        QRegularExpression re(QStringLiteral(R"(Reacted\s+(\S+)\s+to)"));
+        // iOS 18 / macOS Sequoia/Tahoe / RCS custom emoji reaction: "Reacted 🤍 to “...”" or "Removed 🤍 from “...”"
+        QRegularExpression re(QStringLiteral(R"((?:Reacted|Removed)\s+(\S+)\s+(?:to|from))"));
         auto m = re.match(text);
         if (m.hasMatch()) return m.captured(1);
+        const QString trText = text.trimmed();
+        if (!trText.isEmpty() && jumboEmojiCount(trText) == 1) return trText;
         return QStringLiteral("✨");
+    }
+    const QString rawType = typeStr.trimmed();
+    const QString candidateEmoji = rawType.startsWith(QLatin1Char('-')) ? rawType.mid(1).trimmed() : rawType;
+    if (!candidateEmoji.isEmpty() && jumboEmojiCount(candidateEmoji) == 1) {
+        return candidateEmoji;
     }
     return QString();
 }
@@ -4811,7 +4869,8 @@ static bool isTapbackOrAssociatedMessage(const QJsonObject &m) {
     const QString assocType = m.value(QStringLiteral("associatedMessageType")).toVariant().toString();
     const int assocTypeInt = m.value(QStringLiteral("associatedMessageType")).toInt(0);
     const QString assocGuid = m.value(QStringLiteral("associatedMessageGuid")).toString().trimmed();
-    if (assocTypeInt >= 2000 || !assocGuid.isEmpty()) {
+    const QString assocEmoji = m.value(QStringLiteral("associatedMessageEmoji")).toString().trimmed();
+    if (assocTypeInt >= 2000 || !assocGuid.isEmpty() || !assocEmoji.isEmpty()) {
         return true;
     }
     return !Backend::mapReactionEmoji(assocType, Backend::extractMessageText(m)).isEmpty();
@@ -5811,7 +5870,10 @@ QVariantList Backend::chats() const {
 
 QVariantList Backend::pinnedChats() const {
     QVariantList result;
-    auto appendEntry = [&](const ChatEntry &c) {
+    QSet<QString> seenGuids;
+    auto appendEntry = [&](const ChatEntry &c, bool isExplicitPin) {
+        if (c.guid.isEmpty() || seenGuids.contains(c.guid)) return;
+        seenGuids.insert(c.guid);
         QVariantMap map;
         map.insert(QStringLiteral("guid"), c.guid);
         map.insert(QStringLiteral("title"), c.title);
@@ -5828,20 +5890,28 @@ QVariantList Backend::pinnedChats() const {
         map.insert(QStringLiteral("unreadCount"), c.unreadCount);
         map.insert(QStringLiteral("isGroup"), c.isGroup);
         map.insert(QStringLiteral("service"), c.service);
-        map.insert(QStringLiteral("pinned"), true);
+        map.insert(QStringLiteral("pinned"), isExplicitPin);
+        map.insert(QStringLiteral("isPinned"), isExplicitPin);
         // Same fields the chat list gives the context menu
         map.insert(QStringLiteral("address"), (!c.isGroup && !c.participantHandles.isEmpty()) ? c.participantHandles.first() : c.chatIdentifier);
         map.insert(QStringLiteral("isMuted"), m_mutedChats.contains(c.guid));
         map.insert(QStringLiteral("muted"), m_mutedChats.contains(c.guid));
         result.append(map);
     };
-    // The Mac's pins (in its order), minus any unpinned here, then pins added
-    // here. Nothing pinned means an empty row, not the most recent chats.
+    // The Mac's pins (in its order), minus any unpinned here, then pins added here.
     for (const QString &pinGuid : effectivePinnedChatGuids()) {
         for (const ChatEntry &c : m_chats) {
             if (c.guid == pinGuid) {
-                appendEntry(c);
+                appendEntry(c, true);
                 break;
+            }
+        }
+    }
+    if (m_pinnedRowFillRecent) {
+        for (const ChatEntry &c : m_chats) {
+            if (result.size() >= 4) break;
+            if (!seenGuids.contains(c.guid)) {
+                appendEntry(c, false);
             }
         }
     }
@@ -6433,9 +6503,16 @@ QVariantList Backend::buildMessageListFromApi(
         const QString normGuid = normalizeAssociatedGuid(guid);
         QString assocGuid = normalizeAssociatedGuid(m.value(QStringLiteral("associatedMessageGuid")).toString());
         const QString assocType = m.value(QStringLiteral("associatedMessageType")).toVariant().toString();
+        const QString assocEmoji = m.value(QStringLiteral("associatedMessageEmoji")).toString().trimmed();
         const QString rawText = extractMessageText(m);
         bool isRemoval = false;
-        const QString emoji = mapReactionEmoji(assocType, rawText, &isRemoval);
+        QString emoji = mapReactionEmoji(assocType, rawText, &isRemoval);
+        if ((emoji.isEmpty() || emoji == QStringLiteral("✨")) && !assocEmoji.isEmpty()) {
+            emoji = assocEmoji;
+            if (assocType == QStringLiteral("3006") || assocType.startsWith(QLatin1Char('-'))) {
+                isRemoval = true;
+            }
+        }
 
         const bool isFromMe = m.value(QStringLiteral("isFromMe")).toBool();
         const QString senderName = resolveSenderForMessage(m);
@@ -6549,7 +6626,8 @@ QVariantList Backend::buildMessageListFromApi(
 
         // Skip tapback messages from main timeline if they belong to a parent
         const QString effectiveAssocGuid = !assocGuid.isEmpty() ? assocGuid : resolvedReactionTargetByGuid.value(guid);
-        if (!effectiveAssocGuid.isEmpty() && !mapReactionEmoji(assocType, text).isEmpty()) {
+        const QString assocEmoji = m.value(QStringLiteral("associatedMessageEmoji")).toString().trimmed();
+        if (!effectiveAssocGuid.isEmpty() && (!mapReactionEmoji(assocType, text).isEmpty() || !assocEmoji.isEmpty())) {
             continue;
         }
 
@@ -8856,15 +8934,29 @@ void Backend::sendReaction(const QString &chatGuid, const QString &messageGuid, 
     const QString canonicalGuid = resolveCanonicalChatGuid(chatGuid);
     const QString sendChatGuid = resolveActiveSendChatGuid(canonicalGuid);
 
-    QString reactionKey = reaction.trimmed().toLower();
-    if (reaction == QStringLiteral("❤️")) reactionKey = QStringLiteral("love");
-    else if (reaction == QStringLiteral("👍")) reactionKey = QStringLiteral("like");
-    else if (reaction == QStringLiteral("👎")) reactionKey = QStringLiteral("dislike");
-    else if (reaction == QStringLiteral("😂")) reactionKey = QStringLiteral("laugh");
-    else if (reaction == QStringLiteral("‼️")) reactionKey = QStringLiteral("emphasize");
-    else if (reaction == QStringLiteral("❓")) reactionKey = QStringLiteral("question");
+    const QString trimmedReaction = reaction.trimmed();
+    QString reactionKey = trimmedReaction.toLower();
+    if (trimmedReaction == QStringLiteral("❤️")) reactionKey = QStringLiteral("love");
+    else if (trimmedReaction == QStringLiteral("👍")) reactionKey = QStringLiteral("like");
+    else if (trimmedReaction == QStringLiteral("👎")) reactionKey = QStringLiteral("dislike");
+    else if (trimmedReaction == QStringLiteral("😂")) reactionKey = QStringLiteral("laugh");
+    else if (trimmedReaction == QStringLiteral("‼️")) reactionKey = QStringLiteral("emphasize");
+    else if (trimmedReaction == QStringLiteral("❓")) reactionKey = QStringLiteral("question");
+    else if (trimmedReaction == QStringLiteral("-❤️")) reactionKey = QStringLiteral("-love");
+    else if (trimmedReaction == QStringLiteral("-👍")) reactionKey = QStringLiteral("-like");
+    else if (trimmedReaction == QStringLiteral("-👎")) reactionKey = QStringLiteral("-dislike");
+    else if (trimmedReaction == QStringLiteral("-😂")) reactionKey = QStringLiteral("-laugh");
+    else if (trimmedReaction == QStringLiteral("-‼️")) reactionKey = QStringLiteral("-emphasize");
+    else if (trimmedReaction == QStringLiteral("-❓")) reactionKey = QStringLiteral("-question");
+    else if (mapReactionEmoji(reactionKey).isEmpty()) {
+        reactionKey = trimmedReaction;
+    }
 
-    const QString emoji = mapReactionEmoji(reactionKey).isEmpty() ? reaction : mapReactionEmoji(reactionKey);
+    bool isRemoval = false;
+    const QString mapped = mapReactionEmoji(reactionKey, QString(), &isRemoval);
+    const QString emoji = mapped.isEmpty()
+        ? (trimmedReaction.startsWith(QLatin1Char('-')) ? trimmedReaction.mid(1).trimmed() : trimmedReaction)
+        : mapped;
 
     // Immediate optimistic update on m_messages
     for (int i = 0; i < m_messages.size(); ++i) {
@@ -8933,7 +9025,17 @@ void Backend::sendReaction(const QString &chatGuid, const QString &messageGuid, 
     reactReq.setPriority(QNetworkRequest::HighPriority);
     QNetworkReply *reply = m_sendNam.post(reactReq, QJsonDocument(payload).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid]() {
+        const QByteArray body = reply->readAll();
+        const bool ok = (reply->error() == QNetworkReply::NoError);
         reply->deleteLater();
+        if (ok && !body.isEmpty()) {
+            const QJsonObject resp = QJsonDocument::fromJson(body).object();
+            const QJsonObject dataObj = resp.value(QStringLiteral("data")).toObject();
+            const QString rGuid = dataObj.value(QStringLiteral("guid")).toString().trimmed();
+            if (!rGuid.isEmpty()) {
+                m_chatMessagesCache[canonicalGuid].insert(rGuid, dataObj);
+            }
+        }
         loadChatMessages(canonicalGuid);
         QTimer::singleShot(1200, this, [this, canonicalGuid]() {
             if (m_selectedChatGuid == canonicalGuid) {

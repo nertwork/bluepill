@@ -14,6 +14,13 @@
   - **Macs on your Tailscale network:** If `tailscale` is installed and connected, Settings lists the online macOS peers on your tailnet, checks each for a relay on `:1235`, and fills in the URL with one click. If exactly one relay answers on first run, it's filled in for you. A Mac shown as *No relay on :1235* may be running `bluepill-server` without `--host`, so it only listens on `127.0.0.1`.
   - **Failover Server URL (Optional):** `https://backup-relay.example.com:443`. Include the port inline; without one, `1235` is used.
   - **API Password / Key:** Your relay password/token
+  - **Settings Status & Version Banner + Section Tabs (`All`, `Server & Sync`, `UI & Appearance`, `Notifications & Audio`):**
+    - Displays the active **BluePill Client Version** (`v1.2.3`), live **Relay Status & Version**, and **Connected Endpoint** at the top of Settings.
+    - **UI & Appearance Preferences** (persisted in `~/.config/bluepill/state.json`):
+      - `showTopBarStatusPill` (default `false`): Show or hide the compact connection & version status pill in the top bar next to the BluePill badge.
+      - `showPinnedRow` (default `true`): Show or hide the pinned / quick-access conversations row at the top of the sidebar.
+      - `pinnedRowFillRecent` (default `true`): Backfill any empty slots in the 4-slot pinned row with your most recent conversations (`isPinned: false` vs `isPinned: true`, with right-click **Pin conversation** / **Unpin conversation** and a `📌` hover action button in the sidebar).
+      - `hoverMessageActions` (default `true`): Reveal the floating Tapback (`❤️ 👍 👎 😂 ‼️ ❓ ➕`), Reply, Edit, Copy, and Delete action bar when hovering over a message bubble or photo (in addition to right-clicking), including the **`➕` Custom Emoji Tapback Picker** for reacting with any emoji.
 
 URLs in `config.json` and in environment variables are used **as written**: no default port is added when they're loaded. Include the port explicitly (e.g. `http://mac-relay.example.com:1235`).
 

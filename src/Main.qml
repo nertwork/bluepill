@@ -69,11 +69,47 @@ ApplicationWindow {
     property string pinnedActionMessageGuid: ""
     // The photo that was right-clicked, so Copy Image copies that one
     property string pinnedActionAttachmentGuid: ""
-    // The tapback / reply / copy / delete bar opens on right-click only (hovering
-    // a message neither outlines it nor shows the bar).
-    readonly property string activeActionMessageGuid: pinnedActionMessageGuid
+    property bool showTapbackEmojiPicker: false
+    property string tapbackEmojiTargetGuid: ""
+    property string tapbackEmojiQuery: ""
+    property string tapbackEmojiCategory: "All"
+    property real tapbackEmojiPopupX: 0
+    property real tapbackEmojiPopupY: 0
+    property string settingsActiveTab: "all"
+    // Shows on hover when backend.hoverMessageActions is enabled (default true), and always when pinned via right-click.
+    readonly property string activeActionMessageGuid: pinnedActionMessageGuid !== ""
+                                                      ? pinnedActionMessageGuid
+                                                      : (backend.hoverMessageActions ? hoveredActionMessageGuid : "")
+
+    function openTapbackEmojiPicker(msgGuid, xPos, yPos) {
+        if (!msgGuid || msgGuid.length === 0) return
+        root.pinnedActionMessageGuid = msgGuid
+        root.tapbackEmojiTargetGuid = msgGuid
+        root.tapbackEmojiQuery = ""
+        root.tapbackEmojiCategory = "All"
+        root.tapbackEmojiPopupX = Math.max(12, Math.min(xPos || 120, root.width - 360))
+        root.tapbackEmojiPopupY = Math.max(56, Math.min(yPos || 120, root.height - 300))
+        root.showTapbackEmojiPicker = true
+    }
+
+    function closeTapbackEmojiPicker() {
+        root.showTapbackEmojiPicker = false
+        root.tapbackEmojiTargetGuid = ""
+        root.tapbackEmojiQuery = ""
+    }
+
+    function selectTapbackCustomEmoji(emoji) {
+        var cGuid = backend.selectedChatGuid
+        var mGuid = root.tapbackEmojiTargetGuid || root.activeActionMessageGuid
+        root.closeTapbackEmojiPicker()
+        root.clearActionMenu()
+        if (cGuid.length > 0 && mGuid.length > 0 && emoji && emoji.length > 0) {
+            backend.sendReaction(cGuid, mGuid, emoji)
+        }
+    }
 
     function clearActionMenu() {
+        closeTapbackEmojiPicker()
         pinnedActionMessageGuid = ""
         pinnedActionAttachmentGuid = ""
         hoveredActionMessageGuid = ""
@@ -1450,6 +1486,8 @@ ApplicationWindow {
                 root.showThreadView = false
             } else if (root.showContactInfo) {
                 root.closeContactInfo()
+            } else if (root.showTapbackEmojiPicker) {
+                root.closeTapbackEmojiPicker()
             } else if (root.showEmojiPicker) {
                 root.showEmojiPicker = false
             } else if (root.isEmojiCycling || root.emojiAutocompleteResults.length > 0) {
@@ -1559,6 +1597,55 @@ ApplicationWindow {
                                 font.bold: true
                                 color: !backend.connected ? theme.red : theme.brightForeground
                             }
+                        }
+                    }
+
+                    Rectangle {
+                        id: topBarStatusPill
+                        objectName: "topBarStatusPill"
+                        visible: backend.showTopBarStatusPill
+                            height: 26
+                            radius: 13
+                            implicitWidth: topStatusPillRow.implicitWidth + 18
+                            color: topStatusPillMouse.containsMouse
+                                   ? theme.selection
+                                   : (backend.connected ? Qt.rgba(48/255, 209/255, 88/255, 0.14) : Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.14))
+                            border.width: 1
+                            border.color: backend.connected ? theme.green : theme.red
+                            ToolTip.visible: topStatusPillMouse.containsMouse
+                            ToolTip.text: backend.serverStatus + (backend.serverUrl.length > 0 ? " · " + backend.serverUrl : "")
+                            ToolTip.delay: 250
+
+                            RowLayout {
+                                id: topStatusPillRow
+                                anchors.centerIn: parent
+                                spacing: 6
+                                Rectangle {
+                                    width: 7
+                                    height: 7
+                                    radius: 3.5
+                                    color: backend.connected ? theme.green : theme.red
+                                }
+                                Text {
+                                    id: topStatusPillText
+                                    objectName: "topStatusPillText"
+                                    text: {
+                                        var ver = Qt.application.version ? ("v" + Qt.application.version) : "v1.2.3"
+                                        var st = backend.connected ? (i18n.tr("Connected") + " " + ver) : i18n.tr("Disconnected")
+                                        var host = (backend.serverUrl || "").replace(/^https?:\/\//i, "").replace(/^ssh:\/\//i, "").replace(/\/.*$/, "")
+                                        return host.length > 0 ? (st + " · " + host) : st
+                                    }
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: backend.connected ? theme.green : theme.red
+                                }
+                            }
+                        MouseArea {
+                            id: topStatusPillMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.openServerConfigModal()
                         }
                     }
                 }
@@ -2102,7 +2189,7 @@ ApplicationWindow {
                     Rectangle {
                         id: pinnedChatsBar
                         objectName: "pinnedChatsBar"
-                        visible: backend.pinnedChats.length > 0 && backend.searchQuery.length === 0
+                        visible: backend.showPinnedRow && backend.pinnedChats.length > 0 && backend.searchQuery.length === 0
                         Layout.fillWidth: true
                         Layout.preferredHeight: visible ? 76 : 0
                         color: "transparent"
@@ -2160,6 +2247,27 @@ ApplicationWindow {
                                                     font.pixelSize: 9
                                                     font.bold: true
                                                     color: "#ffffff"
+                                                }
+                                            }
+                               
+                                            // Subtle pin badge when explicitly pinned (vs recent backfill)
+                                            Rectangle {
+                                                objectName: "pinnedTilePinBadge"
+                                                visible: Boolean(modelData.isPinned)
+                                                anchors.right: parent.right
+                                                anchors.bottom: parent.bottom
+                                                anchors.rightMargin: -2
+                                                anchors.bottomMargin: -2
+                                                width: 15
+                                                height: 15
+                                                radius: 7.5
+                                                color: theme.darkBackground
+                                                border.width: 1
+                                                border.color: theme.accent
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: "📌"
+                                                    font.pixelSize: 8
                                                 }
                                             }
                                         }
@@ -2331,11 +2439,43 @@ ApplicationWindow {
                                             maximumLineCount: 1
                                         }
 
-                                        // Read/unread toggle (was the header's Read button)
+                                        // 1. Pin / Unpin conversation toggle
+                                        Rectangle {
+                                            id: rowPinChatBtn
+                                            objectName: "rowPinChatBtn"
+                                            readonly property bool chatIsPinned: (void(backend.pinnedChats), Boolean(modelData.pinned) || backend.isChatPinned(modelData.guid))
+                                            visible: chatHover.containsMouse || rowPinMouse.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
+                                            width: 22
+                                            height: 20
+                                            radius: 5
+                                            z: 3
+                                            color: rowPinMouse.containsMouse
+                                                   ? theme.accent
+                                                   : (chatIsPinned ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.background)
+                                            border.width: 1
+                                            border.color: (rowPinMouse.containsMouse || chatIsPinned) ? theme.accent : theme.muted
+                                            ToolTip.visible: rowPinMouse.containsMouse
+                                            ToolTip.text: chatIsPinned ? i18n.tr("Unpin conversation") : i18n.tr("Pin conversation")
+                                            ToolTip.delay: 400
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: "📌"
+                                                font.pixelSize: theme.fontSize - 3
+                                            }
+                                            MouseArea {
+                                                id: rowPinMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: backend.togglePinChat(modelData.guid)
+                                            }
+                                        }
+
+                                        // 2. Read/unread toggle (was the header's Read button)
                                         Rectangle {
                                             id: rowReadToggleBtn
                                             objectName: "rowReadToggleBtn"
-                                            visible: chatHover.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
+                                            visible: chatHover.containsMouse || rowPinMouse.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
                                             width: 22
                                             height: 20
                                             radius: 5
@@ -2361,8 +2501,11 @@ ApplicationWindow {
                                             }
                                         }
 
+                                        // 3. Silence / Unmute notifications toggle
                                         Rectangle {
-                                            visible: chatHover.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
+                                            id: rowMuteChatBtn
+                                            objectName: "rowMuteChatBtn"
+                                            visible: chatHover.containsMouse || rowPinMouse.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
                                             width: 22
                                             height: 20
                                             radius: 5
@@ -2370,6 +2513,9 @@ ApplicationWindow {
                                             color: rowMuteMouse.containsMouse ? theme.accent : theme.background
                                             border.width: 1
                                             border.color: theme.muted
+                                            ToolTip.visible: rowMuteMouse.containsMouse
+                                            ToolTip.text: (modelData.isMuted || modelData.muted) ? i18n.tr("Unmute conversation") : i18n.tr("Silence notifications")
+                                            ToolTip.delay: 400
                                             Text {
                                                 anchors.centerIn: parent
                                                 text: modelData.muted ? "🔔" : "🔕"
@@ -2384,9 +2530,11 @@ ApplicationWindow {
                                             }
                                         }
 
+                                        // 4. Delete conversation button
                                         Rectangle {
                                             id: rowDeleteChatBtn
-                                            visible: chatHover.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
+                                            objectName: "rowDeleteChatBtn"
+                                            visible: chatHover.containsMouse || rowPinMouse.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
                                             width: 22
                                             height: 20
                                             radius: 5
@@ -2394,6 +2542,9 @@ ApplicationWindow {
                                             color: rowDeleteMouse.containsMouse ? "#3b1d26" : theme.background
                                             border.width: 1
                                             border.color: rowDeleteMouse.containsMouse ? "#f7768e" : theme.muted
+                                            ToolTip.visible: rowDeleteMouse.containsMouse
+                                            ToolTip.text: i18n.tr("Delete conversation")
+                                            ToolTip.delay: 400
                                             Text {
                                                 anchors.centerIn: parent
                                                 text: "󰆴"
@@ -3690,6 +3841,48 @@ ApplicationWindow {
                                                         var reactEmoji = modelData
                                                         root.clearActionMenu()
                                                         backend.sendReaction(cGuid, mGuid, reactEmoji)
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            id: customReactionAddBtn
+                                            objectName: "customReactionAddBtn"
+                                            width: 30
+                                            height: 30
+                                            radius: 15
+                                            color: (customReactBtnMouse.containsMouse || (root.showTapbackEmojiPicker && root.tapbackEmojiTargetGuid === msgDelegate.modelData.guid))
+                                                   ? theme.selection
+                                                   : theme.lighterBackground
+                                            border.width: 1
+                                            border.color: (customReactBtnMouse.containsMouse || (root.showTapbackEmojiPicker && root.tapbackEmojiTargetGuid === msgDelegate.modelData.guid))
+                                                          ? theme.accent
+                                                          : theme.muted
+                                            ToolTip.visible: customReactBtnMouse.containsMouse
+                                            ToolTip.text: i18n.tr("Add custom emoji reaction")
+                                            ToolTip.delay: 300
+
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: "➕"
+                                                font.pixelSize: theme.fontSize - 2
+                                                font.bold: true
+                                                color: theme.brightForeground
+                                            }
+
+                                            MouseArea {
+                                                id: customReactBtnMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    var mGuid = msgDelegate.modelData.guid
+                                                    if (root.showTapbackEmojiPicker && root.tapbackEmojiTargetGuid === mGuid) {
+                                                        root.closeTapbackEmojiPicker()
+                                                    } else {
+                                                        var pt = customReactionAddBtn.mapToItem(root.contentItem, 0, customReactionAddBtn.height + 6)
+                                                        root.openTapbackEmojiPicker(mGuid, pt.x, pt.y)
                                                     }
                                                 }
                                             }
@@ -9290,6 +9483,111 @@ ApplicationWindow {
                         }
                     }
 
+                    // Always-Visible Client & Relay Version / Connection Status Banner
+                    Rectangle {
+                        id: settingsVersionBanner
+                        objectName: "settingsVersionBanner"
+                        Layout.fillWidth: true
+                        implicitHeight: settingsVersionCol.implicitHeight + 18
+                        radius: 8
+                        color: theme.lighterBackground
+                        border.width: 1
+                        border.color: backend.connected ? Qt.rgba(48/255, 209/255, 88/255, 0.45) : theme.muted
+
+                        ColumnLayout {
+                            id: settingsVersionCol
+                            anchors.fill: parent
+                            anchors.margins: 9
+                            spacing: 3
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text {
+                                    id: settingsClientVersionText
+                                    objectName: "settingsClientVersionText"
+                                    text: "BluePill v" + (Qt.application.version || "1.2.3")
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.accent
+                                }
+                                Text {
+                                    text: "·"
+                                    font.pixelSize: theme.fontSize - 2
+                                    color: theme.darkForeground
+                                }
+                                Text {
+                                    id: settingsRelayStatusText
+                                    objectName: "settingsRelayStatusText"
+                                    Layout.fillWidth: true
+                                    text: backend.serverStatus
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: backend.connected ? theme.brightForeground : theme.red
+                                    elide: Text.ElideRight
+                                }
+                            }
+
+                            Text {
+                                id: settingsEndpointText
+                                objectName: "settingsEndpointText"
+                                Layout.fillWidth: true
+                                text: i18n.tr("Endpoint:") + " " + (backend.serverUrl && backend.serverUrl.length > 0 ? backend.serverUrl : i18n.tr("Not configured"))
+                                font.pixelSize: theme.fontSize - 3
+                                color: theme.darkForeground
+                                elide: Text.ElideMiddle
+                            }
+                        }
+                    }
+
+                    // Settings Section Tabs (All / Server & Sync / UI & Appearance / Notifications & Audio)
+                    RowLayout {
+                        id: settingsSectionTabsRow
+                        objectName: "settingsSectionTabsRow"
+                        Layout.fillWidth: true
+                        spacing: 6
+
+                        Repeater {
+                            model: [
+                                { key: "all", label: "☰ " + i18n.tr("All") },
+                                { key: "server", label: "🌐 " + i18n.tr("Server & Sync") },
+                                { key: "appearance", label: "🎨 " + i18n.tr("UI & Appearance") },
+                                { key: "notifications", label: "🔔 " + i18n.tr("Notifications & Audio") }
+                            ]
+                            delegate: Rectangle {
+                                required property var modelData
+                                objectName: "settingsTab_" + modelData.key
+                                Layout.fillWidth: true
+                                height: 28
+                                radius: 6
+                                readonly property bool isCurrentTab: root.settingsActiveTab === modelData.key
+                                color: isCurrentTab ? theme.accent : theme.lighterBackground
+                                border.width: 1
+                                border.color: isCurrentTab ? theme.accent : theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: modelData.label
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: isCurrentTab
+                                    color: isCurrentTab ? theme.darkerBackground : theme.foreground
+                                    elide: Text.ElideRight
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.settingsActiveTab = modelData.key
+                                }
+                            }
+                        }
+                    }
+
+                ColumnLayout {
+                    id: serverSyncSection
+                    objectName: "serverSyncSection"
+                    visible: root.settingsActiveTab === "all" || root.settingsActiveTab === "server"
+                    Layout.fillWidth: true
+                    spacing: 12
+
                 Text {
                     Layout.fillWidth: true
                     text: i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
@@ -9884,18 +10182,39 @@ ApplicationWindow {
                         Accessible.name: i18n.tr("Message History Sync Window")
                         textRole: "label"
                         valueRole: "days"
-                        // Presets, plus the current value if it was set to something else
-                        model: {
+                        readonly property var dayChoices: {
                             const presets = [7, 14, 30, 60, 90, 180, 365]
                             const cur = backend.historySyncDays
-                            const days = presets.indexOf(cur) >= 0 || cur <= 0 ? presets
-                                       : presets.concat([cur]).sort(function(a, b) { return a - b })
-                            return days.map(function(d) {
-                                return { days: d, label: d === 365 ? i18n.tr("1 year") : i18n.tr("%1 days").arg(d) }
-                            })
+                            return presets.indexOf(cur) >= 0 || cur <= 0 ? presets
+                                 : presets.concat([cur]).sort(function(a, b) { return a - b })
                         }
-                        currentIndex: indexOfValue(backend.historySyncDays)
-                        onActivated: backend.setHistorySyncDays(currentValue)
+                        // Presets, plus the current value if it was set to something else
+                        model: dayChoices.map(function(d) {
+                            return { days: d, label: d === 365 ? i18n.tr("1 year") : i18n.tr("%1 days").arg(d) }
+                        })
+                        currentIndex: Math.max(0, dayChoices.indexOf(backend.historySyncDays))
+                        displayText: {
+                            const d = (currentIndex >= 0 && currentIndex < dayChoices.length) ? dayChoices[currentIndex] : backend.historySyncDays
+                            return d === 365 ? i18n.tr("1 year") : i18n.tr("%1 days").arg(d > 0 ? d : 60)
+                        }
+                        onModelChanged: {
+                            const idx = dayChoices.indexOf(backend.historySyncDays)
+                            if (idx >= 0 && currentIndex !== idx) currentIndex = idx
+                        }
+                        Connections {
+                            target: backend
+                            function onHistorySyncDaysChanged() {
+                                const idx = historySyncWindowCombo.dayChoices.indexOf(backend.historySyncDays)
+                                if (idx >= 0) historySyncWindowCombo.currentIndex = idx
+                            }
+                        }
+                        onActivated: function(index) {
+                            if (index >= 0 && index < dayChoices.length) {
+                                backend.setHistorySyncDays(dayChoices[index])
+                            } else {
+                                backend.setHistorySyncDays(currentValue)
+                            }
+                        }
                     }
                     Text {
                         Layout.fillWidth: true
@@ -9905,11 +10224,151 @@ ApplicationWindow {
                         wrapMode: Text.WordWrap
                     }
                 }
+                } // end serverSyncSection
+
+                // UI & Appearance Settings Section
+                ColumnLayout {
+                    id: uiAppearanceSection
+                    objectName: "uiAppearanceSection"
+                    visible: root.settingsActiveTab === "all" || root.settingsActiveTab === "appearance"
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: "🎨 " + i18n.tr("UI & Appearance")
+                        font.pixelSize: theme.fontSize - 2
+                        font.bold: true
+                        color: theme.foreground
+                        elide: Text.ElideRight
+                    }
+
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        rowSpacing: 6
+                        columnSpacing: 8
+
+                        Rectangle {
+                            id: toggleTopBarStatusPillBtn
+                            objectName: "toggleTopBarStatusPillBtn"
+                            Layout.fillWidth: true
+                            height: 34
+                            radius: 6
+                            color: backend.showTopBarStatusPill ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.showTopBarStatusPill ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.showTopBarStatusPill ? "✓ " : "○ ") + i18n.tr("Top Bar Status Pill")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.showTopBarStatusPill
+                                color: backend.showTopBarStatusPill ? theme.brightForeground : theme.darkForeground
+                            }
+                            ToolTip.visible: topBarPillToggleMouse.containsMouse
+                            ToolTip.text: i18n.tr("Show connection & version status pill in top bar")
+                            ToolTip.delay: 300
+                            MouseArea {
+                                id: topBarPillToggleMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.showTopBarStatusPill = !backend.showTopBarStatusPill
+                            }
+                        }
+
+                        Rectangle {
+                            id: toggleShowPinnedRowBtn
+                            objectName: "toggleShowPinnedRowBtn"
+                            Layout.fillWidth: true
+                            height: 34
+                            radius: 6
+                            color: backend.showPinnedRow ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.showPinnedRow ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.showPinnedRow ? "✓ 📌 " : "○ 📌 ") + i18n.tr("Show Pinned Row")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.showPinnedRow
+                                color: backend.showPinnedRow ? theme.brightForeground : theme.darkForeground
+                            }
+                            ToolTip.visible: showPinnedRowToggleMouse.containsMouse
+                            ToolTip.text: i18n.tr("Show pinned / quick-access row at top of sidebar")
+                            ToolTip.delay: 300
+                            MouseArea {
+                                id: showPinnedRowToggleMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.showPinnedRow = !backend.showPinnedRow
+                            }
+                        }
+
+                        Rectangle {
+                            id: togglePinnedRowFillRecentBtn
+                            objectName: "togglePinnedRowFillRecentBtn"
+                            Layout.fillWidth: true
+                            height: 34
+                            radius: 6
+                            opacity: backend.showPinnedRow ? 1.0 : 0.5
+                            color: backend.pinnedRowFillRecent ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.pinnedRowFillRecent ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.pinnedRowFillRecent ? "✓ " : "○ ") + i18n.tr("Fill 4 Pinned Slots with Recent")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.pinnedRowFillRecent
+                                color: backend.pinnedRowFillRecent ? theme.brightForeground : theme.darkForeground
+                            }
+                            ToolTip.visible: fillRecentToggleMouse.containsMouse
+                            ToolTip.text: i18n.tr("Fill empty pinned slots with most recent conversations (up to 4)")
+                            ToolTip.delay: 300
+                            MouseArea {
+                                id: fillRecentToggleMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.pinnedRowFillRecent = !backend.pinnedRowFillRecent
+                            }
+                        }
+
+                        Rectangle {
+                            id: toggleHoverMessageActionsBtn
+                            objectName: "toggleHoverMessageActionsBtn"
+                            Layout.fillWidth: true
+                            height: 34
+                            radius: 6
+                            color: backend.hoverMessageActions ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.hoverMessageActions ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.hoverMessageActions ? "✓ 💬 " : "○ 💬 ") + i18n.tr("Tapback Actions on Hover")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: backend.hoverMessageActions
+                                color: backend.hoverMessageActions ? theme.brightForeground : theme.darkForeground
+                            }
+                            ToolTip.visible: hoverActionsToggleMouse.containsMouse
+                            ToolTip.text: i18n.tr("Show Tapback & message actions on hover (in addition to right-click)")
+                            ToolTip.delay: 300
+                            MouseArea {
+                                id: hoverActionsToggleMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.hoverMessageActions = !backend.hoverMessageActions
+                            }
+                        }
+                    }
+                }
 
                 // Customizable Notifications & Audio Alert Settings
                 ColumnLayout {
                     id: notificationsSettingsCol
                     objectName: "notificationsSettingsCol"
+                    visible: root.settingsActiveTab === "all" || root.settingsActiveTab === "notifications"
                     Layout.fillWidth: true
                     spacing: 8
 
@@ -10375,6 +10834,161 @@ ApplicationWindow {
         }
     }
 
+    // Custom Emoji Tapback Picker Popover (+ button in message action bar)
+    Item {
+        id: tapbackEmojiPickerPopup
+        objectName: "tapbackEmojiPickerPopup"
+        visible: root.showTapbackEmojiPicker && root.tapbackEmojiTargetGuid.length > 0
+        anchors.fill: parent
+        z: 1004
+
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            onClicked: root.closeTapbackEmojiPicker()
+        }
+
+        Rectangle {
+            id: tapbackEmojiCard
+            objectName: "tapbackEmojiCard"
+            x: root.tapbackEmojiPopupX
+            y: root.tapbackEmojiPopupY
+            width: 348
+            height: 276
+            radius: 12
+            color: theme.darkBackground
+            border.width: 1
+            border.color: theme.accent
+
+            MouseArea { anchors.fill: parent }
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 10
+                spacing: 6
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 32
+                        radius: 6
+                        color: theme.background
+                        border.width: 1
+                        border.color: tapbackEmojiSearchField.activeFocus ? theme.accent : theme.muted
+
+                        TextField {
+                            id: tapbackEmojiSearchField
+                            objectName: "tapbackEmojiSearchField"
+                            anchors.fill: parent
+                            anchors.leftMargin: 8
+                            topPadding: 4
+                            bottomPadding: 6
+                            verticalAlignment: TextInput.AlignVCenter
+                            placeholderText: i18n.tr("Search reaction emoji (:fire:, party)...")
+                            placeholderTextColor: theme.darkForeground
+                            color: theme.brightForeground
+                            font.pixelSize: theme.fontSize - 2
+                            background: Item {}
+                            text: root.tapbackEmojiQuery
+                            onTextChanged: root.tapbackEmojiQuery = text
+
+                            Keys.onReturnPressed: function(event) {
+                                event.accepted = true
+                                var results = backend.searchEmojis(root.tapbackEmojiQuery, root.tapbackEmojiCategory, 1)
+                                if (results.length > 0) {
+                                    root.selectTapbackCustomEmoji(results[0].emoji)
+                                }
+                            }
+                            Keys.onEscapePressed: function(event) {
+                                event.accepted = true
+                                root.closeTapbackEmojiPicker()
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "✕"
+                        font.pixelSize: theme.fontSize
+                        color: theme.darkForeground
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.closeTapbackEmojiPicker()
+                        }
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    Repeater {
+                        model: ["All", "Smileys", "Gestures", "Hearts", "Activities", "Symbols"]
+                        delegate: Rectangle {
+                            required property string modelData
+                            height: 22
+                            radius: 5
+                            implicitWidth: tbCatLbl.implicitWidth + 10
+                            color: root.tapbackEmojiCategory === modelData ? theme.accent : theme.lighterBackground
+                            Text {
+                                id: tbCatLbl
+                                anchors.centerIn: parent
+                                text: modelData
+                                font.pixelSize: theme.fontSize - 4
+                                font.bold: root.tapbackEmojiCategory === modelData
+                                color: root.tapbackEmojiCategory === modelData ? theme.darkerBackground : theme.foreground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.tapbackEmojiCategory = modelData
+                            }
+                        }
+                    }
+                }
+
+                GridView {
+                    id: tapbackEmojiGridView
+                    objectName: "tapbackEmojiGridView"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    cellWidth: 40
+                    cellHeight: 36
+                    clip: true
+                    model: backend.searchEmojis(root.tapbackEmojiQuery, root.tapbackEmojiCategory, 120)
+
+                    delegate: Rectangle {
+                        required property var modelData
+                        width: 36
+                        height: 32
+                        radius: 6
+                        color: tbEmojiCellMouse.containsMouse ? theme.selection : "transparent"
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: modelData.emoji
+                            font.pixelSize: theme.fontSize + 4
+                        }
+
+                        MouseArea {
+                            id: tbEmojiCellMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.selectTapbackCustomEmoji(modelData.emoji)
+                        }
+
+                        ToolTip.visible: tbEmojiCellMouse.containsMouse
+                        ToolTip.text: modelData.shortcode
+                        ToolTip.delay: 300
+                    }
+                }
+            }
+        }
+    }
+
     // Conversation Right-Click Context Menu Popup
     Item {
         id: chatContextMenuPopup
@@ -10506,8 +11120,8 @@ ApplicationWindow {
                         anchors.left: parent.left
                         anchors.leftMargin: 10
                         text: chatContextMenuPopup.targetIsPinned
-                              ? ("󰐄  " + i18n.tr("Unpin"))
-                              : ("󰐃  " + i18n.tr("Pin"))
+                              ? ("󰐄  " + i18n.tr("Unpin conversation"))
+                              : ("󰐃  " + i18n.tr("Pin conversation"))
                         font.pixelSize: theme.fontSize - 1
                         color: theme.brightForeground
                     }
