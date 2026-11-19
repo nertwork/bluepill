@@ -20,6 +20,8 @@ ApplicationWindow {
     property string replyTargetText: ""
     property string stagedAttachmentPath: ""
     property string stagedAttachmentName: ""
+    property string stagedAttachmentChatGuid: ""
+    property var chatAttachmentDrafts: ({})
     property var chatDrafts: ({})
     property string lastDraftChatGuid: ""
     property string hoveredActionMessageGuid: ""
@@ -31,15 +33,63 @@ ApplicationWindow {
         hoveredActionMessageGuid = ""
     }
 
+    function isStagedAttachmentForChat(chatGuid) {
+        if (!chatGuid || chatGuid.length === 0 || root.stagedAttachmentPath.length === 0) return false
+        if (root.stagedAttachmentChatGuid.length === 0) return false
+        return root.stagedAttachmentChatGuid === chatGuid || backend.isSameConversation(root.stagedAttachmentChatGuid, chatGuid)
+    }
+
+    function stageAttachment(attPath, attName, chatGuid) {
+        var targetGuid = (chatGuid && chatGuid.length > 0) ? chatGuid : (backend.selectedChatGuid || "")
+        if (!attPath || attPath.length === 0 || targetGuid.length === 0) return
+        root.stagedAttachmentPath = attPath
+        root.stagedAttachmentName = (attName && attName.length > 0) ? attName : attPath.split("/").pop()
+        root.stagedAttachmentChatGuid = targetGuid
+        var attDrafts = root.chatAttachmentDrafts || ({})
+        var canonGuid = backend.resolveCanonicalChatGuid(targetGuid) || targetGuid
+        attDrafts[canonGuid] = {
+            path: root.stagedAttachmentPath,
+            name: root.stagedAttachmentName,
+            chatGuid: targetGuid
+        }
+        if (canonGuid !== targetGuid && attDrafts[targetGuid] !== undefined) {
+            delete attDrafts[targetGuid]
+        }
+        root.chatAttachmentDrafts = attDrafts
+    }
+
     function clearStagedAttachment() {
+        var prevGuid = stagedAttachmentChatGuid
+        var curGuid = backend.selectedChatGuid || ""
         stagedAttachmentPath = ""
         stagedAttachmentName = ""
+        stagedAttachmentChatGuid = ""
+        var attDrafts = root.chatAttachmentDrafts || ({})
+        var keys = Object.keys(attDrafts)
+        var changed = false
+        for (var i = 0; i < keys.length; ++i) {
+            var k = keys[i]
+            if ((prevGuid.length > 0 && (k === prevGuid || backend.isSameConversation(k, prevGuid))) ||
+                (curGuid.length > 0 && (k === curGuid || backend.isSameConversation(k, curGuid)))) {
+                delete attDrafts[k]
+                changed = true
+            }
+        }
+        if (changed) {
+            root.chatAttachmentDrafts = attDrafts
+        }
     }
 
     function sendComposerContent() {
         if (backend.selectedChatGuid.length === 0) return
+        if (root.stagedAttachmentPath.length > 0 && !root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
+            root.stagedAttachmentPath = ""
+            root.stagedAttachmentName = ""
+            root.stagedAttachmentChatGuid = ""
+        }
         if (root.stagedAttachmentPath.length > 0) {
             var attPath = root.stagedAttachmentPath
+            var targetChatGuid = backend.selectedChatGuid
             var caption = composerInput.text.trim()
             root.clearStagedAttachment()
             composerInput.text = ""
@@ -48,7 +98,7 @@ ApplicationWindow {
             root.replyTargetGuid = ""
             root.replyTargetSender = ""
             root.replyTargetText = ""
-            backend.sendAttachment(backend.selectedChatGuid, attPath, caption)
+            backend.sendAttachment(targetChatGuid, attPath, caption)
             messageListView.scrollToBottom()
         } else if (composerInput.text.trim().length > 0) {
             backend.sendMessage(backend.selectedChatGuid, composerInput.text, root.replyTargetGuid)
@@ -589,6 +639,31 @@ ApplicationWindow {
         return (drafts[chatGuid] !== undefined) ? drafts[chatGuid] : ""
     }
 
+    function resolveSavedAttachmentForChat(chatGuid) {
+        if (!chatGuid || chatGuid.length === 0) return null
+        var attDrafts = root.chatAttachmentDrafts || ({})
+        if (attDrafts[chatGuid] !== undefined && attDrafts[chatGuid] && attDrafts[chatGuid].path) {
+            return attDrafts[chatGuid]
+        }
+        var keys = Object.keys(attDrafts)
+        for (var i = 0; i < keys.length; ++i) {
+            var k = keys[i]
+            var entry = attDrafts[k]
+            if (k !== "" && k !== chatGuid && entry && entry.path && backend.isSameConversation(k, chatGuid)) {
+                var migrated = {
+                    path: entry.path,
+                    name: entry.name || entry.path.split("/").pop(),
+                    chatGuid: chatGuid
+                }
+                attDrafts[chatGuid] = migrated
+                delete attDrafts[k]
+                root.chatAttachmentDrafts = attDrafts
+                return migrated
+            }
+        }
+        return null
+    }
+
     Component.onCompleted: {
         var initialGuid = backend.selectedChatGuid || ""
         if (initialGuid.length > 0) {
@@ -633,12 +708,39 @@ ApplicationWindow {
                     if (canonPrev !== root.lastDraftChatGuid && drafts[root.lastDraftChatGuid] !== undefined) delete drafts[root.lastDraftChatGuid]
                 }
                 root.chatDrafts = drafts
+
+                var attDrafts = root.chatAttachmentDrafts || ({})
+                if (root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(root.lastDraftChatGuid)) {
+                    var targetKey = (sameConv && newGuid.length > 0) ? newGuid : canonPrev
+                    attDrafts[targetKey] = {
+                        path: root.stagedAttachmentPath,
+                        name: root.stagedAttachmentName,
+                        chatGuid: targetKey
+                    }
+                    if (targetKey !== root.lastDraftChatGuid && attDrafts[root.lastDraftChatGuid] !== undefined) delete attDrafts[root.lastDraftChatGuid]
+                    if (targetKey !== canonPrev && attDrafts[canonPrev] !== undefined) delete attDrafts[canonPrev]
+                    root.chatAttachmentDrafts = attDrafts
+                }
             }
             if (root.lastDraftChatGuid !== newGuid) {
                 root.lastDraftChatGuid = newGuid
                 var savedDraft = root.resolveSavedDraftForChat(newGuid)
                 if (composerInput.text !== savedDraft) {
                     composerInput.text = savedDraft
+                }
+                if (sameConv && newGuid.length > 0 && root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(newGuid)) {
+                    root.stagedAttachmentChatGuid = newGuid
+                } else {
+                    var savedAtt = root.resolveSavedAttachmentForChat(newGuid)
+                    if (savedAtt && savedAtt.path && savedAtt.path.length > 0) {
+                        root.stagedAttachmentPath = savedAtt.path
+                        root.stagedAttachmentName = savedAtt.name || savedAtt.path.split("/").pop()
+                        root.stagedAttachmentChatGuid = newGuid
+                    } else {
+                        root.stagedAttachmentPath = ""
+                        root.stagedAttachmentName = ""
+                        root.stagedAttachmentChatGuid = ""
+                    }
                 }
             }
         }
@@ -1001,14 +1103,20 @@ ApplicationWindow {
         onActivated: {
             if (root.showPhotoViewer) {
                 root.closePhotoViewer()
-            } else if (backend.recordingVoice || backend.hasRecordedVoiceMemo) {
-                backend.cancelVoiceRecording()
-                root.showToast("✕ " + i18n.tr("Voice memo cancelled"))
-            } else if (root.stagedAttachmentPath !== "") {
-                root.clearStagedAttachment()
-                root.showToast("✕ " + i18n.tr("Attachment cancelled"))
             } else if (chatContextMenuPopup.visible) {
                 chatContextMenuPopup.visible = false
+            } else if (effectMenuPopup.visible) {
+                effectMenuPopup.visible = false
+            } else if (scheduleMenuPopup.visible) {
+                scheduleMenuPopup.visible = false
+            } else if (renameChatPopup.visible) {
+                renameChatPopup.visible = false
+            } else if (icloudNotesPopup.visible) {
+                icloudNotesPopup.close()
+            } else if (icloudCalendarPopup.visible) {
+                icloudCalendarPopup.close()
+            } else if (icloudPhotosPopup.visible) {
+                icloudPhotosPopup.close()
             } else if (root.showServerConfigModal) {
                 root.showServerConfigModal = false
             } else if (root.showDeleteChatModal) {
@@ -1028,6 +1136,12 @@ ApplicationWindow {
                 root.emojiShortcodeStart = -1
             } else if (root.activeActionMessageGuid !== "") {
                 root.clearActionMenu()
+            } else if (backend.recordingVoice || backend.hasRecordedVoiceMemo) {
+                backend.cancelVoiceRecording()
+                root.showToast("✕ " + i18n.tr("Voice memo cancelled"))
+            } else if (root.stagedAttachmentPath !== "" && root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
+                root.clearStagedAttachment()
+                root.showToast("✕ " + i18n.tr("Attachment cancelled"))
             } else if (root.replyTargetGuid !== "") {
                 root.replyTargetGuid = ""
                 root.replyTargetSender = ""
@@ -5050,7 +5164,7 @@ ApplicationWindow {
                 Rectangle {
                     id: stagedAttachmentBar
                     objectName: "stagedAttachmentBar"
-                    visible: backend.selectedChatGuid.length > 0 && root.stagedAttachmentPath.length > 0
+                    visible: backend.selectedChatGuid.length > 0 && root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)
                     Layout.fillWidth: true
                     Layout.preferredHeight: 64
                     color: theme.darkBackground
@@ -5434,6 +5548,8 @@ ApplicationWindow {
                                         if (pastedPath && pastedPath.length > 0 && backend.selectedChatGuid.length > 0) {
                                             root.stagedAttachmentPath = pastedPath
                                             root.stagedAttachmentName = pastedPath.split("/").pop()
+                                            root.stagedAttachmentChatGuid = backend.selectedChatGuid
+                                            root.stageAttachment(pastedPath, root.stagedAttachmentName, backend.selectedChatGuid)
                                             root.showToast("📎 " + i18n.tr("Image staged — press Enter or Send"))
                                             event.accepted = true
                                             return
@@ -5709,7 +5825,7 @@ ApplicationWindow {
                             Layout.preferredHeight: 44
                             Layout.alignment: Qt.AlignVCenter
                             radius: theme.radius
-                            readonly property bool canSendNow: composerInput.text.trim().length > 0 || root.stagedAttachmentPath.length > 0 || backend.hasRecordedVoiceMemo
+                            readonly property bool canSendNow: composerInput.text.trim().length > 0 || (root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)) || backend.hasRecordedVoiceMemo
                             color: canSendNow
                                    ? (backend.selectedChatService !== "iMessage" ? "#1B6E38" : theme.accent)
                                    : theme.lighterBackground

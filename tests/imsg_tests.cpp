@@ -5238,7 +5238,14 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("objectName: \"audioInputDeviceCombo\"")));
         QVERIFY(qml.contains(QStringLiteral("objectName: \"audioOutputDeviceCombo\"")));
         QVERIFY(qml.contains(QStringLiteral("backend.recordingVoice || backend.hasRecordedVoiceMemo")));
-        QVERIFY(qml.contains(QStringLiteral("root.stagedAttachmentPath = pastedPath")));
+        QVERIFY(qml.contains(QStringLiteral("root.stageAttachment(pastedPath")));
+        QVERIFY(qml.contains(QStringLiteral("function isStagedAttachmentForChat(chatGuid)")));
+        const int escIdx = qml.indexOf(QStringLiteral("sequence: \"Escape\""));
+        QVERIFY(escIdx > 0);
+        const int modalCheckIdx = qml.indexOf(QStringLiteral("if (root.showPhotoViewer)"), escIdx);
+        const int voiceCancelIdx = qml.indexOf(QStringLiteral("if (backend.recordingVoice || backend.hasRecordedVoiceMemo)"), escIdx);
+        QVERIFY(modalCheckIdx > escIdx);
+        QVERIFY(voiceCancelIdx > modalCheckIdx);
     }
 
     void testDuplicateOptimisticMessagePrevented() {
@@ -5392,6 +5399,399 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("objectName: \"photoCardSendBtn\"")));
         QVERIFY(qml.contains(QStringLiteral("objectName: \"photoViewerSendBtn\"")));
         QVERIFY(qml.contains(QStringLiteral("Layout.minimumWidth: 40")));
+    }
+
+    void testMarkChatReadPreservesOutgoingDateReadAndDeliveryCheckRotation() {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = server.serverPort();
+        const QString chatGuid = QStringLiteral("iMessage;-;+15550004141");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("Delivery Guard")}, {QStringLiteral("style"), 45}};
+
+        QTcpSocket *inFlightBatchSock = nullptr;
+        int queryRequestCount = 0;
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (server.hasPendingConnections()) {
+                QTcpSocket *sock = server.nextPendingConnection();
+                auto buf = std::make_shared<QByteArray>();
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, buf, &inFlightBatchSock, &queryRequestCount]() {
+                    buf->append(sock->readAll());
+                    const int hdrEnd = buf->indexOf("\r\n\r\n");
+                    if (hdrEnd < 0) return;
+                    const QByteArray hdr = buf->left(hdrEnd);
+                    int contentLen = 0;
+                    for (const QByteArray &line : hdr.split('\n')) {
+                        if (line.toLower().startsWith("content-length:")) {
+                            contentLen = line.mid(15).trimmed().toInt();
+                        }
+                    }
+                    if (buf->size() < hdrEnd + 4 + contentLen) return;
+                    const QByteArray bodyBytes = buf->mid(hdrEnd + 4, contentLen);
+                    if (hdr.startsWith("POST /api/v1/message/query") && bodyBytes.contains("message.guid")) {
+                        ++queryRequestCount;
+                        if (queryRequestCount == 1) {
+                            inFlightBatchSock = sock;
+                            return;
+                        }
+                    }
+                    const QByteArray json = R"({"status":200,"data":[]})";
+                    sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                    sock->disconnectFromHost();
+                });
+            }
+        });
+
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_deliv.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_deliv.json")));
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(port), QString(), QStringLiteral("pw"));
+        b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+        b.selectChat(chatGuid);
+
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        // 1. Seed one incoming unread message and one outgoing Sent (undelivered) message
+        const QJsonObject incomingMsg{
+            {QStringLiteral("guid"), QStringLiteral("inc-read-1")},
+            {QStringLiteral("text"), QStringLiteral("Unread incoming")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("isRead"), false},
+            {QStringLiteral("dateRead"), 0},
+            {QStringLiteral("dateCreated"), nowMs - 5000},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        const QJsonObject outgoingMsg{
+            {QStringLiteral("guid"), QStringLiteral("out-sent-1")},
+            {QStringLiteral("text"), QStringLiteral("Outgoing waiting for delivery")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), true},
+            {QStringLiteral("isDelivered"), false},
+            {QStringLiteral("dateDelivered"), 0},
+            {QStringLiteral("dateRead"), 0},
+            {QStringLiteral("dateCreated"), nowMs - 2000},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        b.ingestMessagesForTest(QJsonArray{incomingMsg, outgoingMsg}, false);
+        b.addPendingDeliveryForTest(QStringLiteral("out-sent-1"), chatGuid, nowMs - 2000);
+        QCOMPARE(b.pendingDeliveryCountForTest(), 1);
+
+        // markChatRead must NOT set dateRead on outgoing messages, so out-sent-1 remains pending and shows "Sent" (not "Read")
+        b.markChatRead(chatGuid);
+        b.checkPendingDeliveryStatusesForTest();
+        QCOMPARE(b.pendingDeliveryCountForTest(), 1);
+        QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sent"));
+
+        QTRY_VERIFY_WITH_TIMEOUT(inFlightBatchSock != nullptr, 1500);
+        QCOMPARE(queryRequestCount, 1);
+
+        // Calling checkPendingDeliveryStatuses again while out-sent-1 is already in flight must NOT dispatch an overlapping batch
+        b.checkPendingDeliveryStatusesForTest();
+        QTest::qWait(60);
+        QCOMPARE(queryRequestCount, 1);
+
+        // Simulate Socket.IO delivering a newer "Delivered" update while the older batch request is still in flight
+        const QJsonObject socketDeliveredMsg{
+            {QStringLiteral("guid"), QStringLiteral("out-sent-1")},
+            {QStringLiteral("text"), QStringLiteral("Outgoing waiting for delivery")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), true},
+            {QStringLiteral("isDelivered"), true},
+            {QStringLiteral("dateDelivered"), nowMs - 500},
+            {QStringLiteral("dateCreated"), nowMs - 2000},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        b.ingestMessagesForTest(QJsonArray{socketDeliveredMsg}, false);
+        QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Delivered"));
+
+        // Complete the stale in-flight batch with isDelivered: false; observation sequence guard must prevent regression to "Sent"
+        const QJsonObject staleBatchMsg{
+            {QStringLiteral("guid"), QStringLiteral("out-sent-1")},
+            {QStringLiteral("text"), QStringLiteral("Outgoing waiting for delivery")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), true},
+            {QStringLiteral("isDelivered"), false},
+            {QStringLiteral("dateDelivered"), 0},
+            {QStringLiteral("dateCreated"), nowMs - 2000},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        const QByteArray staleResp = QJsonDocument(QJsonObject{{QStringLiteral("status"), 200}, {QStringLiteral("data"), QJsonArray{staleBatchMsg}}}).toJson(QJsonDocument::Compact);
+        inFlightBatchSock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(staleResp.size()) + "\r\nConnection: close\r\n\r\n" + staleResp);
+        inFlightBatchSock->disconnectFromHost();
+        QTest::qWait(80);
+        QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Delivered"));
+
+        // 2. Verify absent GUIDs stay in m_pendingDeliveryMessages until 120s expiry, >20 entries rotate across batches, and temp-* GUIDs are never sent in server batch queries
+        b.addPendingDeliveryForTest(QStringLiteral("temp-skip-batch-1"), chatGuid, nowMs);
+        for (int i = 0; i < 25; ++i) {
+            const QString g = QStringLiteral("pend-rot-%1").arg(i, 2, 10, QLatin1Char('0'));
+            b.addPendingDeliveryForTest(g, chatGuid, nowMs);
+        }
+        QCOMPARE(b.pendingDeliveryCountForTest(), 26);
+        b.checkPendingDeliveryStatusesForTest();
+        const QStringList firstBatch = b.lastPendingDeliveryBatchForTest();
+        QCOMPARE(firstBatch.size(), 20);
+        QVERIFY(!firstBatch.contains(QStringLiteral("temp-skip-batch-1")));
+        QTRY_VERIFY_WITH_TIMEOUT(queryRequestCount >= 2, 1500);
+        // Empty response must NOT evict unexpired pending GUIDs
+        QCOMPARE(b.pendingDeliveryCountForTest(), 26);
+
+        b.checkPendingDeliveryStatusesForTest();
+        const QStringList secondBatch = b.lastPendingDeliveryBatchForTest();
+        QCOMPARE(secondBatch.size(), 20);
+        QVERIFY(!secondBatch.contains(QStringLiteral("temp-skip-batch-1")));
+        QVERIFY(firstBatch != secondBatch);
+        // All 25 real GUIDs must be covered across the two rotated batches
+        QSet<QString> combined(firstBatch.begin(), firstBatch.end());
+        for (const QString &g : secondBatch) combined.insert(g);
+        QCOMPARE(combined.size(), 25);
+    }
+
+    void testOptimisticAttachmentMatchingAndReceiptRules() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString att1 = tempDir.filePath(QStringLiteral("first_doc.txt"));
+        const QString att2 = tempDir.filePath(QStringLiteral("second_doc.txt"));
+        {
+            QFile f1(att1);
+            QVERIFY(f1.open(QIODevice::WriteOnly));
+            f1.write("Attachment one payload");
+            f1.close();
+            QFile f2(att2);
+            QVERIFY(f2.open(QIODevice::WriteOnly));
+            f2.write("Attachment two payload");
+            f2.close();
+        }
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_opt.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_opt.json")));
+        const QString chatGuid = QStringLiteral("iMessage;-;+15550004242");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("Opt Match")}, {QStringLiteral("style"), 45}};
+        b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+        b.selectChat(chatGuid);
+
+        // Queue two optimistic attachment rows without server URL (so they remain temp-att-* rows in m_messages)
+        b.sendAttachment(chatGuid, att1, QString());
+        b.sendAttachment(chatGuid, att2, QString());
+        QCOMPARE(b.messages().size(), 2);
+        const QString tempGuid1 = b.messages().at(0).toMap().value(QStringLiteral("guid")).toString();
+        const QString tempGuid2 = b.messages().at(1).toMap().value(QStringLiteral("guid")).toString();
+        QVERIFY(tempGuid1.startsWith(QStringLiteral("temp-att-")));
+        QVERIFY(tempGuid2.startsWith(QStringLiteral("temp-att-")));
+        // Only the latest outgoing row should carry ordinary "Sending..." receipt text
+        QCOMPARE(b.messages().at(0).toMap().value(QStringLiteral("receiptText")).toString(), QString());
+        QCOMPARE(b.messages().at(1).toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sending..."));
+
+        // 1. An un-GUIDed incoming attachment message when 2 optimistic attachment rows exist must NOT delete either ambiguous temp row
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const QJsonObject unguidedRealAtt{
+            {QStringLiteral("guid"), QStringLiteral("real-att-unguided")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), true},
+            {QStringLiteral("dateCreated"), nowMs},
+            {QStringLiteral("attachments"), QJsonArray{QJsonObject{{QStringLiteral("guid"), QStringLiteral("att-g-u")}, {QStringLiteral("transferName"), QStringLiteral("other.txt")}}}},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        b.ingestMessagesForTest(QJsonArray{unguidedRealAtt}, false);
+        QStringList currentGuids;
+        for (const QVariant &v : b.messages()) currentGuids.append(v.toMap().value(QStringLiteral("guid")).toString());
+        QVERIFY(currentGuids.contains(tempGuid1));
+        QVERIFY(currentGuids.contains(tempGuid2));
+
+        // 2. An incoming message with explicitTempGuid == tempGuid1 must replace ONLY tempGuid1,
+        // clean up any pendingDelivery entry for tempGuid1, and leave tempGuid2 intact
+        b.addPendingDeliveryForTest(tempGuid1, chatGuid, nowMs);
+        b.addPendingDeliveryForTest(tempGuid2, chatGuid, nowMs);
+        QCOMPARE(b.pendingDeliveryCountForTest(), 2);
+
+        const QJsonObject guidedRealAtt1{
+            {QStringLiteral("guid"), QStringLiteral("real-att-1")},
+            {QStringLiteral("tempGuid"), tempGuid1},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), true},
+            {QStringLiteral("isDelivered"), true},
+            {QStringLiteral("dateCreated"), nowMs + 10},
+            {QStringLiteral("attachments"), QJsonArray{QJsonObject{{QStringLiteral("guid"), QStringLiteral("att-g-1")}, {QStringLiteral("transferName"), QStringLiteral("first_doc.txt")}}}},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        b.ingestMessagesForTest(QJsonArray{guidedRealAtt1}, false);
+        // tempGuid1 must be evicted from m_pendingDeliveryMessages when replaced by real-att-1, leaving only tempGuid2
+        QCOMPARE(b.pendingDeliveryCountForTest(), 1);
+        currentGuids.clear();
+        for (const QVariant &v : b.messages()) currentGuids.append(v.toMap().value(QStringLiteral("guid")).toString());
+        QVERIFY(currentGuids.contains(QStringLiteral("real-att-1")));
+        QVERIFY(!currentGuids.contains(tempGuid1));
+        QVERIFY(currentGuids.contains(tempGuid2));
+
+        // 3. Explicit failure badge on an older row must be preserved even when a newer outgoing row exists
+        const QJsonObject failedOlderMsg{
+            {QStringLiteral("guid"), QStringLiteral("real-att-1")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("error"), 4},
+            {QStringLiteral("dateCreated"), nowMs + 10},
+            {QStringLiteral("attachments"), QJsonArray{QJsonObject{{QStringLiteral("guid"), QStringLiteral("att-g-1")}, {QStringLiteral("transferName"), QStringLiteral("first_doc.txt")}}}},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        b.ingestMessagesForTest(QJsonArray{failedOlderMsg}, false);
+        QVariantMap olderRow;
+        for (const QVariant &v : b.messages()) {
+            if (v.toMap().value(QStringLiteral("guid")).toString() == QStringLiteral("real-att-1")) {
+                olderRow = v.toMap();
+                break;
+            }
+        }
+        QCOMPARE(olderRow.value(QStringLiteral("isFailed")).toBool(), true);
+        QCOMPARE(olderRow.value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
+    }
+
+    void testLiveAttachment404RetryAndAudioSecurityAndDraftRetention() {
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = server.serverPort();
+        int liveAttHits = 0;
+        int nonLiveAttHits = 0;
+        int audioDownloadHits = 0;
+        QByteArray validWavBytes;
+
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (server.hasPendingConnections()) {
+                QTcpSocket *sock = server.nextPendingConnection();
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, &liveAttHits, &nonLiveAttHits, &audioDownloadHits, &validWavBytes]() {
+                    const QByteArray req = sock->readAll();
+                    if (req.contains("/api/v1/attachment/live-att-404/download")) {
+                        ++liveAttHits;
+                        const QByteArray body = "Attachment does not exist on disk yet";
+                        sock->write("HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                        sock->disconnectFromHost();
+                    } else if (req.contains("/api/v1/attachment/old-att-404/download")) {
+                        ++nonLiveAttHits;
+                        const QByteArray body = "Attachment does not exist";
+                        sock->write("HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: " + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                        sock->disconnectFromHost();
+                    } else if (req.contains("/api/v1/attachment/pause-resume-voice/download")) {
+                        ++audioDownloadHits;
+                        if (audioDownloadHits == 1) {
+                            // Keep first request open so user can toggle pause before download finishes
+                            return;
+                        }
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: " + QByteArray::number(validWavBytes.size()) + "\r\nConnection: close\r\n\r\n" + validWavBytes);
+                        sock->disconnectFromHost();
+                    } else {
+                        const QByteArray json = R"({"status":200,"data":[]})";
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        sock->disconnectFromHost();
+                    }
+                });
+            }
+        });
+
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_sec.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_sec.json")));
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(port), QString(), QStringLiteral("secret-pw"));
+
+        // 1. Atomic config save sets 0600 permissions and preserves previous config if target is a directory
+        const QFileDevice::Permissions perms = QFileInfo(b.configFilePath()).permissions();
+        QVERIFY(perms.testFlag(QFileDevice::ReadOwner));
+        QVERIFY(perms.testFlag(QFileDevice::WriteOwner));
+        QVERIFY(!perms.testFlag(QFileDevice::ReadGroup));
+        QVERIFY(!perms.testFlag(QFileDevice::ReadOther));
+
+        // 2. CWE-319 check: loopback HTTP and remote HTTPS are allowed; remote cleartext HTTP is rejected
+        QVERIFY(Backend::isTrustedPasswordTransportUrl(QUrl(QStringLiteral("http://127.0.0.1:1235/api/v1/attachment/a/download"))));
+        QVERIFY(Backend::isTrustedPasswordTransportUrl(QUrl(QStringLiteral("http://localhost:1235/api/v1/attachment/a/download"))));
+        QVERIFY(Backend::isTrustedPasswordTransportUrl(QUrl(QStringLiteral("http://[::1]:1235/api/v1/attachment/a/download"))));
+        QVERIFY(Backend::isTrustedPasswordTransportUrl(QUrl(QStringLiteral("https://relay.example.com/api/v1/attachment/a/download"))));
+        QVERIFY(!Backend::isTrustedPasswordTransportUrl(QUrl(QStringLiteral("http://relay.example.com/api/v1/attachment/a/download"))));
+
+        // 3. WAV data chunk validation rejects >44-byte WAV with empty data chunk
+        const QString emptyDataWav = tempDir.filePath(QStringLiteral("empty_data.wav"));
+        {
+            QFile wf(emptyDataWav);
+            QVERIFY(wf.open(QIODevice::WriteOnly));
+            QByteArray hdr("RIFF\x34\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80\x3e\x00\x00\x00\x7d\x00\x00\x02\x00\x10\x00LIST\x0c\x00\x00\x00INFOISFT\x00\x00\x00\x00" "data\x00\x00\x00\x00", 60);
+            wf.write(hdr);
+            wf.close();
+        }
+        QVERIFY(QFileInfo(emptyDataWav).size() > 44);
+        QVERIFY(!Backend::hasNonEmptyWavDataChunk(emptyDataWav));
+
+        // 4. Staged voice memo is retained if selectedChatGuid is empty when sendRecordedVoiceMemo() is called
+        b.startVoiceRecording();
+        b.stopVoiceRecordingForPreview();
+        QVERIFY(b.hasRecordedVoiceMemo());
+        const QString stagedWavPath = b.recordedVoicePath();
+        QVERIFY(Backend::hasNonEmptyWavDataChunk(stagedWavPath));
+        {
+            QFile vf(stagedWavPath);
+            QVERIFY(vf.open(QIODevice::ReadOnly));
+            validWavBytes = vf.readAll();
+            vf.close();
+        }
+        // No selected chat yet -> sendRecordedVoiceMemo must keep the draft
+        b.sendRecordedVoiceMemo();
+        QVERIFY(b.hasRecordedVoiceMemo());
+        QVERIFY(QFileInfo::exists(stagedWavPath));
+        b.cancelVoiceRecording();
+
+        // 5. Audio download pause/resume: m_audioPlaying stays false during download, pausing aborts, and toggling again restarts download and plays
+        b.toggleAudioPlayback(QStringLiteral("pause-resume-voice"), QStringLiteral("/api/v1/attachment/pause-resume-voice/download"));
+        QCOMPARE(b.playingAudioGuid(), QStringLiteral("pause-resume-voice"));
+        QCOMPARE(b.audioPlaying(), false);
+        QTRY_COMPARE_WITH_TIMEOUT(audioDownloadHits, 1, 1500);
+        // Pause before first download finishes
+        b.toggleAudioPlayback(QStringLiteral("pause-resume-voice"), QStringLiteral("/api/v1/attachment/pause-resume-voice/download"));
+        QCOMPARE(b.audioPlaying(), false);
+        // Toggle again to restart download -> second request returns validWavBytes and starts playback
+        b.toggleAudioPlayback(QStringLiteral("pause-resume-voice"), QStringLiteral("/api/v1/attachment/pause-resume-voice/download"));
+        QTRY_COMPARE_WITH_TIMEOUT(audioDownloadHits, 2, 1500);
+        QTRY_COMPARE_WITH_TIMEOUT(b.audioPlaying(), true, 1500);
+        b.toggleAudioPlayback(QStringLiteral("pause-resume-voice"), QString());
+        QCOMPARE(b.audioPlaying(), false);
+
+        // 6. Live incoming attachment 404 retries with bounded backoff instead of immediate 30m cooldown, whereas non-live 404 enters 30m cooldown immediately
+        const QString chatGuid = QStringLiteral("iMessage;-;+15550004343");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("Att Retry")}, {QStringLiteral("style"), 45}};
+        b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const QJsonObject histMsgWithAtt{
+            {QStringLiteral("guid"), QStringLiteral("msg-att-old")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), nowMs - 60000},
+            {QStringLiteral("attachments"), QJsonArray{
+                QJsonObject{{QStringLiteral("guid"), QStringLiteral("old-att-404")}, {QStringLiteral("mimeType"), QStringLiteral("image/jpeg")}, {QStringLiteral("transferName"), QStringLiteral("old.jpg")}},
+                QJsonObject{{QStringLiteral("guid"), QStringLiteral("frac-aud-1")}, {QStringLiteral("mimeType"), QStringLiteral("audio/wav")}, {QStringLiteral("transferName"), QStringLiteral("frac.wav")}, {QStringLiteral("durationSeconds"), 1.6}}
+            }},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        // Ingest historical message with isInitialLoad = true so old-att-404 is NOT marked as live incoming
+        b.ingestMessagesForTest(QJsonArray{histMsgWithAtt}, true);
+        b.selectChat(chatGuid);
+        // Fractional durationSeconds (1.6) must round to 2 seconds
+        const QVariantList renderedAtts = b.messages().last().toMap().value(QStringLiteral("attachments")).toList();
+        QCOMPARE(renderedAtts.last().toMap().value(QStringLiteral("durationSeconds")).toInt(), 2);
+
+        const QJsonObject liveMsgWithAtt{
+            {QStringLiteral("guid"), QStringLiteral("msg-att-live")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), nowMs},
+            {QStringLiteral("attachments"), QJsonArray{
+                QJsonObject{{QStringLiteral("guid"), QStringLiteral("live-att-404")}, {QStringLiteral("mimeType"), QStringLiteral("image/jpeg")}, {QStringLiteral("transferName"), QStringLiteral("live.jpg")}}
+            }},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        // Ingest live incoming message with isInitialLoad = false so live-att-404 gets bounded 404 retry
+        b.ingestMessagesForTest(QJsonArray{liveMsgWithAtt}, false);
+
+        QTRY_VERIFY_WITH_TIMEOUT(nonLiveAttHits >= 1 && liveAttHits >= 1, 1500);
+        // Non-live 404 must immediately get the 30-minute cooldown, while live-att-404 has no cooldown before retry
+        QVERIFY(b.attachmentCooldownUntilMsForTest(QStringLiteral("old-att-404")) > nowMs + 1000000LL);
+        QCOMPARE(b.attachmentCooldownUntilMsForTest(QStringLiteral("live-att-404")), 0LL);
+        // Wait for the first 500ms bounded retry on live-att-404
+        QTRY_VERIFY_WITH_TIMEOUT(liveAttHits >= 2, 1500);
     }
 
 };

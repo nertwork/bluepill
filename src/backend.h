@@ -443,6 +443,16 @@ public:
     QString currentVoiceRecordingPathForTest() const { return m_currentVoiceRecordingPath; }
     int pendingDeliveryCountForTest() const { return m_pendingDeliveryMessages.size(); }
     void checkPendingDeliveryStatusesForTest() { checkPendingDeliveryStatuses(); }
+    QStringList lastPendingDeliveryBatchForTest() const { return m_lastPendingDeliveryBatchForTest; }
+    void addPendingDeliveryForTest(const QString &msgGuid, const QString &chatGuid, qint64 addedAtMs = 0);
+    void markLiveIncomingAttachmentForTest(const QString &attachmentGuid) {
+        if (!attachmentGuid.isEmpty()) m_liveIncomingAttachments.insert(attachmentGuid);
+    }
+    qint64 attachmentCooldownUntilMsForTest(const QString &attachmentGuid) const {
+        return m_missingAttachmentCooldownUntilMs.value(attachmentGuid, 0);
+    }
+    static bool hasNonEmptyWavDataChunk(const QString &filePath);
+    static bool isTrustedPasswordTransportUrl(const QUrl &url);
 
     // Headless CLI entrypoints
     int runCliStatus(bool asJson);
@@ -522,7 +532,9 @@ private:
     void unifySiblingChats(bool *selectedMigrated = nullptr, bool *chatsMerged = nullptr);
     void checkPendingDeliveryStatuses();
     void stopAudioPlaybackProcess();
-    void startLocalAudioProcess(const QString &localFile, quint64 playbackGen);
+    bool startLocalAudioProcess(const QString &localFile, quint64 playbackGen);
+    bool canSeekLocalAudioPlayback() const;
+    void enforceLatestOutgoingReceiptsInTimeline();
     void stopVoiceRecordProcess(bool waitForFlush);
     QString finalizeCapturedVoiceWav(const QString &recPath);
     void clearStagedVoiceMemo(bool removeFile);
@@ -607,6 +619,12 @@ private:
     QHash<QString, QStringList> m_chatSiblingGuids;
     QHash<QString, QString> m_chatPreferredSendGuids;
     QHash<QString, QString> m_pendingDeliveryMessages;
+    QHash<QString, qint64> m_pendingDeliveryAddedAtMs;
+    QSet<QString> m_inFlightDeliveryCheckGuids;
+    quint64 m_deliveryObservationCounter = 0;
+    QHash<QString, quint64> m_messageObservationSeq;
+    int m_pendingDeliveryRotationCursor = 0;
+    QStringList m_lastPendingDeliveryBatchForTest;
     QHash<QString, QString> m_attachmentPaths;
     QHash<QString, QString> m_recentOutboundEffects;
     QHash<QString, QHash<QString, QJsonObject>> m_chatMessagesCache;
@@ -650,9 +668,12 @@ private:
     QString m_audioDurationText = QStringLiteral("0:00");
     QTimer m_audioPlaybackTimer;
     int m_audioPlaybackElapsedMs = 0;
+    int m_audioSeekOffsetMs = 0;
     int m_audioPlaybackDurationMs = 15000;
     quint64 m_audioPlaybackGen = 0;
     QString m_currentAudioLocalFile;
+    QString m_currentAudioSourceUrl;
+    QPointer<QNetworkReply> m_audioDownloadReply;
     QPointer<QProcess> m_audioProcess;
 
     bool m_recordingVoice = false;
