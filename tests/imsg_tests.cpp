@@ -7858,6 +7858,21 @@ private slots:
             QCOMPARE(b.messages().size(), 3);
             QCOMPARE(b.messages().at(2).toMap().value(QStringLiteral("guid")).toString(), QStringLiteral("g-up-c"));
             QCOMPARE(b.messages().at(2).toMap().value(QStringLiteral("isFailed")).toBool(), true);
+            b.rebuildSelectedChatMessagesForTest();
+            QCOMPARE(b.messages().size(), 3);
+            QVariantMap rebuiltErr;
+            for (const QVariant &v : b.messages()) {
+                const QVariantMap m = v.toMap();
+                if (m.value(QStringLiteral("guid")).toString() == QStringLiteral("g-up-c")) {
+                    rebuiltErr = m;
+                    break;
+                }
+            }
+            QCOMPARE(rebuiltErr.value(QStringLiteral("guid")).toString(), QStringLiteral("g-up-c"));
+            QCOMPARE(rebuiltErr.value(QStringLiteral("hasImageAttachment")).toBool(), true);
+            QCOMPARE(rebuiltErr.value(QStringLiteral("attachmentName")).toString(), QStringLiteral("up_c.png"));
+            QCOMPARE(rebuiltErr.value(QStringLiteral("isFailed")).toBool(), true);
+            QCOMPARE(rebuiltErr.value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
         }
 
         // 2 & 4. Text ack tempGuid validation against sentTempGuid (AppleScript -as, /chat/new relay tempGuid, mismatch reject)
@@ -7868,11 +7883,14 @@ private slots:
             const QString chatGuid = QStringLiteral("iMessage;-;+14155550192");
             const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("REV6 Text Ack")}, {QStringLiteral("style"), 45}};
 
+            QString origAsTempGuid;
+            QString asFallbackMethod;
+            QString asFallbackTempGuid;
             QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
                 while (server.hasPendingConnections()) {
                     QTcpSocket *sock = server.nextPendingConnection();
                     auto buf = std::make_shared<QByteArray>();
-                    QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, buf, chatGuid, nowMs]() {
+                    QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, buf, chatGuid, nowMs, &origAsTempGuid, &asFallbackMethod, &asFallbackTempGuid]() {
                         buf->append(sock->readAll());
                         const int hdrEnd = buf->indexOf("\r\n\r\n");
                         if (hdrEnd < 0) return;
@@ -7893,12 +7911,14 @@ private slots:
 
                             if (msg == QStringLiteral("AS fallback msg")) {
                                 if (method == QStringLiteral("private-api")) {
+                                    origAsTempGuid = tg;
                                     const QByteArray errJson = R"({"status":500,"error":"Private API unavailable"})";
                                     sock->write("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(errJson.size()) + "\r\nConnection: close\r\n\r\n" + errJson);
                                     sock->disconnectFromHost();
                                     return;
                                 }
-                                Q_ASSERT(tg.endsWith(QStringLiteral("-as")));
+                                asFallbackMethod = method;
+                                asFallbackTempGuid = tg;
                                 const QByteArray json = QJsonDocument(QJsonObject{
                                     {QStringLiteral("status"), 200},
                                     {QStringLiteral("data"), QJsonObject{
@@ -8008,6 +8028,9 @@ private slots:
             // (a) AppleScript -as suffix accepted & promotes optimistic row
             b.sendMessage(chatGuid, QStringLiteral("AS fallback msg"));
             QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            QVERIFY(!origAsTempGuid.isEmpty());
+            QCOMPARE(asFallbackMethod, QStringLiteral("apple-script"));
+            QCOMPARE(asFallbackTempGuid, origAsTempGuid + QStringLiteral("-as"));
             QVERIFY(!b.cachedMessageForTest(chatGuid, QStringLiteral("g-as-1")).isEmpty());
             QVERIFY(!b.messages().isEmpty());
             QCOMPARE(b.messages().last().toMap().value(QStringLiteral("guid")).toString(), QStringLiteral("g-as-1"));
@@ -8126,6 +8149,9 @@ private slots:
             b.selectChat(chatGuid);
 
             b.sendAttachment(chatGuid, imgPath, QStringLiteral("Caption stays"));
+            QCOMPARE(b.messages().size(), 1);
+            const qint64 optDateCreated = b.messages().first().toMap().value(QStringLiteral("dateCreated")).toLongLong();
+            QVERIFY(optDateCreated > 0);
             QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
             b.rebuildSelectedChatMessagesForTest();
             QCOMPARE(b.messages().size(), 1);
@@ -8134,7 +8160,7 @@ private slots:
             QCOMPARE(rebuiltOpt.value(QStringLiteral("hasImageAttachment")).toBool(), true);
             QCOMPARE(rebuiltOpt.value(QStringLiteral("attachmentName")).toString(), QStringLiteral("sparse_photo.png"));
             QCOMPARE(rebuiltOpt.value(QStringLiteral("text")).toString(), QStringLiteral("Caption stays"));
-            QVERIFY(rebuiltOpt.value(QStringLiteral("dateCreated")).toLongLong() > 0);
+            QCOMPARE(rebuiltOpt.value(QStringLiteral("dateCreated")).toLongLong(), optDateCreated);
             QVERIFY(!rebuiltOpt.value(QStringLiteral("timeText")).toString().isEmpty());
             QCOMPARE(rebuiltOpt.value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sending..."));
 
@@ -8306,6 +8332,222 @@ private slots:
             QVERIFY(!b.messages().isEmpty());
             QCOMPARE(b.messages().last().toMap().value(QStringLiteral("isFailed")).toBool(), false);
             QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Delivered"));
+
+            // (c) In-flight GUID query reads a recovered row with newer dateRead after live error=4 -> MUST clear error=4
+            b.ingestMessagesForTest(QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("out-rev7-recover-3")},
+                {QStringLiteral("text"), QStringLiteral("Recovered read test")},
+                {QStringLiteral("isFromMe"), true},
+                {QStringLiteral("isSent"), true},
+                {QStringLiteral("isDelivered"), false},
+                {QStringLiteral("dateCreated"), nowMs - 500},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            }}, false);
+            b.addPendingDeliveryForTest(QStringLiteral("out-rev7-recover-3"), chatGuid, nowMs - 200);
+            b.checkPendingDeliveryStatusesForTest();
+            QTRY_COMPARE_WITH_TIMEOUT(heldSocks.size(), 1, 1500);
+
+            b.ingestMessagesForTest(QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("out-rev7-recover-3")},
+                {QStringLiteral("isFromMe"), true},
+                {QStringLiteral("isDelivered"), false},
+                {QStringLiteral("error"), 4},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            }}, false);
+            QCOMPARE(b.cachedMessageForTest(chatGuid, QStringLiteral("out-rev7-recover-3")).value(QStringLiteral("error")).toInt(), 4);
+
+            const quint64 beforeRecFin = b.pendingDeliveryCheckCompletedCountForTest();
+            const qint64 recReadTs = nowMs + 1000;
+            const QByteArray recoveredReadResp = QJsonDocument(QJsonObject{
+                {QStringLiteral("status"), 200},
+                {QStringLiteral("data"), QJsonArray{QJsonObject{
+                    {QStringLiteral("guid"), QStringLiteral("out-rev7-recover-3")},
+                    {QStringLiteral("isFromMe"), true},
+                    {QStringLiteral("isSent"), true},
+                    {QStringLiteral("isDelivered"), false},
+                    {QStringLiteral("dateRead"), recReadTs},
+                    {QStringLiteral("error"), 0}
+                }}}
+            }).toJson(QJsonDocument::Compact);
+            QTcpSocket *hsRec = heldSocks.takeFirst();
+            hsRec->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(recoveredReadResp.size()) + "\r\nConnection: close\r\n\r\n" + recoveredReadResp);
+            hsRec->disconnectFromHost();
+            QTRY_VERIFY_WITH_TIMEOUT(b.pendingDeliveryCheckCompletedCountForTest() > beforeRecFin, 1500);
+
+            const QJsonObject recCached = b.cachedMessageForTest(chatGuid, QStringLiteral("out-rev7-recover-3"));
+            QCOMPARE(recCached.value(QStringLiteral("error")).toInt(), 0);
+            QCOMPARE(recCached.value(QStringLiteral("dateRead")).toVariant().toLongLong(), recReadTs);
+            QVERIFY(!b.messages().isEmpty());
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("guid")).toString(), QStringLiteral("out-rev7-recover-3"));
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("isFailed")).toBool(), false);
+            QVERIFY(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString().startsWith(QStringLiteral("Read ")));
+        }
+
+        // 6. Sparse pending:true audio upload ACK preserves WAV-computed waveformBars across rebuilds
+        //    until a full server attachment replaces it (both realGuid and pending-tempGuid paths).
+        {
+            QTcpServer server;
+            QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+            const QString chatGuid = QStringLiteral("iMessage;-;+14155550195");
+            const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("REV7 Sparse Audio")}, {QStringLiteral("style"), 45}};
+
+            int audioUploadCall = 0;
+            QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+                while (server.hasPendingConnections()) {
+                    QTcpSocket *sock = server.nextPendingConnection();
+                    auto buf = std::make_shared<QByteArray>();
+                    QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, buf, &audioUploadCall]() {
+                        buf->append(sock->readAll());
+                        const int hdrEnd = buf->indexOf("\r\n\r\n");
+                        if (hdrEnd < 0) return;
+                        const QByteArray hdr = buf->left(hdrEnd);
+                        int contentLen = 0;
+                        for (const QByteArray &line : hdr.split('\n')) {
+                            if (line.toLower().startsWith("content-length:")) contentLen = line.mid(15).trimmed().toInt();
+                        }
+                        if (buf->size() < hdrEnd + 4 + contentLen) return;
+                        const QByteArray body = buf->mid(hdrEnd + 4, contentLen);
+                        buf->remove(0, hdrEnd + 4 + contentLen);
+
+                        if (hdr.startsWith("POST /api/v1/message/attachment")) {
+                            ++audioUploadCall;
+                            const int tgPos = body.indexOf("name=\"tempGuid\"\r\n\r\n");
+                            const int valStart = tgPos + 19;
+                            const int valEnd = body.indexOf("\r\n--", valStart);
+                            const QString tg = (tgPos >= 0 && valEnd > valStart) ? QString::fromUtf8(body.mid(valStart, valEnd - valStart)) : QString();
+                            QJsonObject dataObj{
+                                {QStringLiteral("tempGuid"), tg},
+                                {QStringLiteral("pending"), true}
+                            };
+                            if (audioUploadCall == 1) {
+                                dataObj.insert(QStringLiteral("guid"), QStringLiteral("g-sparse-wav-1"));
+                            }
+                            const QByteArray json = QJsonDocument(QJsonObject{
+                                {QStringLiteral("status"), 200},
+                                {QStringLiteral("data"), dataObj}
+                            }).toJson(QJsonDocument::Compact);
+                            sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                            sock->disconnectFromHost();
+                            return;
+                        }
+                        const QByteArray json = R"({"status":200,"data":[]})";
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        sock->disconnectFromHost();
+                    });
+                }
+            });
+
+            QTemporaryDir tempDir;
+            QVERIFY(tempDir.isValid());
+            const QString wavPath = tempDir.filePath(QStringLiteral("voice_sparse.wav"));
+            {
+                QFile wf(wavPath);
+                QVERIFY(wf.open(QIODevice::WriteOnly));
+                const quint32 sampleRate = 8000;
+                const quint32 numSamples = 8000;
+                const quint32 dataBytes = numSamples * 2;
+                const quint32 riffSize = 36 + dataBytes;
+                QByteArray hdr;
+                hdr.append("RIFF", 4);
+                auto appendU32 = [&](quint32 v) {
+                    hdr.append(char(v & 0xFF));
+                    hdr.append(char((v >> 8) & 0xFF));
+                    hdr.append(char((v >> 16) & 0xFF));
+                    hdr.append(char((v >> 24) & 0xFF));
+                };
+                auto appendU16 = [&](quint16 v) {
+                    hdr.append(char(v & 0xFF));
+                    hdr.append(char((v >> 8) & 0xFF));
+                };
+                appendU32(riffSize);
+                hdr.append("WAVEfmt ", 8);
+                appendU32(16);
+                appendU16(1);
+                appendU16(1);
+                appendU32(sampleRate);
+                appendU32(sampleRate * 2);
+                appendU16(2);
+                appendU16(16);
+                hdr.append("data", 4);
+                appendU32(dataBytes);
+                wf.write(hdr);
+                QByteArray pcm;
+                pcm.reserve(int(dataBytes));
+                for (quint32 i = 0; i < numSamples; ++i) {
+                    const qint16 amp = static_cast<qint16>(((i % 200) < 100) ? ((i * 3) % 24000) : -((i * 5) % 18000));
+                    pcm.append(char(amp & 0xFF));
+                    pcm.append(char((amp >> 8) & 0xFF));
+                }
+                wf.write(pcm);
+                wf.close();
+            }
+
+            Backend b(false);
+            b.setStateFilePath(tempDir.filePath(QStringLiteral("state_rev7_wav.json")));
+            b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_rev7_wav.json")));
+            b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()), QString(), QStringLiteral("pw"));
+            b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+            b.selectChat(chatGuid);
+
+            // (a) Sparse pending ack with realGuid
+            b.sendAttachment(chatGuid, wavPath, QString());
+            QCOMPARE(b.messages().size(), 1);
+            const QVariantList optAtts1 = b.messages().first().toMap().value(QStringLiteral("attachments")).toList();
+            QCOMPARE(optAtts1.size(), 1);
+            const QVariantList optWaveform1 = optAtts1.first().toMap().value(QStringLiteral("waveformBars")).toList();
+            QCOMPARE(optWaveform1.size(), 28);
+            QVERIFY(optWaveform1 != Backend::computeWaveformBars(QStringLiteral("g-sparse-wav-1"), 28));
+
+            QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            b.rebuildSelectedChatMessagesForTest();
+            QCOMPARE(b.messages().size(), 1);
+            const QVariantList rebuiltAtts1 = b.messages().first().toMap().value(QStringLiteral("attachments")).toList();
+            QCOMPARE(rebuiltAtts1.size(), 1);
+            QCOMPARE(rebuiltAtts1.first().toMap().value(QStringLiteral("waveformBars")).toList(), optWaveform1);
+            QVERIFY(rebuiltAtts1.first().toMap().value(QStringLiteral("durationSeconds")).toInt() >= 1);
+
+            // Full server attachment replaces fallback waveform
+            const QJsonArray srvWf{0.2, 0.9, 0.4};
+            b.ingestMessagesForTest(QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("g-sparse-wav-1")},
+                {QStringLiteral("originalROWID"), 8888},
+                {QStringLiteral("isFromMe"), true},
+                {QStringLiteral("isSent"), true},
+                {QStringLiteral("isDelivered"), true},
+                {QStringLiteral("dateDelivered"), nowMs - 4000},
+                {QStringLiteral("dateCreated"), nowMs - 5000},
+                {QStringLiteral("pending"), false},
+                {QStringLiteral("attachments"), QJsonArray{QJsonObject{
+                    {QStringLiteral("guid"), QStringLiteral("real-srv-wav-8888")},
+                    {QStringLiteral("transferName"), QStringLiteral("server_voice.wav")},
+                    {QStringLiteral("mimeType"), QStringLiteral("audio/wav")},
+                    {QStringLiteral("durationSeconds"), 2},
+                    {QStringLiteral("waveform"), srvWf}
+                }}},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            }}, false);
+            b.rebuildSelectedChatMessagesForTest();
+            const QVariantList srvAtts1 = b.messages().first().toMap().value(QStringLiteral("attachments")).toList();
+            QCOMPARE(srvAtts1.size(), 1);
+            QCOMPARE(srvAtts1.first().toMap().value(QStringLiteral("guid")).toString(), QStringLiteral("real-srv-wav-8888"));
+            QCOMPARE(srvAtts1.first().toMap().value(QStringLiteral("waveformBars")).toList().size(), 3);
+            QCOMPARE(srvAtts1.first().toMap().value(QStringLiteral("waveformBars")).toList().at(1).toDouble(), 0.9);
+
+            // (b) Sparse pending ack without realGuid (pendingAck synthetic fallback)
+            b.sendAttachment(chatGuid, wavPath, QString());
+            QCOMPARE(b.messages().size(), 2);
+            const QVariantList optAtts2 = b.messages().last().toMap().value(QStringLiteral("attachments")).toList();
+            QCOMPARE(optAtts2.size(), 1);
+            const QVariantList optWaveform2 = optAtts2.first().toMap().value(QStringLiteral("waveformBars")).toList();
+            QCOMPARE(optWaveform2.size(), 28);
+
+            QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            b.rebuildSelectedChatMessagesForTest();
+            QCOMPARE(b.messages().size(), 2);
+            const QVariantList rebuiltAtts2 = b.messages().last().toMap().value(QStringLiteral("attachments")).toList();
+            QCOMPARE(rebuiltAtts2.size(), 1);
+            QCOMPARE(rebuiltAtts2.first().toMap().value(QStringLiteral("waveformBars")).toList(), optWaveform2);
+            QVERIFY(rebuiltAtts2.first().toMap().value(QStringLiteral("durationSeconds")).toInt() >= 1);
         }
     }
 

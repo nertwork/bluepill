@@ -414,6 +414,7 @@ class BluePillEngine:
         self._stop_event = threading.Event()
         self._last_max_rowid: Optional[int] = None
         self._detected_account: str = ""
+        self._claim_lock = threading.Lock()
         self.temp_guid_by_guid: Dict[str, str] = {}
         self._outbound_attachments: Dict[str, Tuple[str, str]] = {}
         self._cached_audio_metrics_lock = threading.Lock()
@@ -421,10 +422,12 @@ class BluePillEngine:
         self._pending_caption_lock = threading.Lock()
         self._pending_captions: Dict[str, Dict[str, Any]] = {}
         self._active_upload_metas: Dict[str, Dict[str, Any]] = {}
+        self._active_text_sends: Dict[str, Dict[str, Any]] = {}
         self._upload_ambiguity_ttl_s: float = 10.0
         self._published_msg_lock = threading.Lock()
         self._published_msg_rowids: Dict[int, float] = {}
         self._published_msg_guids: Dict[str, float] = {}
+        self._wal_unjoined_first_seen: Dict[int, float] = {}
         self._delayed_caption_wait_s: float = 4.0
         self._delayed_caption_retry_delay_s: float = 0.15
         self._last_delayed_caption_thread: Optional[threading.Thread] = None
@@ -1602,8 +1605,18 @@ class BluePillEngine:
             except Exception as exc:
                 self.logger.warning("[wal] failed broadcasting update for rowid=%d: %s", rid, exc)
 
-    def _mark_message_published(self, msg: Optional[Dict[str, Any]]) -> None:
+    @staticmethod
+    def _message_has_chat(msg: Optional[Dict[str, Any]]) -> bool:
         if not msg:
+            return False
+        chats = msg.get("chats") or []
+        return any(
+            isinstance(c, dict) and bool(str(c.get("guid") or "").strip())
+            for c in chats
+        )
+
+    def _mark_message_published(self, msg: Optional[Dict[str, Any]]) -> None:
+        if not msg or not self._message_has_chat(msg):
             return
         try:
             rid = int(msg.get("originalROWID") or 0)
@@ -1632,6 +1645,8 @@ class BluePillEngine:
         if rid <= 0 and not guid:
             self.broadcast_socketio("new-message", msg)
             return True
+        if not self._message_has_chat(msg):
+            return False
         now = time.monotonic()
         added_rid = False
         added_guid = False
@@ -1697,7 +1712,7 @@ class BluePillEngine:
                 ],
             }
             new_msgs = self.query_messages(q_body)
-            if any(prev_max < int(m.get("originalROWID") or 0) <= cur_max and not m.get("chats") for m in new_msgs):
+            if any(prev_max < int(m.get("originalROWID") or 0) <= cur_max and not self._message_has_chat(m) for m in new_msgs):
                 time.sleep(0.18)
                 new_msgs = self.query_messages(q_body)
             new_msgs.sort(key=lambda m: int(m.get("originalROWID") or 0))
@@ -1708,10 +1723,21 @@ class BluePillEngine:
                     m_rid = int(m.get("originalROWID") or 0)
                     if m_rid <= prev_max or m_rid > cur_max:
                         continue
-                    if m.get("isFromMe") and int(m.get("error") or 0) == 0 and not m.get("isDelivered"):
-                        self._register_tracked_outgoing(m)
-                    if self._broadcast_new_message_once(m):
+                    if not self._message_has_chat(m):
+                        first_seen = self._wal_unjoined_first_seen.setdefault(m_rid, time.monotonic())
+                        if (time.monotonic() - first_seen) < 3.0:
+                            break
+                        self._wal_unjoined_first_seen.pop(m_rid, None)
+                        if m.get("isFromMe") and int(m.get("error") or 0) == 0 and not m.get("isDelivered"):
+                            self._register_tracked_outgoing(m)
+                        self.broadcast_socketio("new-message", m)
                         emitted += 1
+                    else:
+                        self._wal_unjoined_first_seen.pop(m_rid, None)
+                        if m.get("isFromMe") and int(m.get("error") or 0) == 0 and not m.get("isDelivered"):
+                            self._register_tracked_outgoing(m)
+                        if self._broadcast_new_message_once(m):
+                            emitted += 1
                     if m_rid > last_processed_rowid:
                         last_processed_rowid = m_rid
                 else:
@@ -3199,6 +3225,10 @@ class BluePillEngine:
 
     def _send_via_applescript(self, chat_guid: str, message: str, file_path: Optional[str] = None) -> bool:
         if sys.platform != "darwin":
+            try:
+                self._tx_local.last_applescript_state = "unsupported"
+            except Exception:
+                pass
             return False
         target = chat_guid.split(";-;")[-1] if ";-;" in chat_guid else chat_guid
         service_type = "SMS" if chat_guid.startswith("SMS;") else "iMessage"
@@ -3267,8 +3297,23 @@ class BluePillEngine:
             if res.returncode != 0:
                 err_txt = (res.stderr or b"").decode("utf-8", errors="replace").strip()
                 self.logger.warning("[applescript] failed rc=%d err=%s", res.returncode, err_txt)
+            try:
+                self._tx_local.last_applescript_state = "confirmed" if res.returncode == 0 else "failed"
+            except Exception:
+                pass
             return res.returncode == 0
+        except subprocess.TimeoutExpired as exc:
+            try:
+                self._tx_local.last_applescript_state = "timeout"
+            except Exception:
+                pass
+            self.logger.warning("[applescript] timeout (ambiguous delivery): %s", exc)
+            return False
         except Exception as exc:
+            try:
+                self._tx_local.last_applescript_state = "exception"
+            except Exception:
+                pass
             self.logger.warning("[applescript] exception: %s", exc)
             return False
 
@@ -3383,6 +3428,7 @@ class BluePillEngine:
             "chatGuid": chat_guid,
             "helperGuid": helper_guid.strip(),
             "helperFilePath": helper_file_path,
+            "mimeType": mime_type,
             "expectedNames": expected_names,
             "expectedStems": expected_stems,
             "servedTotalBytes": int(served_total_bytes or 0),
@@ -3447,6 +3493,44 @@ class BluePillEngine:
         for k in expired_keys:
             self._active_upload_metas.pop(k, None)
 
+    def _prune_expired_text_sends_locked(self, now: Optional[float] = None) -> None:
+        cur_now = time.monotonic() if now is None else now
+        expired_keys = [
+            k
+            for k, ts_meta in self._active_text_sends.items()
+            if ts_meta.get("retired") and cur_now >= float(ts_meta.get("expiresAt") or 0.0)
+        ]
+        for k in expired_keys:
+            self._active_text_sends.pop(k, None)
+
+    def _has_competing_no_guid_text_send(
+        self,
+        allowed_guids: set[str],
+        cand_text: str,
+        temp_guid: str = "",
+        text_send_key: str = "",
+    ) -> bool:
+        norm_cand_text = str(cand_text or "").strip()
+        with self._pending_caption_lock:
+            self._prune_expired_text_sends_locked()
+            for other_key, other in self._active_text_sends.items():
+                if text_send_key and other_key == text_send_key:
+                    continue
+                if temp_guid and str(other.get("tempGuid") or "").strip() == temp_guid:
+                    continue
+                if str(other.get("helperGuid") or "").strip():
+                    continue
+                other_chats = other.get("allowedChatGuids") or (
+                    {str(other.get("chatGuid") or "").strip()} if other.get("chatGuid") else set()
+                )
+                if allowed_guids and other_chats and not (allowed_guids & other_chats):
+                    continue
+                other_text = str(other.get("text") or "").strip()
+                if other_text and norm_cand_text and other_text != norm_cand_text:
+                    continue
+                return True
+        return False
+
     def _correlate_attachment_message(
         self,
         cand_msg: Dict[str, Any],
@@ -3458,7 +3542,8 @@ class BluePillEngine:
         clean_helper_guid = (helper_guid or match_meta.get("helperGuid") or "").strip()
         guid_matches = bool(clean_helper_guid and msg_guid and msg_guid == clean_helper_guid)
         if temp_guid and msg_guid:
-            existing_temp = self.temp_guid_by_guid.get(msg_guid, "")
+            with self._claim_lock:
+                existing_temp = self.temp_guid_by_guid.get(msg_guid, "")
             if existing_temp and existing_temp != temp_guid:
                 return False, []
         atts = cand_msg.get("attachments") or []
@@ -3484,6 +3569,8 @@ class BluePillEngine:
                     continue
                 if up_meta.get("chatGuid") == chat_guid:
                     peer_metas.append(up_meta)
+        with self._claim_lock:
+            outbound_snapshot = dict(self._outbound_attachments)
         for att in atts:
             if guid_matches:
                 att_correlated = True
@@ -3496,11 +3583,11 @@ class BluePillEngine:
             ag = str(att.get("guid") or "").strip()
             orig_g = str(att.get("originalGuid") or "").strip()
             if ag:
-                existing = self._outbound_attachments.get(ag)
+                existing = outbound_snapshot.get(ag)
                 if existing is not None and helper_file_path and existing[0] != helper_file_path:
                     continue
                 if orig_g and orig_g != ag:
-                    existing_orig = self._outbound_attachments.get(orig_g)
+                    existing_orig = outbound_snapshot.get(orig_g)
                     if existing_orig is not None and helper_file_path and existing_orig[0] != helper_file_path:
                         continue
                 matched_atts.append((ag, orig_g))
@@ -3519,6 +3606,7 @@ class BluePillEngine:
         advance_rowid: bool = False,
         match_meta: Optional[Dict[str, Any]] = None,
         exclude_rowids: Optional[set[int]] = None,
+        text_send_key: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not os.path.exists(self.db_path):
             return None
@@ -3536,17 +3624,23 @@ class BluePillEngine:
         deadline = time.monotonic() + timeout_s
         best_candidate: Optional[Dict[str, Any]] = None
         found_at: Optional[float] = None
+        incomplete_found_at: Dict[int, float] = {}
         att_join_wait_s = 0.25
         persistent_cursor = max(0, int(pre_max_rowid or 0))
+
+        def _effective_deadline() -> float:
+            if not require_attachment:
+                return deadline
+            extra = (found_at + att_join_wait_s) if found_at is not None else 0.0
+            if incomplete_found_at:
+                extra = max(extra, max(incomplete_found_at.values()) + att_join_wait_s)
+            return max(deadline, extra)
+
         while True:
             if self._stop_event.is_set() or not os.path.exists(self.db_path):
                 break
             now = time.monotonic()
-            effective_deadline = (
-                max(deadline, found_at + att_join_wait_s)
-                if (found_at is not None and require_attachment)
-                else deadline
-            )
+            effective_deadline = _effective_deadline()
             if now >= effective_deadline:
                 break
             try:
@@ -3567,7 +3661,8 @@ class BluePillEngine:
                         if found_at is None:
                             found_at = time.monotonic()
                         if temp_guid and m_guid:
-                            self.temp_guid_by_guid[m_guid] = temp_guid
+                            with self._claim_lock:
+                                self.temp_guid_by_guid[m_guid] = temp_guid
                             m["tempGuid"] = temp_guid
                         best_candidate = m
                         if require_attachment and not has_attachments and (time.monotonic() - found_at) < att_join_wait_s:
@@ -3580,6 +3675,23 @@ class BluePillEngine:
                     while True:
                         if self._stop_event.is_set() or not os.path.exists(self.db_path):
                             break
+                        raw_page_count = 0
+                        raw_page_max_rowid = page_cursor
+                        try:
+                            conn_page = self._open_chat_db()
+                            try:
+                                raw_rows = conn_page.execute(
+                                    "SELECT ROWID FROM message WHERE ROWID > ? ORDER BY ROWID ASC LIMIT ?",
+                                    (page_cursor, page_limit),
+                                ).fetchall()
+                                raw_page_count = len(raw_rows)
+                                if raw_rows:
+                                    raw_page_max_rowid = int(raw_rows[-1][0] or page_cursor)
+                            finally:
+                                conn_page.close()
+                        except Exception:
+                            raw_page_count = 0
+                            raw_page_max_rowid = page_cursor
                         q_body: Dict[str, Any] = {
                             "limit": page_limit,
                             "sort": "ASC",
@@ -3603,19 +3715,21 @@ class BluePillEngine:
                             m_chats = m.get("chats") or []
                             if allowed_guids and m_chats and not any(c.get("guid") in allowed_guids for c in m_chats):
                                 continue
-                            if expected_text and str(m.get("text") or "").strip() != expected_text.strip():
+                            m_text = str(m.get("text") or "").strip()
+                            if expected_text and m_text != expected_text.strip():
                                 if not require_attachment:
                                     continue
                             has_attachments = bool(m.get("attachments") or [])
                             if require_attachment and not has_attachments:
-                                if found_at is None:
-                                    found_at = time.monotonic()
-                                if (time.monotonic() - found_at) < att_join_wait_s:
+                                cand_seen_at = incomplete_found_at.setdefault(m_rowid, time.monotonic())
+                                cur_t = time.monotonic()
+                                if cur_t < deadline or (cur_t - cand_seen_at) < att_join_wait_s:
                                     if earliest_incomplete_rid is None or m_rowid < earliest_incomplete_rid:
                                         earliest_incomplete_rid = m_rowid
                                 continue
+                            matched_atts: List[Tuple[str, str]] = []
                             if require_attachment and match_meta is not None:
-                                correlated, _ = self._correlate_attachment_message(
+                                correlated, matched_atts = self._correlate_attachment_message(
                                     m,
                                     match_meta,
                                     helper_guid="",
@@ -3623,20 +3737,52 @@ class BluePillEngine:
                                 )
                                 if not correlated:
                                     continue
-                            if temp_guid and m_guid:
-                                self.temp_guid_by_guid[m_guid] = temp_guid
-                                m["tempGuid"] = temp_guid
+                            if not require_attachment and self._has_competing_no_guid_text_send(
+                                allowed_guids,
+                                m_text or expected_text,
+                                temp_guid=temp_guid,
+                                text_send_key=text_send_key,
+                            ):
+                                if earliest_incomplete_rid is None or m_rowid < earliest_incomplete_rid:
+                                    earliest_incomplete_rid = m_rowid
+                                continue
+                            with self._claim_lock:
+                                if m_guid:
+                                    existing_temp = self.temp_guid_by_guid.get(m_guid, "")
+                                    if existing_temp and (not temp_guid or existing_temp != temp_guid):
+                                        continue
+                                if require_attachment and match_meta is not None:
+                                    helper_fp = str(match_meta.get("helperFilePath") or "")
+                                    meta_mime = str(match_meta.get("mimeType") or "")
+                                    att_conflict = False
+                                    for ag, orig_g in matched_atts:
+                                        existing_ag = self._outbound_attachments.get(ag)
+                                        if existing_ag is not None and helper_fp and existing_ag[0] != helper_fp:
+                                            att_conflict = True
+                                            break
+                                        if orig_g and orig_g != ag:
+                                            existing_orig = self._outbound_attachments.get(orig_g)
+                                            if existing_orig is not None and helper_fp and existing_orig[0] != helper_fp:
+                                                att_conflict = True
+                                                break
+                                    if att_conflict:
+                                        continue
+                                    if helper_fp:
+                                        for ag, _orig_g in matched_atts:
+                                            if ag not in self._outbound_attachments:
+                                                self._outbound_attachments[ag] = (helper_fp, meta_mime)
+                                if temp_guid and m_guid:
+                                    self.temp_guid_by_guid[m_guid] = temp_guid
+                                    m["tempGuid"] = temp_guid
                             return m
-                        if len(recent) < page_limit or max_seen_in_page <= page_cursor:
+                        if raw_page_count > 0 and raw_page_max_rowid > max_seen_in_page:
+                            max_seen_in_page = raw_page_max_rowid
+                        effective_page_count = max(len(recent), raw_page_count)
+                        if effective_page_count < page_limit or max_seen_in_page <= page_cursor:
                             page_cursor = max_seen_in_page
                             break
                         page_cursor = max_seen_in_page
-                        cur_dl = (
-                            max(deadline, found_at + att_join_wait_s)
-                            if (found_at is not None and require_attachment)
-                            else deadline
-                        )
-                        if time.monotonic() >= cur_dl:
+                        if time.monotonic() >= _effective_deadline():
                             break
                     if earliest_incomplete_rid is not None and earliest_incomplete_rid > 0:
                         persistent_cursor = max(persistent_cursor, earliest_incomplete_rid - 1)
@@ -3644,11 +3790,7 @@ class BluePillEngine:
                         persistent_cursor = page_cursor
             except Exception:
                 pass
-            effective_deadline = (
-                max(deadline, found_at + att_join_wait_s)
-                if (found_at is not None and require_attachment)
-                else deadline
-            )
+            effective_deadline = _effective_deadline()
             rem_sleep = effective_deadline - time.monotonic()
             if rem_sleep <= 0:
                 break
@@ -3697,61 +3839,107 @@ class BluePillEngine:
                 self._recent_effects[(chat_guid, message.strip())] = (time.time(), effect_id)
             self._save_chat_state()
 
-        if method_req != "apple-script":
-            sent, helper_guid = self._send_helper_payload_with_tx(
-                "send-message",
-                {
-                    "chatGuid": chat_guid,
-                    "message": message,
-                    "subject": subject,
-                    "effectId": effect_id,
-                    "selectedMessageGuid": effective_selected_guid,
-                    "partIndex": effective_part_index,
-                    "ddScan": 1,
-                },
-                wait_timeout=0.8,
+        allowed_send_chats: set[str] = {chat_guid} if chat_guid else set()
+        if chat_guid and os.path.exists(self.db_path):
+            try:
+                conn_exp = self._open_chat_db()
+                try:
+                    allowed_send_chats.update(self._expand_chat_guids_for_query(conn_exp, chat_guid))
+                finally:
+                    conn_exp.close()
+            except Exception:
+                pass
+        text_key = f"{temp_guid or 'txt'}:{uuid.uuid4().hex[:8]}"
+        text_send_meta: Dict[str, Any] = {
+            "key": text_key,
+            "chatGuid": chat_guid,
+            "allowedChatGuids": allowed_send_chats,
+            "text": message.strip(),
+            "tempGuid": temp_guid,
+            "helperGuid": "",
+            "retired": False,
+            "expiresAt": 0.0,
+        }
+        with self._pending_caption_lock:
+            self._prune_expired_text_sends_locked()
+            self._active_text_sends[text_key] = text_send_meta
+
+        db_msg: Optional[Dict[str, Any]] = None
+        try:
+            if method_req != "apple-script":
+                sent, helper_guid = self._send_helper_payload_with_tx(
+                    "send-message",
+                    {
+                        "chatGuid": chat_guid,
+                        "message": message,
+                        "subject": subject,
+                        "effectId": effect_id,
+                        "selectedMessageGuid": effective_selected_guid,
+                        "partIndex": effective_part_index,
+                        "ddScan": 1,
+                    },
+                    wait_timeout=0.8,
+                )
+                if sent:
+                    used_method = "private-api"
+                    if helper_guid:
+                        with self._pending_caption_lock:
+                            text_send_meta["helperGuid"] = helper_guid.strip()
+                        if temp_guid:
+                            with self._claim_lock:
+                                self.temp_guid_by_guid[helper_guid] = temp_guid
+                        if effect_id:
+                            self.chat_state.setdefault("messageEffects", {})[helper_guid] = effect_id
+                            self.message_effects[helper_guid] = effect_id
+
+            if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
+                sent = self._send_via_applescript(chat_guid, message)
+                if sent:
+                    used_method = "apple-script"
+
+            db_msg = self._poll_sent_message_from_db(
+                pre_max_rowid=pre_max_rowid,
+                chat_guid=chat_guid,
+                temp_guid=temp_guid,
+                helper_guid=helper_guid,
+                expected_text=message,
+                require_attachment=False,
+                timeout_s=(0.6 if helper_guid else 1.2) if (sent and os.path.exists(self.db_path)) else 0.05,
+                text_send_key=text_key,
             )
-            if sent:
-                used_method = "private-api"
-                if helper_guid and temp_guid:
-                    self.temp_guid_by_guid[helper_guid] = temp_guid
-                    if effect_id:
-                        self.chat_state.setdefault("messageEffects", {})[helper_guid] = effect_id
-                        self.message_effects[helper_guid] = effect_id
-
-        if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
-            sent = self._send_via_applescript(chat_guid, message)
-            if sent:
-                used_method = "apple-script"
-
-        db_msg = self._poll_sent_message_from_db(
-            pre_max_rowid=pre_max_rowid,
-            chat_guid=chat_guid,
-            temp_guid=temp_guid,
-            helper_guid=helper_guid,
-            expected_text=message,
-            require_attachment=False,
-            timeout_s=(0.6 if helper_guid else 1.2) if (sent and os.path.exists(self.db_path)) else 0.05,
-        )
-        # Brief settle window if chat.db row just inserted with isSent=0,error=0 so immediate carrier rejections surface synchronously
-        if db_msg is not None and os.path.exists(self.db_path):
-            rid = int(db_msg.get("originalROWID") or 0)
-            if rid > 0 and int(db_msg.get("error") or 0) == 0 and not db_msg.get("isSent"):
-                settle_deadline = time.time() + (0.2 if helper_guid else 0.3)
-                while time.time() < settle_deadline:
-                    time.sleep(0.07)
-                    try:
-                        refreshed = self.query_messages(
-                            {"limit": 1, "where": [{"statement": "message.ROWID = :rid", "args": {"rid": rid}}]}
-                        )
-                    except Exception as exc:
-                        self.logger.warning("[send_text] settle refresh skipped rowid=%d: %s", rid, exc)
-                        break
-                    if refreshed:
-                        db_msg = refreshed[0]
-                        db_msg["tempGuid"] = temp_guid
-                        if int(db_msg.get("error") or 0) != 0 or db_msg.get("isSent") or db_msg.get("isDelivered"):
+            # Brief settle window if chat.db row just inserted with isSent=0,error=0 so immediate carrier rejections surface synchronously
+            if db_msg is not None and os.path.exists(self.db_path):
+                rid = int(db_msg.get("originalROWID") or 0)
+                if rid > 0 and int(db_msg.get("error") or 0) == 0 and not db_msg.get("isSent"):
+                    settle_deadline = time.time() + (0.2 if helper_guid else 0.3)
+                    while time.time() < settle_deadline:
+                        time.sleep(0.07)
+                        try:
+                            refreshed = self.query_messages(
+                                {"limit": 1, "where": [{"statement": "message.ROWID = :rid", "args": {"rid": rid}}]}
+                            )
+                        except Exception as exc:
+                            self.logger.warning("[send_text] settle refresh skipped rowid=%d: %s", rid, exc)
                             break
+                        if refreshed:
+                            db_msg = refreshed[0]
+                            db_msg["tempGuid"] = temp_guid
+                            if int(db_msg.get("error") or 0) != 0 or db_msg.get("isSent") or db_msg.get("isDelivered"):
+                                break
+        finally:
+            with self._pending_caption_lock:
+                if db_msg is not None or not sent or bool((helper_guid or "").strip()):
+                    self._active_text_sends.pop(text_key, None)
+                else:
+                    meta_entry = self._active_text_sends.get(text_key)
+                    if meta_entry is not None:
+                        meta_entry["retired"] = True
+                        ttl_s = float(getattr(self, "_upload_ambiguity_ttl_s", 10.0))
+                        meta_entry["expiresAt"] = max(
+                            float(meta_entry.get("expiresAt") or 0.0),
+                            time.monotonic() + ttl_s,
+                        )
+                self._prune_expired_text_sends_locked()
 
         elapsed_ms = int((time.time() - t0) * 1000)
         if db_msg is not None:
@@ -3802,7 +3990,8 @@ class BluePillEngine:
             self.message_effects[resolved_guid] = effect_id
             self._save_chat_state()
         if temp_guid and (helper_guid or not has_chat_db):
-            self.temp_guid_by_guid[resolved_guid] = temp_guid
+            with self._claim_lock:
+                self.temp_guid_by_guid[resolved_guid] = temp_guid
         msg_obj: Dict[str, Any] = {
             "originalROWID": 0 if has_chat_db else self._get_max_message_rowid(),
             "guid": resolved_guid,
@@ -3965,6 +4154,10 @@ class BluePillEngine:
 
         # 3) Definite failure (disconnected / helper_error / exception): AppleScript fallback or bounded retry
         if sys.platform == "darwin" and not self._stop_event.is_set():
+            try:
+                self._tx_local.last_applescript_state = ""
+            except Exception:
+                pass
             if self._send_via_applescript(chat_guid, caption):
                 self.logger.info(
                     "[send_attachment] %s sent via AppleScript fallback reason=%s chat=%s tempGuid=%s",
@@ -3974,6 +4167,16 @@ class BluePillEngine:
                     temp_guid,
                 )
                 return "confirmed", clean_cap_guid
+            as_state = str(getattr(self._tx_local, "last_applescript_state", "") or "")
+            if as_state == "timeout":
+                self.logger.warning(
+                    "[send_attachment] %s AppleScript fallback timed out reason=%s chat=%s tempGuid=%s (leaving unconfirmed, no retry)",
+                    label,
+                    reason,
+                    chat_guid,
+                    temp_guid,
+                )
+                return "uncertain", clean_cap_guid
 
         return "retryable", clean_cap_guid
 
@@ -4078,16 +4281,25 @@ class BluePillEngine:
             )
             if not msg_correlated:
                 return False
-            for ag, orig_g in matched_atts:
-                self._outbound_attachments[ag] = (helper_file_path, mime_type)
-                if preserve_wav_metrics and measured_bars and measured_dur > 0:
-                    self._cache_audio_metrics(
-                        [ag, orig_g, helper_file_path],
-                        measured_bars,
-                        measured_dur,
-                    )
-            if temp_guid and msg_guid:
-                self.temp_guid_by_guid[msg_guid] = temp_guid
+            with self._claim_lock:
+                if temp_guid and msg_guid:
+                    existing_temp = self.temp_guid_by_guid.get(msg_guid, "")
+                    if existing_temp and existing_temp != temp_guid:
+                        return False
+                for ag, _orig_g in matched_atts:
+                    existing_att = self._outbound_attachments.get(ag)
+                    if existing_att is not None and helper_file_path and existing_att[0] != helper_file_path:
+                        return False
+                for ag, orig_g in matched_atts:
+                    self._outbound_attachments[ag] = (helper_file_path, mime_type)
+                    if preserve_wav_metrics and measured_bars and measured_dur > 0:
+                        self._cache_audio_metrics(
+                            [ag, orig_g, helper_file_path],
+                            measured_bars,
+                            measured_dur,
+                        )
+                if temp_guid and msg_guid:
+                    self.temp_guid_by_guid[msg_guid] = temp_guid
             return True
 
         def _waiter() -> None:
@@ -4299,7 +4511,8 @@ class BluePillEngine:
                     if helper_guid:
                         upload_match_meta["helperGuid"] = helper_guid.strip()
                         if temp_guid:
-                            self.temp_guid_by_guid[helper_guid] = temp_guid
+                            with self._claim_lock:
+                                self.temp_guid_by_guid[helper_guid] = temp_guid
 
             if sent and os.path.exists(self.db_path):
                 db_msg = self._poll_sent_message_from_db(
@@ -4427,11 +4640,12 @@ class BluePillEngine:
                         continue
                     ag = str(att.get("guid") or "").strip()
                     if ag:
-                        if has_matched_att:
-                            existing = self._outbound_attachments.get(ag)
-                            if existing is not None and existing[0] != helper_file_path:
-                                continue
-                        self._outbound_attachments[ag] = (helper_file_path, mime_type)
+                        with self._claim_lock:
+                            if has_matched_att:
+                                existing = self._outbound_attachments.get(ag)
+                                if existing is not None and existing[0] != helper_file_path:
+                                    continue
+                            self._outbound_attachments[ag] = (helper_file_path, mime_type)
                     if is_aud_att:
                         att["isAudio"] = True
                         if preserve_wav_metrics or not att.get("waveform") or not att.get("durationSeconds"):
@@ -4484,7 +4698,8 @@ class BluePillEngine:
         has_chat_db = os.path.exists(self.db_path)
         resolved_guid = (helper_guid or temp_guid or f"msg-{folder_uuid}") if has_chat_db else (helper_guid or f"msg-{folder_uuid}")
         if temp_guid and (helper_guid or not has_chat_db):
-            self.temp_guid_by_guid[resolved_guid] = temp_guid
+            with self._claim_lock:
+                self.temp_guid_by_guid[resolved_guid] = temp_guid
         msg_obj: Dict[str, Any] = {
             "originalROWID": 0 if has_chat_db else self._get_max_message_rowid(),
             "guid": resolved_guid,
@@ -7617,7 +7832,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
       const candTs = msgProducerMaxTs(cand);
       const curTs = msgProducerMaxTs(cur);
-      if ((cur.isRead || cur.isDelivered) && candErr && candTs <= curTs) return false;
+      if (((Number(cur.dateRead || 0) > 0) || cur.isDelivered) && candErr && candTs <= curTs) return false;
       if (candTs !== curTs) return candTs > curTs;
       if (candErr !== curErr) return candErr;
       const candRank = (cand.isRead ? 4 : 0) + (cand.isDelivered ? 2 : 0) + (cand.isSent ? 1 : 0);
@@ -11900,6 +12115,60 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
   await sandbox.selectChat('chat-A6', 'Chat A6');
   assert.ok(st.pendingReconcileTimer && st.pendingReconcileTimer !== activeTimerB6, 'Reopening A6 did not schedule reconcile timer');
   assert.ok(domMap.messagesPane.children.some(el => el.dataset.tempGuid === 'p-a6'), 'Reopening A6 lost pending bubble');
+
+  // 8) REV7 #2: isRead alone (dateRead === 0) on unconfirmed/outgoing message must NOT reject error=4,
+  // while positive dateRead > 0 or isDelivered === true continues blocking stale errors
+  assert.strictEqual(
+    sandbox.isStrictlyNewerProducerState(
+      { guid: 'r7-err-1', isFromMe: true, isRead: true, dateRead: 0, isDelivered: false, isSent: true, error: 4, dateCreated: 4000 },
+      { guid: 'r7-err-1', isFromMe: true, isRead: true, dateRead: 0, isDelivered: false, isSent: true, error: 0, dateCreated: 4000 }
+    ),
+    true,
+    'isRead with dateRead=0 wrongly blocked outgoing error=4'
+  );
+  assert.strictEqual(
+    sandbox.isStrictlyNewerProducerState(
+      { guid: 'r7-err-2', isFromMe: true, isRead: false, dateRead: 0, isDelivered: false, error: 4, dateCreated: 4000 },
+      { guid: 'r7-err-2', isFromMe: true, isRead: true, dateRead: 5000, isDelivered: false, isSent: true, error: 0, dateCreated: 4000 }
+    ),
+    false,
+    'Positive dateRead > 0 failed to block stale error'
+  );
+  assert.strictEqual(
+    sandbox.isStrictlyNewerProducerState(
+      { guid: 'r7-err-3', isFromMe: true, isRead: false, dateRead: 0, isDelivered: false, error: 4, dateCreated: 4000 },
+      { guid: 'r7-err-3', isFromMe: true, isRead: false, dateRead: 0, isDelivered: true, dateDelivered: 4500, isSent: true, error: 0, dateCreated: 4000 }
+    ),
+    false,
+    'isDelivered=true failed to block stale error'
+  );
+  fetchHandler = async () => ({
+    ok: true,
+    json: async () => ({
+      status: 200,
+      data: [
+        { guid: 'r7-ui-13', text: 'Outgoing unconfirmed', dateCreated: 4100, originalROWID: 13, isFromMe: true, isSent: false, isDelivered: false, isRead: true, dateRead: 0, dateDelivered: 0, error: 0, pending: false },
+      ]
+    })
+  });
+  await sandbox.selectChat('chat-R7', 'Chat R7');
+  sandbox.handleIncomingSocketMessage({
+    guid: 'r7-ui-13',
+    text: 'Outgoing unconfirmed',
+    dateCreated: 4100,
+    originalROWID: 13,
+    isFromMe: true,
+    isSent: false,
+    isDelivered: false,
+    isRead: true,
+    dateRead: 0,
+    dateDelivered: 0,
+    error: 4,
+    pending: false,
+    chats: [{ guid: 'chat-R7' }],
+  });
+  const r7El = domMap.messagesPane.children.find(el => el.dataset.guid === 'r7-ui-13');
+  assert.ok(r7El && collectText(r7El).includes('Not Delivered'), 'Outgoing error=4 with isRead=true,dateRead=0 did not render Not Delivered');
   console.log('WEB_UI_REV5_NODE_OK');
 })().catch(err => { console.error(err); process.exit(1); });
 """
@@ -12583,6 +12852,378 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
             assert nudge_skip.get("nudged") is False and nudge_skip.get("skippedReason") == "recently_synced", f"Expected recently_synced skip: {nudge_skip}"
         else:
             assert nudge_skip.get("nudged") is False and nudge_skip.get("skippedReason") == "non_darwin", f"Unexpected non-darwin nudge result: {nudge_skip}"
+
+        # REV7 #1, #3, #4, #5, #6 selftests (Zero-PII synthetic data)
+        r7_db_fd, r7_db_path = tempfile.mkstemp(prefix="bp_rev7_", suffix=".db")
+        os.close(r7_db_fd)
+        try:
+            r7c = sqlite3.connect(r7_db_path)
+            r7c.executescript(
+                """
+                CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, display_name TEXT, group_id TEXT, original_group_id TEXT, service_name TEXT, is_archived INTEGER, last_read_message_timestamp INTEGER, properties BLOB);
+                CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT, country TEXT);
+                CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB, subject TEXT, handle_id INTEGER, error INTEGER, date INTEGER, date_read INTEGER, date_delivered INTEGER, is_from_me INTEGER, is_read INTEGER, is_delivered INTEGER, is_sent INTEGER, item_type INTEGER, service TEXT, date_edited INTEGER, date_retracted INTEGER, expressive_send_style_id TEXT, associated_message_guid TEXT, associated_message_type INTEGER, associated_message_emoji TEXT, reply_to_guid TEXT, thread_originator_guid TEXT, thread_originator_part TEXT, was_delivered_quietly INTEGER, did_notify_recipient INTEGER, has_dd_results INTEGER, is_audio_message INTEGER, is_archive INTEGER, other_handle INTEGER, group_title TEXT, group_action_type INTEGER, cache_roomnames TEXT, cache_has_attachments INTEGER);
+                CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER, message_date INTEGER);
+                CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, guid TEXT, original_guid TEXT, created_date INTEGER, uti TEXT, mime_type TEXT, transfer_name TEXT, total_bytes INTEGER, transfer_state INTEGER, is_outgoing INTEGER, hide_attachment INTEGER, is_sticker INTEGER, filename TEXT);
+                CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+                INSERT INTO chat VALUES (1, 'iMessage;-;+14155550171', '+14155550171', 45, '', '', '', 'iMessage', 0, 0, NULL);
+                INSERT INTO chat VALUES (2, 'iMessage;-;+14155550172', '+14155550172', 45, '', '', '', 'iMessage', 0, 0, NULL);
+                INSERT INTO chat VALUES (3, 'iMessage;-;+14155550173', '+14155550173', 45, '', '', '', 'iMessage', 0, 0, NULL);
+                INSERT INTO message VALUES (1, 'r7-text-1', 'unrelated earlier text', NULL, '', 0, 0, 700000400000000000, 0, 0, 1, 1, 0, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);
+                INSERT INTO chat_message_join VALUES (1, 1, 700000400000000000);
+                """
+            )
+            r7c.commit()
+            r7c.close()
+
+            r7_eng = BluePillEngine(db_path=r7_db_path, password="p", enable_background_daemons=False)
+            r7_bcast: List[Tuple[str, Any]] = []
+            r7_eng.broadcast_socketio = lambda ev, pl: r7_bcast.append((ev, pl))
+
+            # REV7 #1: Earlier incomplete text row starts timer; target upload appearing >250ms later still stays eligible until attachment joins
+            r7_meta = r7_eng._build_attachment_match_meta(
+                chat_guid="iMessage;-;+14155550171",
+                helper_file_path="/tmp/rev7_target.png",
+                mime_type="image/png",
+                served_transfer_name="rev7_target.png",
+                served_total_bytes=len(png_bytes),
+            )
+
+            def _rev7_delayed_upload() -> None:
+                time.sleep(0.28)
+                c2 = sqlite3.connect(r7_db_path)
+                c2.execute(
+                    "INSERT INTO message VALUES (2, 'r7-att-msg-2', '', NULL, '', 0, 0, 700000401000000000, 0, 0, 1, 1, 0, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 1);"
+                )
+                c2.execute("INSERT INTO chat_message_join VALUES (1, 2, 700000401000000000);")
+                c2.commit()
+                time.sleep(0.08)
+                c2.execute(
+                    "INSERT INTO attachment VALUES (2, 'att-r7-2', 'att-r7-2', 700000401, 'public.png', 'image/png', 'rev7_target.png', ?, 5, 1, 0, 0, '');",
+                    (len(png_bytes),),
+                )
+                c2.execute("INSERT INTO message_attachment_join VALUES (2, 2);")
+                c2.commit()
+                c2.close()
+
+            r7_t1 = threading.Thread(target=_rev7_delayed_upload, daemon=True)
+            r7_t1.start()
+            found_r7_2 = r7_eng._poll_sent_message_from_db(
+                pre_max_rowid=0,
+                chat_guid="iMessage;-;+14155550171",
+                temp_guid="temp-rev7-att-2",
+                require_attachment=True,
+                timeout_s=0.65,
+                match_meta=r7_meta,
+            )
+            r7_t1.join(timeout=2.0)
+            assert found_r7_2 is not None and found_r7_2.get("guid") == "r7-att-msg-2", (
+                f"REV7 #1 failed: earlier incomplete row made later target upload ineligible: {found_r7_2}"
+            )
+
+            # REV7 #5: 25 locally deleted rows must NOT stall page_cursor before target row 28,
+            # and incomplete visible row 29 after deleted page must remain eligible for recheck
+            c3 = sqlite3.connect(r7_db_path)
+            for rid in range(3, 28):
+                ts_ns = 700000410000000000 + rid * 1000000
+                c3.execute(
+                    "INSERT INTO message VALUES (?, ?, ?, NULL, '', 0, 0, ?, 0, 0, 1, 1, 0, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);",
+                    (rid, f"r7-del-{rid}", f"deleted {rid}", ts_ns),
+                )
+                c3.execute("INSERT INTO chat_message_join VALUES (3, ?, ?);", (rid, ts_ns))
+                r7_eng.deleted_message_guids.add(f"r7-del-{rid}")
+            c3.execute(
+                "INSERT INTO message VALUES (28, 'r7-page-28', '', NULL, '', 0, 0, 700000450000000000, 0, 0, 1, 1, 0, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 1);"
+            )
+            c3.execute("INSERT INTO chat_message_join VALUES (3, 28, 700000450000000000);")
+            c3.execute(
+                "INSERT INTO attachment VALUES (28, 'att-r7-28', 'att-r7-28', 700000450, 'public.png', 'image/png', 'paged_r7_28.png', ?, 5, 1, 0, 0, '');",
+                (len(png_bytes),),
+            )
+            c3.execute("INSERT INTO message_attachment_join VALUES (28, 28);")
+            c3.commit()
+            c3.close()
+            r7_meta_28 = r7_eng._build_attachment_match_meta(
+                chat_guid="iMessage;-;+14155550173",
+                helper_file_path="/tmp/paged_r7_28.png",
+                mime_type="image/png",
+                served_transfer_name="paged_r7_28.png",
+                served_total_bytes=len(png_bytes),
+            )
+            found_r7_28 = r7_eng._poll_sent_message_from_db(
+                pre_max_rowid=2,
+                chat_guid="iMessage;-;+14155550173",
+                temp_guid="temp-rev7-28",
+                require_attachment=True,
+                timeout_s=0.3,
+                match_meta=r7_meta_28,
+            )
+            assert found_r7_28 is not None and found_r7_28.get("guid") == "r7-page-28", (
+                f"REV7 #5 failed: pagination stuck on deleted rows: {found_r7_28}"
+            )
+            # Also verify incomplete visible row 29 after deleted rows 3..27 is rechecked when attachment joins
+            c4 = sqlite3.connect(r7_db_path)
+            c4.execute(
+                "INSERT INTO message VALUES (29, 'r7-inc-29', '', NULL, '', 0, 0, 700000460000000000, 0, 0, 1, 1, 0, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);"
+            )
+            c4.execute("INSERT INTO chat_message_join VALUES (3, 29, 700000460000000000);")
+            c4.commit()
+            c4.close()
+            r7_meta_29 = r7_eng._build_attachment_match_meta(
+                chat_guid="iMessage;-;+14155550173",
+                helper_file_path="/tmp/late_r7_29.png",
+                mime_type="image/png",
+                served_transfer_name="late_r7_29.png",
+                served_total_bytes=len(png_bytes),
+            )
+
+            def _rev7_join_29() -> None:
+                time.sleep(0.08)
+                jc4 = sqlite3.connect(r7_db_path)
+                jc4.execute(
+                    "INSERT INTO attachment VALUES (29, 'att-r7-29', 'att-r7-29', 700000460, 'public.png', 'image/png', 'late_r7_29.png', ?, 5, 1, 0, 0, '');",
+                    (len(png_bytes),),
+                )
+                jc4.execute("INSERT INTO message_attachment_join VALUES (29, 29);")
+                jc4.commit()
+                jc4.close()
+
+            r7_t29 = threading.Thread(target=_rev7_join_29, daemon=True)
+            r7_t29.start()
+            found_r7_29 = r7_eng._poll_sent_message_from_db(
+                pre_max_rowid=2,
+                chat_guid="iMessage;-;+14155550173",
+                temp_guid="temp-rev7-29",
+                require_attachment=True,
+                timeout_s=0.45,
+                match_meta=r7_meta_29,
+            )
+            r7_t29.join(timeout=2.0)
+            assert found_r7_29 is not None and found_r7_29.get("guid") == "r7-inc-29", (
+                f"REV7 #5 failed: incomplete visible row 29 after deleted rows was skipped: {found_r7_29}"
+            )
+
+            # REV7 #4: Atomic fallback claim & competing indistinguishable no-GUID text sends stay pending
+            c5 = sqlite3.connect(r7_db_path)
+            c5.execute(
+                "INSERT INTO message VALUES (30, 'r7-ok-30', 'OK', NULL, '', 0, 0, 700000470000000000, 0, 0, 1, 1, 0, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);"
+            )
+            c5.execute("INSERT INTO chat_message_join VALUES (2, 30, 700000470000000000);")
+            c5.commit()
+            c5.close()
+            race_results: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+            race_barrier = threading.Barrier(2)
+
+            def _race_poll(tg: str) -> None:
+                race_barrier.wait(timeout=2.0)
+                res_m = r7_eng._poll_sent_message_from_db(
+                    pre_max_rowid=29,
+                    chat_guid="iMessage;-;+14155550172",
+                    temp_guid=tg,
+                    expected_text="OK",
+                    require_attachment=False,
+                    timeout_s=0.15,
+                )
+                race_results.append((tg, res_m))
+
+            rt_a = threading.Thread(target=_race_poll, args=("temp-race-A",))
+            rt_b = threading.Thread(target=_race_poll, args=("temp-race-B",))
+            rt_a.start()
+            rt_b.start()
+            rt_a.join(timeout=2.0)
+            rt_b.join(timeout=2.0)
+            winners = [(tg, m) for tg, m in race_results if m is not None]
+            assert len(winners) == 1, f"REV7 #4 atomic claim failed: winners={winners}"
+            assert r7_eng.temp_guid_by_guid.get("r7-ok-30") == winners[0][0], (
+                f"REV7 #4 temp_guid_by_guid overwritten: {r7_eng.temp_guid_by_guid.get('r7-ok-30')}"
+            )
+
+            # Competing no-GUID send_text calls for identical "OK" in same chat must both stay pending
+            c6 = sqlite3.connect(r7_db_path)
+            c6.execute(
+                "INSERT INTO message VALUES (31, 'r7-ok-compete-31', 'OK', NULL, '', 0, 0, 700000475000000000, 0, 0, 1, 1, 0, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);"
+            )
+            c6.execute("INSERT INTO chat_message_join VALUES (2, 31, 700000475000000000);")
+            c6.commit()
+            c6.close()
+            r7_eng._send_helper_payload_with_tx = lambda act, data, wait_timeout=0.8: (True, "")
+            comp_barrier = threading.Barrier(2)
+            comp_results: List[Dict[str, Any]] = []
+            comp_lock = threading.Lock()
+
+            def _compete_send(tg: str) -> None:
+                comp_barrier.wait(timeout=2.0)
+                res_s = r7_eng.send_text({
+                    "chatGuid": "iMessage;-;+14155550172",
+                    "message": "OK",
+                    "tempGuid": tg,
+                })
+                with comp_lock:
+                    comp_results.append(res_s)
+
+            ct_1 = threading.Thread(target=_compete_send, args=("temp-comp-1",))
+            ct_2 = threading.Thread(target=_compete_send, args=("temp-comp-2",))
+            ct_1.start()
+            ct_2.start()
+            ct_1.join(timeout=4.0)
+            ct_2.join(timeout=4.0)
+            assert len(comp_results) == 2 and all(r.get("pending") is True and r.get("originalROWID") == 0 for r in comp_results), (
+                f"REV7 #4 competing no-GUID sends confirmed ambiguously: {comp_results}"
+            )
+            assert "r7-ok-compete-31" not in r7_eng.temp_guid_by_guid, (
+                f"REV7 #4 competing send polluted temp_guid_by_guid: {r7_eng.temp_guid_by_guid}"
+            )
+            r7_eng._active_text_sends.clear()
+
+            # Exact-GUID send_text still confirms immediately even when another no-GUID send exists
+            c6b = sqlite3.connect(r7_db_path)
+            c6b.execute(
+                "INSERT INTO message VALUES (32, 'r7-ok-exact-32', 'OK', NULL, '', 0, 0, 700000476000000000, 0, 0, 1, 1, 0, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);"
+            )
+            c6b.execute("INSERT INTO chat_message_join VALUES (2, 32, 700000476000000000);")
+            c6b.commit()
+            c6b.close()
+            r7_eng._send_helper_payload_with_tx = lambda act, data, wait_timeout=0.8: (True, "r7-ok-exact-32")
+            exact_32 = r7_eng.send_text({
+                "chatGuid": "iMessage;-;+14155550172",
+                "message": "OK",
+                "tempGuid": "temp-exact-32",
+            })
+            assert exact_32.get("originalROWID") == 32 and exact_32.get("guid") == "r7-ok-exact-32"
+            assert r7_eng.temp_guid_by_guid.get("r7-ok-exact-32") == "temp-exact-32"
+
+            # REV7 #6: Do NOT mark/suppress row when chats is empty; publish once chat_message_join appears, then suppress duplicates
+            r7_bcast.clear()
+            assert r7_eng._broadcast_new_message_once({"originalROWID": 901, "guid": "r7-nochat-901", "chats": []}) is False
+            assert 901 not in r7_eng._published_msg_rowids and "r7-nochat-901" not in r7_eng._published_msg_guids
+            r7_eng._mark_message_published({"originalROWID": 902, "guid": "r7-nochat-902", "chats": []})
+            assert 902 not in r7_eng._published_msg_rowids and "r7-nochat-902" not in r7_eng._published_msg_guids
+            assert r7_eng._poll_wal_once() == 0
+            c7 = sqlite3.connect(r7_db_path)
+            c7.execute(
+                "INSERT INTO message VALUES (33, 'r7-latejoin-33', 'late chat join', NULL, '', 0, 0, 700000480000000000, 0, 0, 1, 1, 0, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);"
+            )
+            c7.commit()
+            c7.close()
+            r7_eng._send_helper_payload_with_tx = lambda act, data, wait_timeout=0.8: (True, "r7-latejoin-33")
+            sent_33 = r7_eng.send_text({
+                "chatGuid": "iMessage;-;+14155550171",
+                "message": "late chat join",
+                "tempGuid": "temp-latejoin-33",
+            })
+            assert sent_33.get("originalROWID") == 33 and not sent_33.get("chats")
+            assert not any(pl.get("guid") == "r7-latejoin-33" for _, pl in r7_bcast), (
+                f"REV7 #6 published chatless event prematurely: {r7_bcast}"
+            )
+            assert 33 not in r7_eng._published_msg_rowids and "r7-latejoin-33" not in r7_eng._published_msg_guids
+            c8 = sqlite3.connect(r7_db_path)
+            c8.execute("INSERT INTO chat_message_join VALUES (1, 33, 700000480000000000);")
+            c8.commit()
+            c8.close()
+            assert r7_eng._poll_wal_once() == 1
+            joined_bcasts = [pl for ev, pl in r7_bcast if ev == "new-message" and pl.get("guid") == "r7-latejoin-33"]
+            assert len(joined_bcasts) == 1 and joined_bcasts[0].get("chats"), (
+                f"REV7 #6 suppressed joined WAL broadcast: {r7_bcast}"
+            )
+            assert r7_eng._broadcast_new_message_once(joined_bcasts[0]) is False, (
+                "REV7 #6 failed to suppress repeated broadcast after chat was known"
+            )
+
+            # REV7 #3: AppleScript fallback ambiguous timeout -> unconfirmed=True, retryable=False, no retry, no attachment resend;
+            # definite failure -> retryable=True, retries caption only
+            r7_eng._delayed_caption_wait_s = 0.05
+            r7_eng._delayed_caption_retry_delay_s = 0.02
+            orig_r7_poll = r7_eng._poll_sent_message_from_db
+            r7_eng._poll_sent_message_from_db = lambda **kw: None
+            orig_r7_plat = sys.platform
+            orig_sub_run = subprocess.run
+            sys.platform = "darwin"
+            try:
+                as_timeout_calls = 0
+                att_send_calls = 0
+
+                def _timeout_tx(act: str, data: Dict[str, Any], wait_timeout: float = 0.8) -> Tuple[bool, str]:
+                    nonlocal att_send_calls
+                    if act == "send-attachment":
+                        att_send_calls += 1
+                        return True, ""
+                    r7_eng._tx_local.last_state = "disconnected"
+                    return False, ""
+
+                def _timeout_osascript(cmd: List[str], **_kw: Any) -> Any:
+                    nonlocal as_timeout_calls
+                    if cmd and cmd[0] == "/usr/bin/osascript":
+                        as_timeout_calls += 1
+                        raise subprocess.TimeoutExpired(cmd=cmd, timeout=8.0)
+                    return orig_sub_run(cmd, **_kw)
+
+                r7_eng._send_helper_payload_with_tx = _timeout_tx
+                subprocess.run = _timeout_osascript
+                r7_eng.send_attachment({
+                    "chatGuid": "iMessage;-;+14155550171",
+                    "tempGuid": "temp-r7-as-to",
+                    "name": "r7_as_to.png",
+                    "message": "Timeout caption",
+                    "attachment_bytes": png_bytes,
+                })
+                if r7_eng._last_delayed_caption_thread is not None:
+                    r7_eng._last_delayed_caption_thread.join(timeout=3.0)
+                assert att_send_calls == 1, f"REV7 #3 resent attachment on AS timeout: {att_send_calls}"
+                assert as_timeout_calls == 1, f"REV7 #3 retried after ambiguous AS timeout: {as_timeout_calls}"
+                cap_outcome_to, _ = r7_eng._dispatch_attachment_caption_once(
+                    chat_guid="iMessage;-;+14155550171",
+                    caption="Timeout caption direct",
+                    temp_guid="temp-r7-as-to-dir",
+                    reason="selftest_as_timeout",
+                )
+                assert cap_outcome_to == "uncertain", f"REV7 #3 expected uncertain for AS timeout, got {cap_outcome_to}"
+
+                # Definite AppleScript failure (rc=1) must return retryable and retry caption without resending attachment
+                as_fail_calls = 0
+                att_fail_calls = 0
+
+                def _fail_tx(act: str, data: Dict[str, Any], wait_timeout: float = 0.8) -> Tuple[bool, str]:
+                    nonlocal att_fail_calls
+                    if act == "send-attachment":
+                        att_fail_calls += 1
+                        return True, ""
+                    r7_eng._tx_local.last_state = "disconnected"
+                    return False, ""
+
+                def _fail_osascript(cmd: List[str], **_kw: Any) -> Any:
+                    nonlocal as_fail_calls
+                    if cmd and cmd[0] == "/usr/bin/osascript":
+                        as_fail_calls += 1
+                        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout=b"", stderr=b"err")
+                    return orig_sub_run(cmd, **_kw)
+
+                r7_eng._send_helper_payload_with_tx = _fail_tx
+                subprocess.run = _fail_osascript
+                cap_outcome_fail, _ = r7_eng._dispatch_attachment_caption_once(
+                    chat_guid="iMessage;-;+14155550171",
+                    caption="Fail caption direct",
+                    temp_guid="temp-r7-as-fail-dir",
+                    reason="selftest_as_fail",
+                )
+                assert cap_outcome_fail == "retryable", f"REV7 #3 expected retryable for definite AS failure, got {cap_outcome_fail}"
+                r7_eng.send_attachment({
+                    "chatGuid": "iMessage;-;+14155550171",
+                    "tempGuid": "temp-r7-as-fail",
+                    "name": "r7_as_fail.png",
+                    "message": "Fail caption retry",
+                    "attachment_bytes": png_bytes,
+                })
+                if r7_eng._last_delayed_caption_thread is not None:
+                    r7_eng._last_delayed_caption_thread.join(timeout=3.0)
+                assert att_fail_calls == 1, f"REV7 #3 resent attachment on definite AS failure: {att_fail_calls}"
+                assert as_fail_calls == 4, f"REV7 #3 expected 1 direct + 3 delayed attempts, got {as_fail_calls}"
+            finally:
+                subprocess.run = orig_sub_run
+                sys.platform = orig_r7_plat
+                r7_eng._poll_sent_message_from_db = orig_r7_poll
+        finally:
+            if os.path.exists(r7_db_path):
+                os.remove(r7_db_path)
     finally:
         srv.shutdown()
         srv.server_close()

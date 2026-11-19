@@ -3887,44 +3887,53 @@ bool Backend::filterPendingDeliveryResponseItems(
         if (m_reconcileRemovedSeqByGuid.value(g, 0) > reconcileSeqAtDispatch) {
             continue;
         }
+        const qint64 batchDelivTs = obj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
+        const qint64 batchReadTs = obj.value(QStringLiteral("dateRead")).toVariant().toLongLong();
         const bool batchHasError = (obj.value(QStringLiteral("error")).toInt(0) != 0);
         const bool batchDeliveredOrRead =
             obj.value(QStringLiteral("isDelivered")).toBool(false) ||
-            (obj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
-            (obj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+            (batchDelivTs > 0) ||
+            (batchReadTs > 0);
         const bool batchHasTerminalState = batchDeliveredOrRead || batchHasError;
-        if (observedSeqAtDispatch.contains(g) &&
-            m_messageObservationSeq.value(g, 0) > observedSeqAtDispatch.value(g, 0)) {
-            QJsonObject cachedEntry;
-            const QString knownChat = resolveCanonicalChatGuid(m_pendingDeliveryMessages.value(g));
-            if (!knownChat.isEmpty() && m_chatMessagesCache.contains(knownChat) &&
-                m_chatMessagesCache.value(knownChat).contains(g)) {
-                cachedEntry = m_chatMessagesCache.value(knownChat).value(g);
-            } else {
-                for (auto chatIt = m_chatMessagesCache.constBegin(); chatIt != m_chatMessagesCache.constEnd(); ++chatIt) {
-                    if (chatIt.value().contains(g)) {
-                        cachedEntry = chatIt.value().value(g);
-                        break;
+        QString knownCg = m_pendingDeliveryMessages.value(g);
+        QJsonObject cachedEntry;
+        const QString resolvedKnownChat = resolveCanonicalChatGuid(knownCg);
+        if (!resolvedKnownChat.isEmpty() && m_chatMessagesCache.contains(resolvedKnownChat) &&
+            m_chatMessagesCache.value(resolvedKnownChat).contains(g)) {
+            knownCg = resolvedKnownChat;
+            cachedEntry = m_chatMessagesCache.value(resolvedKnownChat).value(g);
+        } else {
+            for (auto chatIt = m_chatMessagesCache.constBegin(); chatIt != m_chatMessagesCache.constEnd(); ++chatIt) {
+                if (chatIt.value().contains(g)) {
+                    if (knownCg.isEmpty()) {
+                        knownCg = chatIt.key();
                     }
+                    cachedEntry = chatIt.value().value(g);
+                    break;
                 }
             }
+        }
+        if (observedSeqAtDispatch.contains(g) &&
+            m_messageObservationSeq.value(g, 0) > observedSeqAtDispatch.value(g, 0)) {
+            const qint64 cachedDelivTs = cachedEntry.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
+            const qint64 cachedReadTs = cachedEntry.value(QStringLiteral("dateRead")).toVariant().toLongLong();
             const bool cachedDeliveredOrRead =
                 cachedEntry.value(QStringLiteral("isDelivered")).toBool(false) ||
-                (cachedEntry.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
-                (cachedEntry.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+                (cachedDelivTs > 0) ||
+                (cachedReadTs > 0);
             const bool cachedHasError = (cachedEntry.value(QStringLiteral("error")).toInt(0) != 0);
+            const bool batchHasNewerRead = (batchReadTs > cachedReadTs);
+            const bool batchHasNewerDelivery = (cachedDelivTs > 0) && (batchDelivTs > cachedDelivTs);
+            const bool batchAdvancesOverCachedError = batchHasNewerRead || batchHasNewerDelivery;
             if (!batchHasTerminalState ||
                 (cachedDeliveredOrRead && !cachedHasError && (batchHasError || !batchDeliveredOrRead)) ||
-                (cachedHasError && !batchHasError)) {
+                (cachedHasError && !batchHasError && !batchAdvancesOverCachedError)) {
                 // Newer state was already observed while in flight; never let stale error or older positive GUID-query receipt overwrite newer state
                 continue;
             }
         }
-        if (obj.value(QStringLiteral("chats")).toArray().isEmpty() && m_pendingDeliveryMessages.contains(g)) {
-            const QString knownCg = m_pendingDeliveryMessages.value(g);
-            if (!knownCg.isEmpty()) {
-                obj.insert(QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), knownCg}}});
-            }
+        if (obj.value(QStringLiteral("chats")).toArray().isEmpty() && !knownCg.isEmpty()) {
+            obj.insert(QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), knownCg}}});
         }
         outNonStale->append(obj);
     }
@@ -8627,7 +8636,7 @@ void Backend::sendAttachmentInternal(const QString &chatGuid, const QString &fil
     const QString trimmedCaption = caption.trimmed();
     QNetworkReply *reply = m_sendNam.post(req, multiPart);
     multiPart->setParent(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, tempGuid, nowMs, absLocalPath, mimeType, durationSeconds, trimmedCaption, isAud, ownedVoiceRecording]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, tempGuid, nowMs, absLocalPath, mimeType, durationSeconds, waveformBars, trimmedCaption, isAud, ownedVoiceRecording]() {
         reply->deleteLater();
         if (m_activeSendCount > 0) {
             --m_activeSendCount;
@@ -8709,6 +8718,24 @@ void Backend::sendAttachmentInternal(const QString &chatGuid, const QString &fil
             int mergedErrCode = sendErrCode;
             QString finalReceipt;
             QJsonObject effectiveObj = dataObj;
+            auto makeFallbackAttachment = [&](const QString &attGuid) {
+                QJsonObject optAtt{
+                    {QStringLiteral("guid"), attGuid},
+                    {QStringLiteral("transferName"), QFileInfo(absLocalPath).fileName()},
+                    {QStringLiteral("mimeType"), mimeType}
+                };
+                if (durationSeconds > 0) {
+                    optAtt.insert(QStringLiteral("durationSeconds"), durationSeconds);
+                }
+                if (!waveformBars.isEmpty()) {
+                    QJsonArray wfArr;
+                    for (const QVariant &v : waveformBars) {
+                        wfArr.append(v.toDouble());
+                    }
+                    optAtt.insert(QStringLiteral("waveform"), wfArr);
+                }
+                return optAtt;
+            };
 
             if (!realGuid.isEmpty()) {
                 m_seenMessageGuids.insert(realGuid);
@@ -8744,23 +8771,15 @@ void Backend::sendAttachmentInternal(const QString &chatGuid, const QString &fil
                         uploadObj.insert(QStringLiteral("isDelivered"), false);
                     }
                 }
-                if (uploadObj.value(QStringLiteral("pending")).toBool(false)) {
-                    if (!uploadObj.contains(QStringLiteral("text")) && !trimmedCaption.isEmpty()) {
+                if (uploadObj.value(QStringLiteral("pending")).toBool(false) || (sendErrCode != 0)) {
+                    if (extractMessageText(uploadObj).trimmed().isEmpty() && !trimmedCaption.isEmpty()) {
                         uploadObj.insert(QStringLiteral("text"), trimmedCaption);
                     }
                     if (uploadObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong() <= 0) {
                         uploadObj.insert(QStringLiteral("dateCreated"), nowMs);
                     }
                     if (uploadObj.value(QStringLiteral("attachments")).toArray().isEmpty()) {
-                        QJsonObject optAtt{
-                            {QStringLiteral("guid"), tempGuid},
-                            {QStringLiteral("transferName"), QFileInfo(absLocalPath).fileName()},
-                            {QStringLiteral("mimeType"), mimeType}
-                        };
-                        if (durationSeconds > 0) {
-                            optAtt.insert(QStringLiteral("durationSeconds"), durationSeconds);
-                        }
-                        uploadObj.insert(QStringLiteral("attachments"), QJsonArray{optAtt});
+                        uploadObj.insert(QStringLiteral("attachments"), QJsonArray{makeFallbackAttachment(tempGuid)});
                     }
                 }
                 cacheMessageForChat(canonicalGuid, uploadObj);
@@ -8800,22 +8819,14 @@ void Backend::sendAttachmentInternal(const QString &chatGuid, const QString &fil
                     pendingAck.insert(QStringLiteral("isDelivered"), false);
                     pendingAck.insert(QStringLiteral("pending"), true);
                 }
-                if (!pendingAck.contains(QStringLiteral("text")) && !trimmedCaption.isEmpty()) {
+                if (extractMessageText(pendingAck).trimmed().isEmpty() && !trimmedCaption.isEmpty()) {
                     pendingAck.insert(QStringLiteral("text"), trimmedCaption);
                 }
                 if (pendingAck.value(QStringLiteral("dateCreated")).toVariant().toLongLong() <= 0) {
                     pendingAck.insert(QStringLiteral("dateCreated"), nowMs);
                 }
                 if (pendingAck.value(QStringLiteral("attachments")).toArray().isEmpty()) {
-                    QJsonObject optAtt{
-                        {QStringLiteral("guid"), stableTempKey},
-                        {QStringLiteral("transferName"), QFileInfo(absLocalPath).fileName()},
-                        {QStringLiteral("mimeType"), mimeType}
-                    };
-                    if (durationSeconds > 0) {
-                        optAtt.insert(QStringLiteral("durationSeconds"), durationSeconds);
-                    }
-                    pendingAck.insert(QStringLiteral("attachments"), QJsonArray{optAtt});
+                    pendingAck.insert(QStringLiteral("attachments"), QJsonArray{makeFallbackAttachment(stableTempKey)});
                 }
                 cacheMessageForChat(canonicalGuid, pendingAck);
                 if (m_chatMessagesCache.contains(canonicalGuid) &&
