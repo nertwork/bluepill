@@ -31,7 +31,9 @@ jobs:
           repo = os.environ["REPO"]
           token = os.environ["GH_TOKEN"]
           pattern = re.compile(
-              r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|ref(?:s|erences?)?)\s*:?\s*(?:\*\*[^*]*\*\*\s*:?\s*)?(?:https://github\.com/"
+              r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|ref(?:s|erences?)?)"
+              r"(?:[ \t]*/[ \t]*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|ref(?:s|erences?)?)|[ \t]*\([^)\r\n]*\)|[ \t]*\*{1,2}|[ \t]*:)*"
+              r"\s*(?:https://github\.com/"
               + re.escape(repo)
               + r"/issues/|#)(\d+)",
               re.IGNORECASE,

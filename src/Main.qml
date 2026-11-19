@@ -80,6 +80,16 @@ ApplicationWindow {
         }
     }
 
+    function isVoiceMemoForSelectedChat() {
+        if (!backend.selectedChatGuid || backend.selectedChatGuid.length === 0) return false
+        if (!backend.recordingVoice && !backend.hasRecordedVoiceMemo) return false
+        var recGuid = backend.recordedVoiceChatGuid || ""
+        if (recGuid.length > 0 && !backend.isSameConversation(recGuid, backend.selectedChatGuid)) {
+            return false
+        }
+        return backend.canSendRecordedVoiceMemoToSelectedChat()
+    }
+
     function sendComposerContent() {
         if (backend.selectedChatGuid.length === 0) return
         if (root.stagedAttachmentPath.length > 0 && !root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
@@ -109,18 +119,50 @@ ApplicationWindow {
             root.replyTargetGuid = ""
             root.replyTargetSender = ""
             root.replyTargetText = ""
-        } else if (backend.hasRecordedVoiceMemo) {
+        } else if (backend.hasRecordedVoiceMemo && root.isVoiceMemoForSelectedChat()) {
             backend.sendRecordedVoiceMemo()
             messageListView.scrollToBottom()
         }
     }
 
+    property bool _reconcilingAudioDevices: false
+
+    function hasAudioDeviceId(list, targetId) {
+        if (!list || list.length === 0) return false
+        var needle = targetId || ""
+        for (var i = 0; i < list.length; i++) {
+            if ((list[i].id || "") === needle) return true
+        }
+        return false
+    }
+
     function findAudioDeviceIndex(list, targetId) {
         if (!list || list.length === 0) return 0
+        var needle = targetId || ""
         for (var i = 0; i < list.length; i++) {
-            if ((list[i].id || "") === (targetId || "")) return i
+            if ((list[i].id || "") === needle) return i
+        }
+        for (var j = 0; j < list.length; j++) {
+            if ((list[j].id || "") === "") return j
         }
         return 0
+    }
+
+    function reconcileAudioDeviceSelections() {
+        if (root._reconcilingAudioDevices) return
+        root._reconcilingAudioDevices = true
+        try {
+            var inList = backend.audioInputDevices
+            if (inList && inList.length > 0 && backend.selectedAudioInputDevice && backend.selectedAudioInputDevice.length > 0 && !root.hasAudioDeviceId(inList, backend.selectedAudioInputDevice)) {
+                backend.selectedAudioInputDevice = root.hasAudioDeviceId(inList, "") ? "" : (inList[0].id || "")
+            }
+            var outList = backend.audioOutputDevices
+            if (outList && outList.length > 0 && backend.selectedAudioOutputDevice && backend.selectedAudioOutputDevice.length > 0 && !root.hasAudioDeviceId(outList, backend.selectedAudioOutputDevice)) {
+                backend.selectedAudioOutputDevice = root.hasAudioDeviceId(outList, "") ? "" : (outList[0].id || "")
+            }
+        } finally {
+            root._reconcilingAudioDevices = false
+        }
     }
 
     property string activeScreenEffect: ""
@@ -316,6 +358,7 @@ ApplicationWindow {
 
     onShowServerConfigModalChanged: {
         if (showServerConfigModal) {
+            root.reconcileAudioDeviceSelections()
             serverUrlInput.text = backend.serverUrl
             secondaryServerUrlInput.text = backend.secondaryServerUrl
             serverPasswordInput.text = backend.serverPassword
@@ -329,6 +372,7 @@ ApplicationWindow {
         root.showContactModal = false
         root.showNewChatModal = false
         root.showEmojiPicker = false
+        root.reconcileAudioDeviceSelections()
         serverUrlInput.text = backend.serverUrl
         secondaryServerUrlInput.text = backend.secondaryServerUrl
         serverPasswordInput.text = backend.serverPassword
@@ -670,6 +714,7 @@ ApplicationWindow {
             root.lastDraftChatGuid = initialGuid
         }
         backend.registerWindow(root)
+        root.reconcileAudioDeviceSelections()
         var currentGuid = backend.selectedChatGuid || ""
         if (currentGuid.length > 0) {
             root.lastDraftChatGuid = currentGuid
@@ -683,6 +728,9 @@ ApplicationWindow {
 
     Connections {
         target: backend
+        function onAudioDevicesChanged() {
+            root.reconcileAudioDeviceSelections()
+        }
         function onToastMessage(text) {
             root.activeToastText = text
             toastTimer.restart()
@@ -1098,6 +1146,22 @@ ApplicationWindow {
             backend.clearSelectedChat()
         }
     }
+    function handleEscapePostVoiceFallback() {
+        if (root.stagedAttachmentPath !== "" && root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
+            root.clearStagedAttachment()
+            root.showToast("✕ " + i18n.tr("Attachment cancelled"))
+        } else if (root.replyTargetGuid !== "") {
+            root.replyTargetGuid = ""
+            root.replyTargetSender = ""
+            root.replyTargetText = ""
+        } else if (searchInput.text !== "") {
+            searchInput.text = ""
+            backend.setSearchQuery("")
+            composerInput.forceActiveFocus()
+        } else if (backend.selectedChatGuid.length > 0) {
+            backend.clearSelectedChat()
+        }
+    }
     Shortcut {
         sequence: "Escape"
         onActivated: {
@@ -1117,6 +1181,10 @@ ApplicationWindow {
                 icloudCalendarPopup.close()
             } else if (icloudPhotosPopup.visible) {
                 icloudPhotosPopup.close()
+            } else if (audioInputDeviceCombo.popup.visible) {
+                audioInputDeviceCombo.popup.close()
+            } else if (audioOutputDeviceCombo.popup.visible) {
+                audioOutputDeviceCombo.popup.close()
             } else if (root.showServerConfigModal) {
                 root.showServerConfigModal = false
             } else if (root.showDeleteChatModal) {
@@ -1137,21 +1205,14 @@ ApplicationWindow {
             } else if (root.activeActionMessageGuid !== "") {
                 root.clearActionMenu()
             } else if (backend.recordingVoice || backend.hasRecordedVoiceMemo) {
-                backend.cancelVoiceRecording()
-                root.showToast("✕ " + i18n.tr("Voice memo cancelled"))
-            } else if (root.stagedAttachmentPath !== "" && root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
-                root.clearStagedAttachment()
-                root.showToast("✕ " + i18n.tr("Attachment cancelled"))
-            } else if (root.replyTargetGuid !== "") {
-                root.replyTargetGuid = ""
-                root.replyTargetSender = ""
-                root.replyTargetText = ""
-            } else if (searchInput.text !== "") {
-                searchInput.text = ""
-                backend.setSearchQuery("")
-                composerInput.forceActiveFocus()
-            } else if (backend.selectedChatGuid.length > 0) {
-                backend.clearSelectedChat()
+                if (root.isVoiceMemoForSelectedChat()) {
+                    backend.cancelVoiceRecording()
+                    root.showToast("✕ " + i18n.tr("Voice memo cancelled"))
+                } else {
+                    root.handleEscapePostVoiceFallback()
+                }
+            } else {
+                root.handleEscapePostVoiceFallback()
             }
         }
     }
@@ -3223,7 +3284,8 @@ ApplicationWindow {
 
                     function isNearBottom() {
                         if (atYEnd || count <= 0) return true
-                        var maxEnd = originY + contentHeight - height
+                        var minY = originY - topMargin
+                        var maxEnd = Math.max(minY, originY + contentHeight + bottomMargin - height)
                         return contentY >= maxEnd - 24
                     }
 
@@ -3235,6 +3297,9 @@ ApplicationWindow {
                             savedAnchorOffset = 0
                             return
                         }
+                        if (height <= 0 || width <= 0) {
+                            return
+                        }
                         if (restoringScrollPosition && !stickToBottom && (savedAnchorGuid.length > 0 || savedAnchorIndex >= 0)) {
                             return
                         }
@@ -3242,10 +3307,24 @@ ApplicationWindow {
                         savedContentY = contentY - originY
                         savedContentHeight = contentHeight
                         savedCount = count
-                        var probeY = contentY + Math.min(80, Math.max(46, height * 0.22))
-                        var idx = indexAt(width * 0.5, probeY)
-                        if (idx < 0) {
-                            idx = indexAt(width * 0.5, contentY + height * 0.5)
+                        var xFracs = [0.5, 0.25, 0.75, 0.15, 0.85]
+                        var yOffsets = [
+                            Math.min(height - 8, Math.max(8, topMargin + 8)),
+                            Math.min(height - 8, Math.max(8, topMargin + 28)),
+                            Math.min(height - 8, Math.max(8, Math.min(80, Math.max(46, height * 0.22)))),
+                            Math.min(height - 8, Math.max(8, height * 0.5)),
+                            Math.min(height - 8, Math.max(8, height * 0.75))
+                        ]
+                        var idx = -1
+                        for (var yi = 0; yi < yOffsets.length && idx < 0; ++yi) {
+                            var py = contentY + yOffsets[yi]
+                            for (var xi = 0; xi < xFracs.length; ++xi) {
+                                var cand = indexAt(width * xFracs[xi], py)
+                                if (cand >= 0) {
+                                    idx = cand
+                                    break
+                                }
+                            }
                         }
                         if (idx < 0 && count > 0) {
                             idx = Math.min(count - 1, Math.max(0, Math.floor((contentY - originY) / Math.max(40, contentHeight / count))))
@@ -3282,13 +3361,24 @@ ApplicationWindow {
                             targetIdx = Math.min(savedAnchorIndex, count - 1)
                         }
                         if (targetIdx >= 0 && targetIdx < count) {
-                            positionViewAtIndex(targetIdx, ListView.Beginning)
                             var item = itemAtIndex(targetIdx)
+                            if (!item) {
+                                positionViewAtIndex(targetIdx, ListView.Beginning)
+                                item = itemAtIndex(targetIdx)
+                            }
                             if (item) {
                                 var desiredY = item.y - savedAnchorOffset
                                 var minY = originY - topMargin
                                 var maxY = Math.max(minY, originY + contentHeight + bottomMargin - height)
-                                contentY = Math.max(minY, Math.min(maxY, desiredY))
+                                var clampedY = Math.max(minY, Math.min(maxY, desiredY))
+                                if (Math.abs(contentY - clampedY) > 1.0) {
+                                    contentY = clampedY
+                                }
+                                if (restoringScrollPosition && Math.abs(contentY - clampedY) <= 1.0 && restorePassesRemaining < 4) {
+                                    restoringScrollPosition = false
+                                    restorePassesRemaining = 0
+                                    scrollRestoreTimer.stop()
+                                }
                             } else if (count === savedCount && savedContentHeight > 0) {
                                 contentY = originY + savedContentY
                             }
@@ -3446,7 +3536,7 @@ ApplicationWindow {
                     }
 
                     onCountChanged: {
-                        if (stickToBottom) {
+                        if (stickToBottom && !restoringScrollPosition) {
                             scrollToBottom()
                         }
                     }
@@ -5268,7 +5358,7 @@ ApplicationWindow {
                 Rectangle {
                     id: voiceMemoBar
                     objectName: "voiceMemoBar"
-                    visible: backend.selectedChatGuid.length > 0 && (backend.recordingVoice || backend.hasRecordedVoiceMemo)
+                    visible: backend.selectedChatGuid.length > 0 && (backend.recordingVoice || backend.hasRecordedVoiceMemo) && root.isVoiceMemoForSelectedChat()
                     Layout.fillWidth: true
                     Layout.preferredHeight: 56
                     color: backend.recordingVoice ? Qt.rgba(0.90, 0.22, 0.27, 0.14) : theme.darkBackground
@@ -5439,9 +5529,10 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
+                                    if (!root.isVoiceMemoForSelectedChat()) return
                                     if (backend.recordingVoice) {
                                         backend.stopAndSendVoiceRecording()
-                                    } else {
+                                    } else if (backend.canSendRecordedVoiceMemoToSelectedChat()) {
                                         backend.sendRecordedVoiceMemo()
                                     }
                                     messageListView.scrollToBottom()
@@ -5825,7 +5916,7 @@ ApplicationWindow {
                             Layout.preferredHeight: 44
                             Layout.alignment: Qt.AlignVCenter
                             radius: theme.radius
-                            readonly property bool canSendNow: composerInput.text.trim().length > 0 || (root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)) || backend.hasRecordedVoiceMemo
+                            readonly property bool canSendNow: composerInput.text.trim().length > 0 || (root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)) || (backend.hasRecordedVoiceMemo && root.isVoiceMemoForSelectedChat())
                             color: canSendNow
                                    ? (backend.selectedChatService !== "iMessage" ? "#1B6E38" : theme.accent)
                                    : theme.lighterBackground
@@ -9250,6 +9341,7 @@ ApplicationWindow {
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
                                     backend.refreshAudioDevices()
+                                    root.reconcileAudioDeviceSelections()
                                     root.showToast("↻ " + i18n.tr("Audio devices refreshed"))
                                 }
                             }

@@ -416,6 +416,11 @@ class BluePillEngine:
         self._detected_account: str = ""
         self.temp_guid_by_guid: Dict[str, str] = {}
         self._outbound_attachments: Dict[str, Tuple[str, str]] = {}
+        self._cached_audio_metrics_lock = threading.Lock()
+        self._cached_audio_metrics: Dict[str, Tuple[List[float], float]] = {}
+        self._pending_caption_lock = threading.Lock()
+        self._pending_captions: Dict[str, Dict[str, Any]] = {}
+        self._delayed_caption_wait_s: float = 4.0
         self._tx_events: Dict[str, threading.Event] = {}
         self._tx_results: Dict[str, Dict[str, Any]] = {}
         self._tx_lock = threading.Lock()
@@ -2494,7 +2499,15 @@ class BluePillEngine:
             }
             if is_aud:
                 exp_path = os.path.expanduser(fname) if fname else None
-                bars, dur = compute_audio_waveform(exp_path, seed_key=att_guid_val or tname)
+                cached_metrics = self._get_cached_audio_metrics(
+                    [att_guid_val, str(ar["original_guid"] or ""), exp_path or ""]
+                )
+                if cached_metrics is not None:
+                    bars, dur = cached_metrics
+                    if att_guid_val:
+                        self._cache_audio_metrics([att_guid_val], bars, dur)
+                else:
+                    bars, dur = compute_audio_waveform(exp_path, seed_key=att_guid_val or tname)
                 att_obj["waveform"] = bars
                 att_obj["durationSeconds"] = dur
             atts_by_msg.setdefault(mid, []).append(att_obj)
@@ -2806,16 +2819,55 @@ class BluePillEngine:
         finally:
             conn.close()
 
+    def _cache_audio_metrics(
+        self, keys: List[str], bars: List[float], dur: float
+    ) -> None:
+        if not bars or dur <= 0:
+            return
+        val = (list(bars), float(dur))
+        with self._cached_audio_metrics_lock:
+            for k in keys:
+                clean_k = str(k or "").strip()
+                if not clean_k:
+                    continue
+                if clean_k in self._cached_audio_metrics:
+                    self._cached_audio_metrics.pop(clean_k, None)
+                self._cached_audio_metrics[clean_k] = val
+            while len(self._cached_audio_metrics) > 2000:
+                oldest = next(iter(self._cached_audio_metrics))
+                self._cached_audio_metrics.pop(oldest, None)
+
+    def _get_cached_audio_metrics(
+        self, keys: List[str]
+    ) -> Optional[Tuple[List[float], float]]:
+        with self._cached_audio_metrics_lock:
+            for k in keys:
+                clean_k = str(k or "").strip()
+                if clean_k and clean_k in self._cached_audio_metrics:
+                    bars, dur = self._cached_audio_metrics[clean_k]
+                    return list(bars), float(dur)
+        return None
+
     def get_attachment_waveform(self, guid: str) -> Dict[str, Any]:
         clean_guid = urllib.parse.unquote(guid).strip()
-        file_path: Optional[str] = None
-        try:
-            resolved = self.resolve_attachment_file(clean_guid, convert_heic=False)
-            if resolved:
-                file_path = resolved[0]
-        except Exception:
-            file_path = None
-        bars, dur = compute_audio_waveform(file_path, seed_key=clean_guid)
+        cached_metrics = self._get_cached_audio_metrics([clean_guid])
+        if cached_metrics is not None:
+            bars, dur = cached_metrics
+        else:
+            file_path: Optional[str] = None
+            try:
+                resolved = self.resolve_attachment_file(clean_guid, convert_heic=False)
+                if resolved:
+                    file_path = resolved[0]
+            except Exception:
+                file_path = None
+            cached_metrics = self._get_cached_audio_metrics([file_path or ""])
+            if cached_metrics is not None:
+                bars, dur = cached_metrics
+                if clean_guid:
+                    self._cache_audio_metrics([clean_guid], bars, dur)
+            else:
+                bars, dur = compute_audio_waveform(file_path, seed_key=clean_guid)
         return {
             "guid": clean_guid,
             "bars": bars,
@@ -3192,6 +3244,8 @@ class BluePillEngine:
         found_at: Optional[float] = None
         att_join_wait_s = 0.25
         while True:
+            if self._stop_event.is_set() or not os.path.exists(self.db_path):
+                break
             now = time.time()
             effective_deadline = (
                 max(deadline, found_at + att_join_wait_s)
@@ -3218,19 +3272,21 @@ class BluePillEngine:
                         if expected_text and str(m.get("text") or "").strip() != expected_text.strip():
                             if not require_attachment:
                                 continue
-                    if temp_guid and m_guid:
-                        self.temp_guid_by_guid[m_guid] = temp_guid
-                        m["tempGuid"] = temp_guid
-                    if m_rowid > self._last_max_rowid:
-                        self._last_max_rowid = m_rowid
+                    has_attachments = bool(m.get("attachments") or [])
+                    helper_match = bool(helper_guid and m_guid == helper_guid)
+                    qualifies = (not require_attachment) or has_attachments or helper_match
                     if found_at is None:
                         found_at = time.time()
-                    has_attachments = bool(m.get("attachments") or [])
-                    if not require_attachment or has_attachments or (helper_guid and m_guid == helper_guid):
+                    if qualifies:
+                        if temp_guid and m_guid:
+                            self.temp_guid_by_guid[m_guid] = temp_guid
+                            m["tempGuid"] = temp_guid
+                        if m_rowid > self._last_max_rowid:
+                            self._last_max_rowid = m_rowid
                         best_candidate = m
                     if require_attachment and not has_attachments and (time.time() - found_at) < att_join_wait_s:
                         break
-                    if require_attachment and not has_attachments and not (helper_guid and m_guid == helper_guid):
+                    if not qualifies:
                         continue
                     return m
             except Exception:
@@ -3449,6 +3505,113 @@ class BluePillEngine:
                 pass
         return abs_file_path, default_mime
 
+    def _schedule_delayed_attachment_caption(
+        self,
+        chat_guid: str,
+        caption: str,
+        temp_guid: str,
+        pre_max_rowid: int,
+        helper_file_path: str,
+        mime_type: str,
+        preserve_wav_metrics: bool = False,
+        measured_bars: Optional[List[float]] = None,
+        measured_dur: float = 0.0,
+    ) -> str:
+        caption_key = f"{temp_guid or 'cap'}:{uuid.uuid4().hex[:8]}"
+        sent_guard = threading.Event()
+        entry: Dict[str, Any] = {
+            "key": caption_key,
+            "chatGuid": chat_guid,
+            "caption": caption,
+            "tempGuid": temp_guid,
+            "preMaxRowid": pre_max_rowid,
+            "createdAt": time.time(),
+            "sentGuard": sent_guard,
+            "dispatched": False,
+        }
+        with self._pending_caption_lock:
+            self._pending_captions[caption_key] = entry
+
+        def _dispatch_once(reason: str) -> bool:
+            with self._pending_caption_lock:
+                if sent_guard.is_set() or entry.get("dispatched"):
+                    return False
+                entry["dispatched"] = True
+                sent_guard.set()
+            try:
+                ok, cap_guid = self._send_helper_payload_with_tx(
+                    "send-message",
+                    {
+                        "chatGuid": chat_guid,
+                        "message": caption,
+                        "subject": "",
+                        "effectId": "",
+                        "selectedMessageGuid": "",
+                        "partIndex": 0,
+                        "ddScan": 1,
+                    },
+                    wait_timeout=0.5,
+                )
+                self.logger.info(
+                    "[send_attachment] delayed caption dispatched reason=%s chat=%s tempGuid=%s sent=%s guid=%s",
+                    reason,
+                    chat_guid,
+                    temp_guid,
+                    ok,
+                    cap_guid or "-",
+                )
+                return ok
+            finally:
+                with self._pending_caption_lock:
+                    self._pending_captions.pop(caption_key, None)
+
+        def _waiter() -> None:
+            try:
+                wait_s = max(0.05, float(getattr(self, "_delayed_caption_wait_s", 4.0)))
+                confirmed_msg: Optional[Dict[str, Any]] = None
+                if os.path.exists(self.db_path) and not self._stop_event.is_set():
+                    confirmed_msg = self._poll_sent_message_from_db(
+                        pre_max_rowid=pre_max_rowid,
+                        chat_guid=chat_guid,
+                        temp_guid=temp_guid,
+                        helper_guid="",
+                        require_attachment=True,
+                        timeout_s=wait_s,
+                    )
+                if self._stop_event.is_set():
+                    with self._pending_caption_lock:
+                        self._pending_captions.pop(caption_key, None)
+                    return
+                if confirmed_msg is not None:
+                    for att in confirmed_msg.get("attachments") or []:
+                        ag = str(att.get("guid") or "")
+                        if ag:
+                            self._outbound_attachments[ag] = (helper_file_path, mime_type)
+                            if preserve_wav_metrics and measured_bars and measured_dur > 0:
+                                self._cache_audio_metrics(
+                                    [ag, str(att.get("originalGuid") or ""), helper_file_path],
+                                    measured_bars,
+                                    measured_dur,
+                                )
+                    _dispatch_once("db_confirmed")
+                else:
+                    _dispatch_once("grace_timeout")
+            except Exception as exc:
+                self.logger.warning(
+                    "[send_attachment] delayed caption waiter failed chat=%s tempGuid=%s err=%s",
+                    chat_guid,
+                    temp_guid,
+                    exc,
+                )
+                with self._pending_caption_lock:
+                    self._pending_captions.pop(caption_key, None)
+
+        entry["dispatchFn"] = _dispatch_once
+        t = threading.Thread(target=_waiter, daemon=True)
+        entry["thread"] = t
+        t.start()
+        return caption_key
+
     def send_attachment(self, fields: Dict[str, Any]) -> Dict[str, Any]:
         t0 = time.time()
         requested_chat_guid = str(fields.get("chatGuid") or "").strip()
@@ -3517,6 +3680,18 @@ class BluePillEngine:
         if temp_guid:
             self._outbound_attachments[temp_guid] = (helper_file_path, mime_type)
 
+        measured_bars: List[float] = []
+        measured_dur: float = 0.0
+        preserve_wav_metrics = is_aud_att and (ext_lower == ".wav" or helper_file_path != abs_file_path)
+        if is_aud_att:
+            measured_bars, measured_dur = compute_audio_waveform(abs_file_path, seed_key=synth_att_guid)
+            if preserve_wav_metrics and measured_bars and measured_dur > 0:
+                self._cache_audio_metrics(
+                    [synth_att_guid, temp_guid, helper_file_path],
+                    measured_bars,
+                    measured_dur,
+                )
+
         pre_max_rowid = self._get_max_message_rowid()
         sent = False
         helper_socket_sent = False
@@ -3555,20 +3730,33 @@ class BluePillEngine:
                 timeout_s=0.6 if helper_guid else 1.2,
             )
 
-        if helper_socket_sent and caption and (helper_guid or db_msg is not None):
-            self._send_helper_payload_with_tx(
-                "send-message",
-                {
-                    "chatGuid": chat_guid,
-                    "message": caption,
-                    "subject": "",
-                    "effectId": "",
-                    "selectedMessageGuid": "",
-                    "partIndex": 0,
-                    "ddScan": 1,
-                },
-                wait_timeout=0.5,
-            )
+        if helper_socket_sent and caption:
+            if helper_guid or db_msg is not None or not os.path.exists(self.db_path):
+                self._send_helper_payload_with_tx(
+                    "send-message",
+                    {
+                        "chatGuid": chat_guid,
+                        "message": caption,
+                        "subject": "",
+                        "effectId": "",
+                        "selectedMessageGuid": "",
+                        "partIndex": 0,
+                        "ddScan": 1,
+                    },
+                    wait_timeout=0.5,
+                )
+            else:
+                self._schedule_delayed_attachment_caption(
+                    chat_guid=chat_guid,
+                    caption=caption,
+                    temp_guid=temp_guid,
+                    pre_max_rowid=pre_max_rowid,
+                    helper_file_path=helper_file_path,
+                    mime_type=mime_type,
+                    preserve_wav_metrics=preserve_wav_metrics,
+                    measured_bars=measured_bars,
+                    measured_dur=measured_dur,
+                )
 
         if not sent and not helper_socket_sent and sys.platform == "darwin" and os.path.exists(self.db_path):
             as_sent = self._send_via_applescript(chat_guid, caption, file_path=helper_file_path)
@@ -3599,10 +3787,7 @@ class BluePillEngine:
             "hasLivePhoto": False,
             "isAudio": is_aud_att,
         }
-        measured_bars: List[float] = []
-        measured_dur: float = 0.0
         if is_aud_att:
-            measured_bars, measured_dur = compute_audio_waveform(abs_file_path, seed_key=synth_att_guid)
             synth_att_obj["waveform"] = measured_bars
             synth_att_obj["durationSeconds"] = measured_dur
 
@@ -3620,10 +3805,9 @@ class BluePillEngine:
                         self._outbound_attachments[ag] = (helper_file_path, mime_type)
                     if is_aud_att:
                         att["isAudio"] = True
-                        preserve_wav_metrics = ext_lower == ".wav" or helper_file_path != abs_file_path
                         if preserve_wav_metrics or not att.get("waveform") or not att.get("durationSeconds"):
                             bars, dur = (
-                                (measured_bars, measured_dur)
+                                (list(measured_bars), float(measured_dur))
                                 if (measured_bars and measured_dur > 0)
                                 else compute_audio_waveform(abs_file_path, seed_key=ag or synth_att_guid)
                             )
@@ -3631,6 +3815,12 @@ class BluePillEngine:
                                 att["waveform"] = bars
                             if preserve_wav_metrics or not att.get("durationSeconds"):
                                 att["durationSeconds"] = dur
+                            if preserve_wav_metrics and bars and dur > 0:
+                                self._cache_audio_metrics(
+                                    [ag, str(att.get("originalGuid") or ""), helper_file_path],
+                                    bars,
+                                    dur,
+                                )
             self._register_tracked_outgoing(db_msg)
             self.logger.info(
                 "[send_attachment] chat=%s tempGuid=%s file=%s bytes=%d method=%s guid=%s rowid=%s elapsed_ms=%d",
@@ -8707,7 +8897,7 @@ def run_selftest(engine: BluePillEngine) -> int:
         boundary = "----BluePillSelftestBoundary987654"
         png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
         parts = [
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"chatGuid\"\r\n\r\niMessage;-;+15550001111\r\n".encode("utf-8"),
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"chatGuid\"\r\n\r\niMessage;-;+14155550140\r\n".encode("utf-8"),
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"tempGuid\"\r\n\r\ntemp-att-selftest-1\r\n".encode("utf-8"),
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nscreenshot.png\r\n".encode("utf-8"),
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"screenshot.png\"\r\nContent-Type: image/png\r\n\r\n".encode("utf-8")
@@ -8746,7 +8936,7 @@ def run_selftest(engine: BluePillEngine) -> int:
             + wav_pcm
         )
         wav_parts = [
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"chatGuid\"\r\n\r\niMessage;-;+15550001111\r\n".encode("utf-8"),
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"chatGuid\"\r\n\r\niMessage;-;+14155550140\r\n".encode("utf-8"),
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"tempGuid\"\r\n\r\ntemp-att-wav-1\r\n".encode("utf-8"),
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nvoice_memo.wav\r\n".encode("utf-8"),
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"voice_memo.wav\"\r\nContent-Type: audio/wav\r\n\r\n".encode("utf-8")
@@ -8824,7 +9014,7 @@ def run_selftest(engine: BluePillEngine) -> int:
                 CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER, message_date INTEGER);
                 CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, guid TEXT, original_guid TEXT, created_date INTEGER, uti TEXT, mime_type TEXT, transfer_name TEXT, total_bytes INTEGER, transfer_state INTEGER, is_outgoing INTEGER, hide_attachment INTEGER, is_sticker INTEGER, filename TEXT);
                 CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
-                INSERT INTO chat VALUES (1, 'iMessage;-;+15550002222', '+15550002222', 45, '', '', '', 'iMessage', 0, 0, NULL);
+                INSERT INTO chat VALUES (1, 'iMessage;-;+14155550141', '+14155550141', 45, '', '', '', 'iMessage', 0, 0, NULL);
                 INSERT INTO message VALUES (10, 'msg-batch-a', 'alpha', NULL, '', 0, 0, 700000000000000000, 0, 0, 1, 1, 1, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);
                 INSERT INTO message VALUES (11, 'msg-batch-b', 'beta', NULL, '', 0, 0, 700000001000000000, 0, 0, 1, 1, 0, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);
                 INSERT INTO message VALUES (12, 'msg-batch-c', 'gamma', NULL, '', 0, 0, 700000002000000000, 0, 0, 1, 1, 0, 0, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);
@@ -8865,7 +9055,7 @@ def run_selftest(engine: BluePillEngine) -> int:
                 assert herr.code == 400, f"Expected HTTP 400 on missing IN binding, got {herr.code}"
 
             # Verify standalone/synthetic mode (has_chat_db=False) vs DB-backed mode (has_chat_db=True)
-            synth_txt = test_eng.send_text({"chatGuid": "iMessage;-;+15550001111", "message": "synthetic ok", "tempGuid": "temp-synth-txt-1"})
+            synth_txt = test_eng.send_text({"chatGuid": "iMessage;-;+14155550140", "message": "synthetic ok", "tempGuid": "temp-synth-txt-1"})
             assert synth_txt["isSent"] is True and synth_txt["isDelivered"] is True and synth_txt.get("pending") is False
             assert synth_txt["guid"].startswith("msg-") and test_eng.temp_guid_by_guid.get(synth_txt["guid"]) == "temp-synth-txt-1"
             assert att_data["isSent"] is True and att_data["isDelivered"] is True and att_data.get("pending") is False
@@ -8874,7 +9064,7 @@ def run_selftest(engine: BluePillEngine) -> int:
             # send_text when helper_guid is present and has_chat_db=True but DB poll times out must return pending ack (isSent=False, isDelivered=False, pending=True)
             db_eng._send_helper_payload_with_tx = lambda act, data, wait_timeout=0.8: (True, "helper-guid-timeout-1")
             db_eng._poll_sent_message_from_db = lambda **kw: None
-            pending_txt = db_eng.send_text({"chatGuid": "iMessage;-;+15550002222", "message": "pending text", "tempGuid": "temp-txt-pend-1"})
+            pending_txt = db_eng.send_text({"chatGuid": "iMessage;-;+14155550141", "message": "pending text", "tempGuid": "temp-txt-pend-1"})
             assert pending_txt["guid"] == "helper-guid-timeout-1" and pending_txt["tempGuid"] == "temp-txt-pend-1"
             assert pending_txt["isSent"] is False and pending_txt["isDelivered"] is False and pending_txt.get("pending") is True
 
@@ -8895,7 +9085,7 @@ def run_selftest(engine: BluePillEngine) -> int:
             db_eng._send_via_applescript = _count_as
             db_eng.broadcast_socketio = lambda ev, pl: bcast_events.append((ev, pl))
             pending_att = db_eng.send_attachment({
-                "chatGuid": "iMessage;-;+15550002222",
+                "chatGuid": "iMessage;-;+14155550141",
                 "tempGuid": "temp-att-pend-1",
                 "name": "photo.png",
                 "attachment_bytes": png_bytes,
@@ -8918,14 +9108,14 @@ def run_selftest(engine: BluePillEngine) -> int:
                         "originalROWID": 99,
                         "guid": "msg-late-att",
                         "isFromMe": True,
-                        "chats": [{"guid": "iMessage;-;+15550002222"}],
+                        "chats": [{"guid": "iMessage;-;+14155550141"}],
                         "attachments": [],
                     }]
                 return [{
                     "originalROWID": 99,
                     "guid": "msg-late-att",
                     "isFromMe": True,
-                    "chats": [{"guid": "iMessage;-;+15550002222"}],
+                    "chats": [{"guid": "iMessage;-;+14155550141"}],
                     "attachments": [{"guid": "att-joined-99", "mimeType": "audio/x-caf", "transferName": "voice_memo.caf", "totalBytes": len(caf_bytes), "waveform": [0.5] * 28, "durationSeconds": 9.0}],
                 }]
 
@@ -8933,7 +9123,7 @@ def run_selftest(engine: BluePillEngine) -> int:
             try:
                 joined_msg = real_poll(
                     pre_max_rowid=12,
-                    chat_guid="iMessage;-;+15550002222",
+                    chat_guid="iMessage;-;+14155550141",
                     temp_guid="temp-late-join",
                     helper_guid="msg-late-att",
                     require_attachment=True,
@@ -8952,7 +9142,7 @@ def run_selftest(engine: BluePillEngine) -> int:
                 "isSent": True,
                 "isDelivered": False,
                 "error": 0,
-                "chats": [{"guid": "iMessage;-;+15550002222"}],
+                "chats": [{"guid": "iMessage;-;+14155550141"}],
                 "attachments": [{
                     "guid": "att-db-caf-100",
                     "mimeType": "audio/x-caf",
@@ -8964,7 +9154,7 @@ def run_selftest(engine: BluePillEngine) -> int:
                 }],
             }
             db_caf_res = db_eng.send_attachment({
-                "chatGuid": "iMessage;-;+15550002222",
+                "chatGuid": "iMessage;-;+14155550141",
                 "tempGuid": "temp-db-caf-1",
                 "name": "voice_memo.wav",
                 "attachment_bytes": wav_bytes,
@@ -8972,19 +9162,166 @@ def run_selftest(engine: BluePillEngine) -> int:
             db_caf_att = db_caf_res["attachments"][0]
             assert db_caf_att["durationSeconds"] == 1.0, f"DB CAF response did not preserve measured WAV durationSeconds: {db_caf_att}"
             assert db_caf_att["waveform"] == wav_att["waveform"], f"DB CAF response did not preserve measured WAV waveform: {db_caf_att}"
+
+            # Non-qualifying intermediate text row in _poll_sent_message_from_db (require_attachment=True, no attachments, no helper_guid)
+            # must NOT pollute temp_guid_by_guid, set tempGuid, or advance _last_max_rowid
+            db_eng._last_max_rowid = 12
+            db_eng.temp_guid_by_guid.pop("msg-text-only-150", None)
+            text_only_row = {
+                "originalROWID": 150,
+                "guid": "msg-text-only-150",
+                "isFromMe": True,
+                "text": "caption row",
+                "chats": [{"guid": "iMessage;-;+14155550142"}],
+                "attachments": [],
+            }
+            db_eng.query_messages = lambda _qb: [text_only_row]
+            try:
+                no_att_res = real_poll(
+                    pre_max_rowid=12,
+                    chat_guid="iMessage;-;+14155550142",
+                    temp_guid="temp-att-noqual-150",
+                    helper_guid="",
+                    require_attachment=True,
+                    timeout_s=0.12,
+                )
+                assert no_att_res is None, f"Text-only row should not qualify when require_attachment=True: {no_att_res}"
+                assert "msg-text-only-150" not in db_eng.temp_guid_by_guid, "temp_guid_by_guid polluted by non-qualifying row"
+                assert "tempGuid" not in text_only_row, "tempGuid set on non-qualifying row"
+                assert db_eng._last_max_rowid == 12, f"_last_max_rowid advanced on non-qualifying row: {db_eng._last_max_rowid}"
+            finally:
+                db_eng.query_messages = orig_qm_db
+
+            # Subsequent query_messages and get_attachment_waveform must reuse preserved 2.0s WAV metrics instead of recomputing from CAF bytes
+            wav2_pcm = b"".join(
+                struct.pack("<h", int(14000 * math.sin(2.0 * math.pi * 440.0 * (idx / 16000.0))))
+                for idx in range(32000)
+            )
+            wav2_bytes = (
+                b"RIFF"
+                + struct.pack("<I", 36 + len(wav2_pcm))
+                + b"WAVEfmt "
+                + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16)
+                + b"data"
+                + struct.pack("<I", len(wav2_pcm))
+                + wav2_pcm
+            )
+            wav2_res = db_eng.send_attachment({
+                "chatGuid": "iMessage;-;+14155550142",
+                "tempGuid": "temp-db-caf-2s",
+                "name": "voice_memo_2s.wav",
+                "attachment_bytes": wav2_bytes,
+            })
+            wav2_att = wav2_res["attachments"][0]
+            assert wav2_att["durationSeconds"] == 2.0, f"Expected 2.0s WAV duration on immediate response: {wav2_att}"
+            caf2_path = db_eng._outbound_attachments["att-db-caf-100"][0]
+            db_conn2 = sqlite3.connect(tmp_db_path)
+            db_conn2.executescript(
+                f"""
+                INSERT INTO chat VALUES (2, 'iMessage;-;+14155550142', '+14155550142', 45, '', '', '', 'iMessage', 0, 0, NULL);
+                INSERT INTO message VALUES (20, 'msg-db-caf-200', '', NULL, '', 0, 0, 700000003000000000, 0, 0, 1, 1, 1, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 1, 0, 0, '', 0, '', 1);
+                INSERT INTO chat_message_join VALUES (2, 20, 700000003000000000);
+                INSERT INTO attachment VALUES (20, 'att-db-caf-100', 'att-db-caf-100', 700000003000000000, 'public.audio', 'audio/x-caf', 'voice_memo_2s.caf', {len(caf_bytes)}, 5, 1, 0, 0, '{caf2_path.replace("'", "''")}');
+                INSERT INTO message_attachment_join VALUES (20, 20);
+                """
+            )
+            db_conn2.commit()
+            db_conn2.close()
+            queried_caf_msgs = db_eng.query_messages({
+                "limit": 5,
+                "where": [{"statement": "message.guid = :g", "args": {"g": "msg-db-caf-200"}}],
+            })
+            assert len(queried_caf_msgs) == 1, f"Expected queried CAF message: {queried_caf_msgs}"
+            q_att = queried_caf_msgs[0]["attachments"][0]
+            assert q_att["durationSeconds"] == 2.0, f"query_messages lost preserved WAV durationSeconds: {q_att}"
+            assert q_att["waveform"] == wav2_att["waveform"], f"query_messages lost preserved WAV waveform: {q_att}"
+            wf_res = db_eng.get_attachment_waveform("att-db-caf-100")
+            assert wf_res["durationSeconds"] == 2.0, f"get_attachment_waveform lost preserved WAV durationSeconds: {wf_res}"
+            assert wf_res["waveform"] == wav2_att["waveform"], f"get_attachment_waveform lost preserved WAV waveform: {wf_res}"
+
+            # Delayed-confirmation caption retention: helper_socket_sent=True without helper_guid and initial DB poll None
+            # must NOT drop caption or resend attachment; background waiter must send caption ONCE upon DB confirmation or grace timeout
+            helper_actions: List[Tuple[str, Dict[str, Any]]] = []
+            helper_actions_lock = threading.Lock()
+            caption_sent_ev = threading.Event()
+
+            def _record_helper_tx(act: str, data: Dict[str, Any], wait_timeout: float = 0.8) -> Tuple[bool, str]:
+                with helper_actions_lock:
+                    helper_actions.append((act, dict(data)))
+                if act == "send-message":
+                    caption_sent_ev.set()
+                    return True, "cap-guid-1"
+                return True, ""
+
+            db_eng._send_helper_payload_with_tx = _record_helper_tx
+            db_eng._delayed_caption_wait_s = 0.4
+            poll_attempt = 0
+
+            def _delayed_poll(**kw: Any) -> Optional[Dict[str, Any]]:
+                nonlocal poll_attempt
+                poll_attempt += 1
+                if poll_attempt == 1:
+                    return None
+                time.sleep(0.05)
+                return {
+                    "originalROWID": 21,
+                    "guid": "msg-delayed-att-21",
+                    "isFromMe": True,
+                    "chats": [{"guid": "iMessage;-;+14155550143"}],
+                    "attachments": [{"guid": "att-delayed-21", "mimeType": "image/png", "transferName": "delayed.png", "totalBytes": len(png_bytes)}],
+                }
+
+            db_eng._poll_sent_message_from_db = _delayed_poll
+            delayed_cap_res = db_eng.send_attachment({
+                "chatGuid": "iMessage;-;+14155550143",
+                "tempGuid": "temp-delayed-cap-1",
+                "name": "delayed.png",
+                "message": "Retained caption text",
+                "attachment_bytes": png_bytes,
+            })
+            assert delayed_cap_res.get("pending") is True, f"Expected pending response while awaiting DB confirmation: {delayed_cap_res}"
+            assert caption_sent_ev.wait(timeout=2.0), "Delayed caption waiter did not dispatch caption after DB confirmation"
+            time.sleep(0.05)
+            with helper_actions_lock:
+                att_sends = [a for a in helper_actions if a[0] == "send-attachment"]
+                cap_sends = [a for a in helper_actions if a[0] == "send-message"]
+            assert len(att_sends) == 1, f"Must not resend attachment on delayed confirmation: {att_sends}"
+            assert len(cap_sends) == 1 and cap_sends[0][1].get("message") == "Retained caption text", f"Expected exactly-once caption send: {cap_sends}"
+
+            # Grace-timeout fallback must also dispatch caption exactly once when DB row never arrives
+            helper_actions.clear()
+            caption_sent_ev.clear()
+            db_eng._delayed_caption_wait_s = 0.12
+            db_eng._poll_sent_message_from_db = lambda **kw: None
+            db_eng.send_attachment({
+                "chatGuid": "iMessage;-;+14155550144",
+                "tempGuid": "temp-delayed-cap-timeout",
+                "name": "delayed_timeout.png",
+                "message": "Grace timeout caption",
+                "attachment_bytes": png_bytes,
+            })
+            assert caption_sent_ev.wait(timeout=2.0), "Delayed caption waiter did not dispatch caption on grace timeout"
+            time.sleep(0.05)
+            with helper_actions_lock:
+                att_sends_t = [a for a in helper_actions if a[0] == "send-attachment"]
+                cap_sends_t = [a for a in helper_actions if a[0] == "send-message"]
+            assert len(att_sends_t) == 1, f"Must not resend attachment on grace timeout: {att_sends_t}"
+            assert len(cap_sends_t) == 1 and cap_sends_t[0][1].get("message") == "Grace timeout caption", f"Expected exactly-once grace-timeout caption: {cap_sends_t}"
+            with db_eng._pending_caption_lock:
+                assert len(db_eng._pending_captions) == 0, f"Pending captions leaked: {db_eng._pending_captions}"
         finally:
             if os.path.exists(tmp_db_path):
                 os.remove(tmp_db_path)
 
         del_req = urllib.request.Request(
-            f"http://127.0.0.1:{port}/api/v1/chat/iMessage%3B-%3B%2B15550001111?password=selftest-secret",
+            f"http://127.0.0.1:{port}/api/v1/chat/iMessage%3B-%3B%2B14155550140?password=selftest-secret",
             method="DELETE",
         )
         with urllib.request.urlopen(del_req, timeout=5.0) as del_resp:
             del_json = json.loads(del_resp.read().decode("utf-8"))
         assert del_json["status"] == 200 and del_json["data"]["deleted"] is True, f"Delete chat failed: {del_json}"
-        assert "iMessage;-;+15550001111" in test_eng.deleted_chat_guids
-        assert "SMS;-;+15550001111" in test_eng.deleted_chat_guids
+        assert "iMessage;-;+14155550140" in test_eng.deleted_chat_guids
+        assert "SMS;-;+14155550140" in test_eng.deleted_chat_guids
 
         with urllib.request.urlopen(
             f"http://127.0.0.1:{port}/api/v1/server/logs?password=selftest-secret&lines=20",
@@ -9333,7 +9670,7 @@ def run_selftest(engine: BluePillEngine) -> int:
                 CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
                 """
             )
-            sconn.execute("INSERT INTO handle (ROWID, id, service) VALUES (1, '+15555550101', 'RCS'), (2, '+15555550102', 'RCS'), (3, '+15555550103', 'RCS');")
+            sconn.execute("INSERT INTO handle (ROWID, id, service) VALUES (1, '+14155550101', 'RCS'), (2, '+14155550102', 'RCS'), (3, '+14155550103', 'RCS');")
             sconn.execute("INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, is_archived, group_id, original_group_id) VALUES (3882, 'RCS;+;chat111111', 'chat111111', 'RCS', 'Weekend Hike Crew', 43, 0, 'grp_stale', 'OGID_SHARED_1');")
             sconn.execute("INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, is_archived, group_id, original_group_id) VALUES (4050, 'RCS;+;chat222222', 'chat222222', 'RCS', 'Weekend Hike Crew', 43, 0, 'grp_active', 'OGID_SHARED_1');")
             sconn.execute("INSERT INTO chat_handle_join VALUES (3882, 1), (3882, 2), (4050, 1), (4050, 2), (4050, 3);")
@@ -9400,7 +9737,7 @@ def run_selftest(engine: BluePillEngine) -> int:
         # Verify healthy SMS sibling beats failed RCS sibling & unkeyed groups only merge on exact participant match
         sconn3 = sqlite3.connect(split_db)
         try:
-            sconn3.execute("INSERT INTO handle (ROWID, id, service) VALUES (4, '+15555550104', 'RCS');")
+            sconn3.execute("INSERT INTO handle (ROWID, id, service) VALUES (4, '+14155550104', 'RCS');")
             sconn3.execute("INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, is_archived, group_id, original_group_id) VALUES (5001, 'RCS;+;chat_err_rcs', 'chat_err_rcs', 'RCS', 'Health Rank Crew', 43, 0, '', 'OGID_HEALTH');")
             sconn3.execute("INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, is_archived, group_id, original_group_id) VALUES (5002, 'SMS;+;chat_ok_sms', 'chat_ok_sms', 'SMS', 'Health Rank Crew', 43, 0, '', 'OGID_HEALTH');")
             sconn3.execute("INSERT INTO chat_handle_join VALUES (5001, 1), (5001, 2), (5002, 1), (5002, 2);")

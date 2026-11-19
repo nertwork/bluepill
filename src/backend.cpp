@@ -144,6 +144,28 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <iostream>
 #include <limits>
 
+static bool writeConfigAtomically(const QString &targetPath, const QJsonObject &obj) {
+    if (targetPath.isEmpty()) return false;
+    const QFileInfo targetFi(targetPath);
+    if (targetFi.exists() && targetFi.isDir()) return false;
+    QDir().mkpath(targetFi.absolutePath());
+    const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Indented);
+    QSaveFile outFile(targetPath);
+    if (!outFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    outFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    if (outFile.write(payload) != payload.size()) {
+        outFile.cancelWriting();
+        return false;
+    }
+    if (!outFile.commit()) {
+        return false;
+    }
+    QFile::setPermissions(targetPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    return true;
+}
+
 Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart(autoStart) {
     m_startupTimestamp = QDateTime::currentMSecsSinceEpoch();
     if (QClipboard *cb = QGuiApplication::clipboard()) {
@@ -335,7 +357,9 @@ void Backend::setStateFilePath(const QString &path) {
     m_notifiedMessageGuids.clear();
     m_pendingDeliveryMessages.clear();
     m_pendingDeliveryAddedAtMs.clear();
+    m_expiredPendingDeliveryGuids.clear();
     m_inFlightDeliveryCheckGuids.clear();
+    m_pendingDeliveryCheckCompletedCountForTest = 0;
     m_messageObservationSeq.clear();
     m_lastPendingDeliveryBatchForTest.clear();
     m_pendingDeliveryRotationCursor = 0;
@@ -1310,28 +1334,10 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
     cfgObj.insert(QStringLiteral("tlsVerified"), true);
     cfgObj.insert(QStringLiteral("authMethod"), QStringLiteral("tls-apikey"));
 
-    auto writeConfigAtomically = [](const QString &targetPath, const QJsonObject &obj) -> bool {
-        if (targetPath.isEmpty()) return false;
-        const QFileInfo targetFi(targetPath);
-        if (targetFi.exists() && targetFi.isDir()) return false;
-        QDir().mkpath(targetFi.absolutePath());
-        const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Indented);
-        QSaveFile outFile(targetPath);
-        if (!outFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            return false;
-        }
-        outFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-        if (outFile.write(payload) != payload.size()) {
-            outFile.cancelWriting();
-            return false;
-        }
-        if (!outFile.commit()) {
-            return false;
-        }
-        QFile::setPermissions(targetPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-        return true;
-    };
-    writeConfigAtomically(cfgPath, cfgObj);
+    if (!writeConfigAtomically(cfgPath, cfgObj)) {
+        emit toastMessage(QStringLiteral("⚠ Failed to save server configuration"));
+        return;
+    }
 
     const bool endpointReplaced = !m_lastConfiguredBaseUrl.isEmpty() && !normPrimary.isEmpty() &&
                                   m_lastConfiguredBaseUrl != normPrimary;
@@ -3205,8 +3211,10 @@ void Backend::pollDelta() {
             if (m.value(QStringLiteral("receiptText")).toString() == QStringLiteral("Sending...")) {
                 const QString g = m.value(QStringLiteral("guid")).toString();
                 const qint64 dc = m.value(QStringLiteral("dateCreated")).toLongLong();
+                const qint64 effectiveStartMs = (dc > 0) ? dc : m_pendingDeliveryAddedAtMs.value(g, 0);
                 if (!g.startsWith(QStringLiteral("temp-")) && !g.startsWith(QStringLiteral("bp-")) &&
-                    dc > 0 && (nowCheckMs - dc) > 120000LL) {
+                    (m_expiredPendingDeliveryGuids.contains(g) ||
+                     (effectiveStartMs > 0 && (nowCheckMs - effectiveStartMs) > 120000LL))) {
                     hasStaleSending = true;
                     break;
                 }
@@ -3749,6 +3757,7 @@ void Backend::addPendingDeliveryForTest(const QString &msgGuid, const QString &c
     const qint64 ts = (addedAtMs > 0) ? addedAtMs : QDateTime::currentMSecsSinceEpoch();
     m_pendingDeliveryMessages.insert(msgGuid, chatGuid);
     m_pendingDeliveryAddedAtMs.insert(msgGuid, ts);
+    m_expiredPendingDeliveryGuids.remove(msgGuid);
 }
 
 void Backend::checkPendingDeliveryStatuses() {
@@ -3801,12 +3810,20 @@ void Backend::checkPendingDeliveryStatuses() {
         }
         const qint64 effectiveStartMs = (dc > 0) ? dc : addedAtMs;
         const bool expired = (effectiveStartMs > 0 && (nowMs - effectiveStartMs) > 120000LL);
+        const bool isSentConfirmed = cachedMsg.contains(QStringLiteral("isSent")) &&
+                                     cachedMsg.value(QStringLiteral("isSent")).toBool();
+        if (errCode != 0 || isDeliv || isRead || hasLaterIncoming || isSentConfirmed) {
+            m_expiredPendingDeliveryGuids.remove(msgGuid);
+        }
         if (errCode != 0 || isDeliv || isRead || hasLaterIncoming || expired) {
             m_pendingDeliveryMessages.remove(msgGuid);
             m_pendingDeliveryAddedAtMs.remove(msgGuid);
             m_inFlightDeliveryCheckGuids.remove(msgGuid);
             if (expired) {
                 m_messageObservationSeq.remove(msgGuid);
+                if (errCode == 0 && !isDeliv && !isRead && !hasLaterIncoming && !isSentConfirmed) {
+                    m_expiredPendingDeliveryGuids.insert(msgGuid);
+                }
             }
             if (!m_selectedChatGuid.isEmpty() && isSameConversation(chatGuid, m_selectedChatGuid)) {
                 selectedNeedsRebuild = true;
@@ -3885,39 +3902,41 @@ void Backend::checkPendingDeliveryStatuses() {
         for (const QString &bg : batchGuids) {
             m_inFlightDeliveryCheckGuids.remove(bg);
         }
-        if (reply->error() != QNetworkReply::NoError) return;
-        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
-        if (!doc.isObject() || !doc.object().value(QStringLiteral("data")).isArray()) {
-            return;
-        }
-        const QJsonArray arr = doc.object().value(QStringLiteral("data")).toArray();
-        QJsonArray nonStaleArr;
-        for (const QJsonValue &v : arr) {
-            QJsonObject obj = v.toObject();
-            const QString g = obj.value(QStringLiteral("guid")).toString();
-            const bool batchHasTerminalState = obj.value(QStringLiteral("isDelivered")).toBool(false) ||
-                                               (obj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
-                                               (obj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0) ||
-                                               (obj.value(QStringLiteral("error")).toInt(0) != 0);
-            if (!g.isEmpty() && observedSeqAtDispatch.contains(g) &&
-                m_messageObservationSeq.value(g, 0) > observedSeqAtDispatch.value(g, 0) &&
-                !batchHasTerminalState) {
-                // Newer state was already observed via Socket.IO / incoming delta while this batch was in flight
-                continue;
-            }
-            if (!g.isEmpty() && obj.value(QStringLiteral("chats")).toArray().isEmpty() &&
-                m_pendingDeliveryMessages.contains(g)) {
-                const QString knownCg = m_pendingDeliveryMessages.value(g);
-                if (!knownCg.isEmpty()) {
-                    obj.insert(QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), knownCg}}});
+        if (reply->error() == QNetworkReply::NoError) {
+            const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+            if (doc.isObject() && doc.object().value(QStringLiteral("data")).isArray()) {
+                const QJsonArray arr = doc.object().value(QStringLiteral("data")).toArray();
+                QJsonArray nonStaleArr;
+                for (const QJsonValue &v : arr) {
+                    QJsonObject obj = v.toObject();
+                    const QString g = obj.value(QStringLiteral("guid")).toString();
+                    const bool batchHasTerminalState = obj.value(QStringLiteral("isDelivered")).toBool(false) ||
+                                                       (obj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                                                       (obj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0) ||
+                                                       (obj.value(QStringLiteral("error")).toInt(0) != 0);
+                    if (!g.isEmpty() && observedSeqAtDispatch.contains(g) &&
+                        m_messageObservationSeq.value(g, 0) > observedSeqAtDispatch.value(g, 0) &&
+                        !batchHasTerminalState) {
+                        // Newer state was already observed via Socket.IO / incoming delta while this batch was in flight
+                        continue;
+                    }
+                    if (!g.isEmpty() && obj.value(QStringLiteral("chats")).toArray().isEmpty() &&
+                        m_pendingDeliveryMessages.contains(g)) {
+                        const QString knownCg = m_pendingDeliveryMessages.value(g);
+                        if (!knownCg.isEmpty()) {
+                            obj.insert(QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), knownCg}}});
+                        }
+                    }
+                    nonStaleArr.append(obj);
+                }
+                if (!nonStaleArr.isEmpty()) {
+                    processIncomingMessages(nonStaleArr, false);
+                    saveMessagesCache();
                 }
             }
-            nonStaleArr.append(obj);
         }
-        if (!nonStaleArr.isEmpty()) {
-            processIncomingMessages(nonStaleArr, false);
-            saveMessagesCache();
-        }
+        ++m_pendingDeliveryCheckCompletedCountForTest;
+        emit pendingDeliveryCheckFinishedForTest();
     });
 }
 
@@ -4025,25 +4044,10 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
             const QString rawCg = cv.toObject().value(QStringLiteral("guid")).toString().trimmed();
             const QString cg = resolveCanonicalChatGuid(rawCg);
             if (!cg.isEmpty()) {
-                bool msgChanged = !alreadySeen;
-                int oldErr = 0;
-                if (m_chatMessagesCache.contains(cg) && m_chatMessagesCache.value(cg).contains(msgGuid)) {
-                    const QJsonObject oldMsg = m_chatMessagesCache.value(cg).value(msgGuid);
-                    oldErr = oldMsg.value(QStringLiteral("error")).toInt(0);
-                    if (oldMsg.value(QStringLiteral("text")).toString() != m.value(QStringLiteral("text")).toString() ||
-                        oldMsg.value(QStringLiteral("attachments")).toArray() != m.value(QStringLiteral("attachments")).toArray() ||
-                        oldMsg.value(QStringLiteral("reactions")).toArray() != m.value(QStringLiteral("reactions")).toArray() ||
-                        oldMsg.value(QStringLiteral("isRead")).toBool() != m.value(QStringLiteral("isRead")).toBool() ||
-                        oldMsg.value(QStringLiteral("dateRead")).toVariant().toLongLong() != m.value(QStringLiteral("dateRead")).toVariant().toLongLong() ||
-                        oldErr != incomingErr ||
-                        oldMsg.value(QStringLiteral("isSent")).toBool() != m.value(QStringLiteral("isSent")).toBool() ||
-                        oldMsg.value(QStringLiteral("isDelivered")).toBool() != m.value(QStringLiteral("isDelivered")).toBool() ||
-                        oldMsg.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() != m.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() ||
-                        oldMsg.value(QStringLiteral("dateEdited")).toVariant().toLongLong() != m.value(QStringLiteral("dateEdited")).toVariant().toLongLong() ||
-                        oldMsg.value(QStringLiteral("dateRetracted")).toVariant().toLongLong() != m.value(QStringLiteral("dateRetracted")).toVariant().toLongLong()) {
-                        msgChanged = true;
-                    }
-                }
+                const auto beforeChatIt = m_chatMessagesCache.constFind(cg);
+                const bool existedBefore = (beforeChatIt != m_chatMessagesCache.constEnd() && beforeChatIt->contains(msgGuid));
+                const QJsonObject beforeCached = existedBefore ? beforeChatIt->value(msgGuid) : QJsonObject();
+                const int oldErr = existedBefore ? beforeCached.value(QStringLiteral("error")).toInt(0) : 0;
                 if (!isInitialLoad && incomingFromMe && incomingErr != 0 && (oldErr == 0 || !alreadySeen) && !notifiedSendError) {
                     notifiedSendError = true;
                     emit toastMessage(QStringLiteral("⚠ Message failed to deliver (error %1)").arg(incomingErr));
@@ -4053,6 +4057,9 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
                     enrichedMsg.insert(QStringLiteral("originalChatGuid"), rawCg);
                 }
                 cacheMessageForChat(cg, enrichedMsg);
+                const auto afterChatIt = m_chatMessagesCache.constFind(cg);
+                const bool existsAfter = (afterChatIt != m_chatMessagesCache.constEnd() && afterChatIt->contains(msgGuid));
+                const bool msgChanged = !existedBefore || !existsAfter || (beforeCached != afterChatIt->value(msgGuid));
                 affectedChatGuids.insert(cg);
                 if ((cg == m_selectedChatGuid || rawCg == m_selectedChatGuid) && msgChanged) {
                     selectedChatUpdated = true;
@@ -4062,11 +4069,24 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
 
         if (!msgGuid.isEmpty()) {
             const qint64 nowPollMs = QDateTime::currentMSecsSinceEpoch();
-            const bool timedOut = (dateCreated > 0 && (nowPollMs - dateCreated) > 120000LL);
+            const qint64 addedAtMs = m_pendingDeliveryAddedAtMs.value(msgGuid, 0);
+            const qint64 effectiveStartMs = (dateCreated > 0) ? dateCreated : addedAtMs;
+            const bool timedOut = m_expiredPendingDeliveryGuids.contains(msgGuid) ||
+                                  (effectiveStartMs > 0 && (nowPollMs - effectiveStartMs) > 120000LL);
+            const bool incomingSent = m.contains(QStringLiteral("isSent")) && m.value(QStringLiteral("isSent")).toBool();
+            const bool positiveConfirmed = (incomingErr != 0 || incomingDelivered ||
+                                            m.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0 ||
+                                            incomingSent);
+            if (positiveConfirmed) {
+                m_expiredPendingDeliveryGuids.remove(msgGuid);
+            }
             if (incomingErr != 0 || incomingDelivered || m.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0 || timedOut) {
                 const QString removedCg = m_pendingDeliveryMessages.take(msgGuid);
                 m_pendingDeliveryAddedAtMs.remove(msgGuid);
                 m_inFlightDeliveryCheckGuids.remove(msgGuid);
+                if (timedOut && !positiveConfirmed) {
+                    m_expiredPendingDeliveryGuids.insert(msgGuid);
+                }
                 if (timedOut && !removedCg.isEmpty() && !m_selectedChatGuid.isEmpty() && isSameConversation(removedCg, m_selectedChatGuid)) {
                     selectedChatUpdated = true;
                 }
@@ -4937,7 +4957,9 @@ void Backend::syncContactsNow() {
 QString Backend::computeOutgoingReceiptText(
     const QJsonObject &msgObj,
     bool hasLaterIncomingReply,
-    qint64 nowMs) {
+    qint64 nowMs,
+    qint64 addedAtMs,
+    bool forceExpired) {
     const int err = msgObj.value(QStringLiteral("error")).toInt(0);
     if (err != 0) {
         return QStringLiteral("⚠ Not Delivered");
@@ -4962,9 +4984,12 @@ QString Backend::computeOutgoingReceiptText(
             return QStringLiteral("Sent");
         }
         const qint64 dateCreated = msgObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+        const qint64 effectiveStartMs = (dateCreated > 0) ? dateCreated : addedAtMs;
         const qint64 effectiveNow = (nowMs > 0) ? nowMs : QDateTime::currentMSecsSinceEpoch();
-        if (dateCreated > 0 && (effectiveNow - dateCreated) > 120000LL) {
-            return QStringLiteral("Sent");
+        const bool expired = forceExpired ||
+                             (effectiveStartMs > 0 && (effectiveNow - effectiveStartMs) > 120000LL);
+        if (expired) {
+            return QStringLiteral("Unconfirmed");
         }
         return QStringLiteral("Sending...");
     }
@@ -4979,7 +5004,9 @@ QVariantList Backend::buildMessageListFromApi(
     const QHash<QString, QVariantMap> &previewCache,
     QStringList *missingPreviewsOut,
     const QSet<QString> &deletedMessageGuids,
-    const QHash<QString, QString> &recentOutboundEffects) {
+    const QHash<QString, QString> &recentOutboundEffects,
+    const QHash<QString, qint64> &pendingDeliveryAddedAtMs,
+    const QSet<QString> &expiredPendingDeliveryGuids) {
 
     // Collect chronological (oldest -> newest), skipping deleted/retracted messages
     QList<QJsonObject> chronological;
@@ -5340,7 +5367,12 @@ QVariantList Backend::buildMessageListFromApi(
         // Receipt text
         QString receiptText;
         if (isFromMe && guid == latestOutgoingGuid) {
-            receiptText = computeOutgoingReceiptText(m, hasLaterIncomingReply);
+            receiptText = computeOutgoingReceiptText(
+                m,
+                hasLaterIncomingReply,
+                0,
+                pendingDeliveryAddedAtMs.value(guid, 0),
+                expiredPendingDeliveryGuids.contains(guid));
         }
 
         // Thread reply originator
@@ -5468,16 +5500,16 @@ QVariantList Backend::buildMessageListFromApi(
     return out;
 }
 
-void Backend::enforceLatestOutgoingReceiptsInTimeline() {
+static void normalizeOutgoingReceipts(QVariantList &msgs) {
     int latestOutgoingIdx = -1;
-    for (int i = m_messages.size() - 1; i >= 0; --i) {
-        if (m_messages[i].toMap().value(QStringLiteral("isFromMe")).toBool()) {
+    for (int i = msgs.size() - 1; i >= 0; --i) {
+        if (msgs[i].toMap().value(QStringLiteral("isFromMe")).toBool()) {
             latestOutgoingIdx = i;
             break;
         }
     }
-    for (int i = 0; i < m_messages.size(); ++i) {
-        QVariantMap vm = m_messages[i].toMap();
+    for (int i = 0; i < msgs.size(); ++i) {
+        QVariantMap vm = msgs[i].toMap();
         if (!vm.value(QStringLiteral("isFromMe")).toBool()) continue;
         if (i != latestOutgoingIdx) {
             const bool isFailed = vm.value(QStringLiteral("isFailed")).toBool() ||
@@ -5485,10 +5517,14 @@ void Backend::enforceLatestOutgoingReceiptsInTimeline() {
             const QString curReceipt = vm.value(QStringLiteral("receiptText")).toString();
             if (!isFailed && curReceipt != QStringLiteral("⚠ Not Delivered") && !curReceipt.isEmpty()) {
                 vm.insert(QStringLiteral("receiptText"), QString());
-                m_messages[i] = vm;
+                msgs[i] = vm;
             }
         }
     }
+}
+
+void Backend::enforceLatestOutgoingReceiptsInTimeline() {
+    normalizeOutgoingReceipts(m_messages);
 }
 
 void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &rawMsg) {
@@ -5575,7 +5611,6 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
         if (!isTempGuid) {
             // Real server message arrived: evict matching optimistic temp-*/bp-* entry from chatMap
             QStringList tempKeysToRemove;
-            QStringList unGuidedAttCandidateKeys;
             if (!explicitTempGuid.isEmpty() && explicitTempGuid != msgGuid) {
                 tempKeysToRemove.append(explicitTempGuid);
             }
@@ -5599,24 +5634,74 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
                 if (!closeInTime) continue;
                 if (!incomingHasAtt && !kHasAtt && !incomingText.isEmpty() && kText == incomingText) {
                     tempKeysToRemove.append(k);
-                } else if (incomingHasAtt && kHasAtt && kText == incomingText) {
-                    unGuidedAttCandidateKeys.append(k);
                 }
-            }
-            if (explicitTempGuid.isEmpty() && unGuidedAttCandidateKeys.size() == 1) {
-                tempKeysToRemove.append(unGuidedAttCandidateKeys.first());
             }
             for (const QString &tk : tempKeysToRemove) {
                 chatMap.remove(tk);
                 m_seenMessageGuids.remove(tk);
                 m_pendingDeliveryMessages.remove(tk);
                 m_pendingDeliveryAddedAtMs.remove(tk);
+                m_expiredPendingDeliveryGuids.remove(tk);
                 m_inFlightDeliveryCheckGuids.remove(tk);
                 m_messageObservationSeq.remove(tk);
             }
+
+            // Monotonically merge into chatMap first so timeline updates compare against merged state
+            QJsonObject mergedMsg;
+            if (!chatMap.contains(msgGuid)) {
+                chatMap.insert(msgGuid, msg);
+                mergedMsg = msg;
+            } else {
+                const bool recentLocalReadMut = (m_localReadMutationTimeMs.value(targetGuid, 0) > QDateTime::currentMSecsSinceEpoch() - 15000);
+                QJsonObject merged = chatMap.value(msgGuid);
+                for (auto it = msg.begin(); it != msg.end(); ++it) {
+                    if (it.key() == QStringLiteral("text")) {
+                        if (!it.value().toString().trimmed().isEmpty()) {
+                            merged.insert(it.key(), it.value());
+                        }
+                    } else if (it.key() == QStringLiteral("handle")) {
+                        if (it.value().isObject() && !it.value().toObject().value(QStringLiteral("address")).toString().trimmed().isEmpty()) {
+                            merged.insert(it.key(), it.value());
+                        }
+                    } else if (it.key() == QStringLiteral("attributedBody") || it.key() == QStringLiteral("attachments")) {
+                        if (!it.value().toArray().isEmpty()) {
+                            merged.insert(it.key(), it.value());
+                        }
+                    } else if (recentLocalReadMut && !isFromMe && (it.key() == QStringLiteral("isRead") || it.key() == QStringLiteral("dateRead"))) {
+                        continue;
+                    } else if (isFromMe && it.key() == QStringLiteral("isDelivered")) {
+                        if (it.value().toBool() || !merged.value(QStringLiteral("isDelivered")).toBool()) {
+                            merged.insert(it.key(), it.value());
+                        }
+                    } else if (isFromMe && it.key() == QStringLiteral("isSent")) {
+                        if (it.value().toBool() || !merged.value(QStringLiteral("isSent")).toBool()) {
+                            merged.insert(it.key(), it.value());
+                        }
+                    } else if (isFromMe && (it.key() == QStringLiteral("dateDelivered") || it.key() == QStringLiteral("dateRead"))) {
+                        const qint64 newTs = it.value().toVariant().toLongLong();
+                        const qint64 oldTs = merged.value(it.key()).toVariant().toLongLong();
+                        if (newTs >= oldTs) {
+                            merged.insert(it.key(), it.value());
+                        }
+                    } else if (isFromMe && it.key() == QStringLiteral("error")) {
+                        const int newErr = it.value().toInt(0);
+                        const int oldErr = merged.value(QStringLiteral("error")).toInt(0);
+                        const bool newlyDelivered = msg.value(QStringLiteral("isDelivered")).toBool() ||
+                                                    (msg.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0);
+                        if (newErr != 0 || oldErr == 0 || newlyDelivered) {
+                            merged.insert(it.key(), it.value());
+                        }
+                    } else {
+                        merged.insert(it.key(), it.value());
+                    }
+                }
+                chatMap.insert(msgGuid, merged);
+                mergedMsg = merged;
+            }
+
             if (targetGuid == m_selectedChatGuid) {
-                const int msgErr = msg.value(QStringLiteral("error")).toInt(0);
-                const qint64 msgDateCreated = msg.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+                const int msgErr = mergedMsg.value(QStringLiteral("error")).toInt(0);
+                const qint64 msgDateCreated = mergedMsg.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
                 bool hasLaterIncoming = false;
                 if (msgDateCreated > 0) {
                     for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
@@ -5628,12 +5713,18 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
                         }
                     }
                 }
-                const QString computedReceipt = computeOutgoingReceiptText(msg, hasLaterIncoming);
+                const QString computedReceipt = computeOutgoingReceiptText(
+                    mergedMsg,
+                    hasLaterIncoming,
+                    0,
+                    m_pendingDeliveryAddedAtMs.value(msgGuid, 0),
+                    m_expiredPendingDeliveryGuids.contains(msgGuid));
+                QVariantList nextTimeline = m_messages;
                 int existingRealIdx = -1;
+                int firstUnguidedTextMatchIdx = -1;
                 QList<int> matchingTempIndices;
-                QList<int> unGuidedAttCandidateIndices;
-                for (int i = 0; i < m_messages.size(); ++i) {
-                    const QVariantMap vm = m_messages[i].toMap();
+                for (int i = 0; i < nextTimeline.size(); ++i) {
+                    const QVariantMap vm = nextTimeline[i].toMap();
                     const QString vg = vm.value(QStringLiteral("guid")).toString();
                     if (vg == msgGuid) {
                         if (existingRealIdx < 0) existingRealIdx = i;
@@ -5644,22 +5735,21 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
                         }
                     } else if (tempKeysToRemove.contains(vg)) {
                         matchingTempIndices.append(i);
-                    } else if ((vg.startsWith(QStringLiteral("temp-")) || vg.startsWith(QStringLiteral("bp-"))) &&
+                    } else if (firstUnguidedTextMatchIdx < 0 &&
+                               (vg.startsWith(QStringLiteral("temp-")) || vg.startsWith(QStringLiteral("bp-"))) &&
                                vm.value(QStringLiteral("isFromMe")).toBool()) {
                         const bool vmHasAtt = vm.value(QStringLiteral("hasImageAttachment")).toBool() ||
                                               vm.value(QStringLiteral("hasFileAttachment")).toBool();
                         if (!incomingHasAtt && !vmHasAtt && !incomingText.isEmpty() &&
                             vm.value(QStringLiteral("text")).toString().trimmed() == incomingText) {
-                            matchingTempIndices.append(i);
-                        } else if (incomingHasAtt && vmHasAtt) {
-                            unGuidedAttCandidateIndices.append(i);
+                            firstUnguidedTextMatchIdx = i;
                         }
                     }
                 }
-                if (explicitTempGuid.isEmpty() && matchingTempIndices.isEmpty() && unGuidedAttCandidateIndices.size() == 1) {
-                    matchingTempIndices.append(unGuidedAttCandidateIndices.first());
+                if (existingRealIdx < 0 && explicitTempGuid.isEmpty() && tempKeysToRemove.isEmpty() &&
+                    firstUnguidedTextMatchIdx >= 0) {
+                    matchingTempIndices.append(firstUnguidedTextMatchIdx);
                 }
-                bool timelineMutated = false;
                 auto applyMeta = [&](QVariantMap &vm, bool promoteGuid, bool isLatestOutgoingRow) {
                     if (promoteGuid) vm.insert(QStringLiteral("guid"), msgGuid);
                     if (msgErr != 0 || computedReceipt == QStringLiteral("⚠ Not Delivered")) {
@@ -5680,42 +5770,43 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
                 if (existingRealIdx >= 0) {
                     for (int k = matchingTempIndices.size() - 1; k >= 0; --k) {
                         if (matchingTempIndices[k] < existingRealIdx) --existingRealIdx;
-                        m_messages.removeAt(matchingTempIndices[k]);
+                        nextTimeline.removeAt(matchingTempIndices[k]);
                     }
                     int latestOutgoingIdx = -1;
-                    for (int i = m_messages.size() - 1; i >= 0; --i) {
-                        if (m_messages[i].toMap().value(QStringLiteral("isFromMe")).toBool()) {
+                    for (int i = nextTimeline.size() - 1; i >= 0; --i) {
+                        if (nextTimeline[i].toMap().value(QStringLiteral("isFromMe")).toBool()) {
                             latestOutgoingIdx = i;
                             break;
                         }
                     }
-                    QVariantMap vm = m_messages[existingRealIdx].toMap();
+                    QVariantMap vm = nextTimeline[existingRealIdx].toMap();
                     applyMeta(vm, false, existingRealIdx == latestOutgoingIdx);
-                    m_messages[existingRealIdx] = vm;
-                    enforceLatestOutgoingReceiptsInTimeline();
-                    timelineMutated = true;
+                    nextTimeline[existingRealIdx] = vm;
+                    normalizeOutgoingReceipts(nextTimeline);
                 } else if (!matchingTempIndices.isEmpty()) {
                     const int keepIdx = matchingTempIndices.first();
                     for (int k = matchingTempIndices.size() - 1; k >= 1; --k) {
-                        m_messages.removeAt(matchingTempIndices[k]);
+                        nextTimeline.removeAt(matchingTempIndices[k]);
                     }
                     int latestOutgoingIdx = -1;
-                    for (int i = m_messages.size() - 1; i >= 0; --i) {
-                        if (m_messages[i].toMap().value(QStringLiteral("isFromMe")).toBool()) {
+                    for (int i = nextTimeline.size() - 1; i >= 0; --i) {
+                        if (nextTimeline[i].toMap().value(QStringLiteral("isFromMe")).toBool()) {
                             latestOutgoingIdx = i;
                             break;
                         }
                     }
-                    QVariantMap vm = m_messages[keepIdx].toMap();
+                    QVariantMap vm = nextTimeline[keepIdx].toMap();
                     applyMeta(vm, true, keepIdx == latestOutgoingIdx);
-                    m_messages[keepIdx] = vm;
-                    enforceLatestOutgoingReceiptsInTimeline();
-                    timelineMutated = true;
+                    nextTimeline[keepIdx] = vm;
+                    normalizeOutgoingReceipts(nextTimeline);
                 }
-                if (timelineMutated) {
+                if (nextTimeline != m_messages) {
+                    emit aboutToChangeMessages();
+                    m_messages = nextTimeline;
                     emit messagesChanged();
                 }
             }
+            return;
         } else {
             // Incoming message has a synthetic temp-*/bp-* GUID: skip caching if the real server message is already cached
             for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
@@ -5817,25 +5908,36 @@ void Backend::rebuildSelectedChatMessages() {
             rawDesc.append(o);
         }
 
-        nextMessages = buildMessageListFromApi(rawDesc, m_contactNames, m_attachmentPaths, &missingAtts, m_linkPreviewCache, &missingPreviews, m_deletedMessageGuids, m_recentOutboundEffects);
+        nextMessages = buildMessageListFromApi(
+            rawDesc,
+            m_contactNames,
+            m_attachmentPaths,
+            &missingAtts,
+            m_linkPreviewCache,
+            &missingPreviews,
+            m_deletedMessageGuids,
+            m_recentOutboundEffects,
+            m_pendingDeliveryAddedAtMs,
+            m_expiredPendingDeliveryGuids);
     }
 
     // Retain any pending optimistic messages (temp-*) from m_messages if their text/attachment is not yet in nextMessages
     const qint64 nowRebuildMs = QDateTime::currentMSecsSinceEpoch();
-    int pendingOptAttCount = 0;
+    QSet<QString> alreadyPresentRealGuids;
     for (const QVariant &curr : m_messages) {
-        const QVariantMap cm = curr.toMap();
-        const QString g = cm.value(QStringLiteral("guid")).toString();
-        if ((g.startsWith(QStringLiteral("temp-")) || g.startsWith(QStringLiteral("bp-"))) &&
-            cm.value(QStringLiteral("chatGuid")).toString() == m_selectedChatGuid &&
-            (cm.value(QStringLiteral("hasImageAttachment")).toBool() || cm.value(QStringLiteral("hasFileAttachment")).toBool())) {
-            ++pendingOptAttCount;
+        const QString cg = curr.toMap().value(QStringLiteral("guid")).toString();
+        if (!cg.isEmpty() && !cg.startsWith(QStringLiteral("temp-")) && !cg.startsWith(QStringLiteral("bp-"))) {
+            alreadyPresentRealGuids.insert(cg);
         }
     }
+    QVariantList retainedOptimistic;
     QSet<QString> consumedNextGuids;
     for (const QVariant &curr : m_messages) {
         const QVariantMap cm = curr.toMap();
         const QString g = cm.value(QStringLiteral("guid")).toString();
+        if (m_deletedMessageGuids.contains(g)) {
+            continue;
+        }
         if (g.startsWith(QStringLiteral("temp-")) || g.startsWith(QStringLiteral("bp-"))) {
             const QString optChatGuid = cm.value(QStringLiteral("chatGuid")).toString();
             if (optChatGuid.isEmpty() || optChatGuid != m_selectedChatGuid) {
@@ -5848,9 +5950,8 @@ void Backend::rebuildSelectedChatMessages() {
             const QString txt = cm.value(QStringLiteral("text")).toString().trimmed();
             const bool cmHasAtt = cm.value(QStringLiteral("hasImageAttachment")).toBool() ||
                                   cm.value(QStringLiteral("hasFileAttachment")).toBool();
-            const QString cmAttName = cm.value(QStringLiteral("attachmentName")).toString().trimmed();
             bool echoed = false;
-            for (const QVariant &nxt : nextMessages) {
+            for (const QVariant &nxt : std::as_const(nextMessages)) {
                 const QVariantMap nm = nxt.toMap();
                 const QString nGuid = nm.value(QStringLiteral("guid")).toString();
                 if (consumedNextGuids.contains(nGuid)) {
@@ -5870,18 +5971,14 @@ void Backend::rebuildSelectedChatMessages() {
                     }
                     continue;
                 }
+                if (alreadyPresentRealGuids.contains(nGuid)) {
+                    continue;
+                }
                 if (nm.value(QStringLiteral("isFromMe")).toBool()) {
                     const QString nTxt = nm.value(QStringLiteral("text")).toString().trimmed();
                     const bool nHasAtt = nm.value(QStringLiteral("hasImageAttachment")).toBool() ||
                                          nm.value(QStringLiteral("hasFileAttachment")).toBool();
-                    const QString nAttName = nm.value(QStringLiteral("attachmentName")).toString().trimmed();
                     if (!cmHasAtt && !nHasAtt && !txt.isEmpty() && nTxt == txt) {
-                        echoed = true;
-                        consumedNextGuids.insert(nGuid);
-                        break;
-                    }
-                    if (cmHasAtt && nHasAtt && nTxt == txt &&
-                        (pendingOptAttCount == 1 || (!cmAttName.isEmpty() && cmAttName == nAttName))) {
                         echoed = true;
                         consumedNextGuids.insert(nGuid);
                         break;
@@ -5889,15 +5986,18 @@ void Backend::rebuildSelectedChatMessages() {
                 }
             }
             if (!echoed) {
-                nextMessages.append(curr);
+                retainedOptimistic.append(curr);
             }
         }
     }
+    if (!retainedOptimistic.isEmpty()) {
+        nextMessages.append(retainedOptimistic);
+    }
+    normalizeOutgoingReceipts(nextMessages);
 
     if (nextMessages != m_messages) {
         emit aboutToChangeMessages();
         m_messages = nextMessages;
-        enforceLatestOutgoingReceiptsInTimeline();
         emit messagesChanged();
     }
 
@@ -6836,6 +6936,61 @@ void Backend::toggleChatReadUnread(const QString &chatGuid) {
     }
 }
 
+QString Backend::resolveMergedOutgoingReceiptAndPending(
+    const QString &canonicalGuid,
+    const QString &realGuid,
+    const QJsonObject &fallbackObj,
+    int *outErrCode) {
+    const QJsonObject mergedObj = (!realGuid.isEmpty() &&
+                                   m_chatMessagesCache.contains(canonicalGuid) &&
+                                   m_chatMessagesCache.value(canonicalGuid).contains(realGuid))
+                                      ? m_chatMessagesCache.value(canonicalGuid).value(realGuid)
+                                      : fallbackObj;
+    const qint64 mergedDc = mergedObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+    bool hasLaterIncoming = false;
+    if (mergedDc > 0 && m_chatMessagesCache.contains(canonicalGuid)) {
+        const auto &chatMap = m_chatMessagesCache.value(canonicalGuid);
+        for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
+            const QJsonObject &other = it.value();
+            if (!other.value(QStringLiteral("isFromMe")).toBool() &&
+                other.value(QStringLiteral("dateCreated")).toVariant().toLongLong() > mergedDc) {
+                hasLaterIncoming = true;
+                break;
+            }
+        }
+    }
+    const int mergedErrCode = mergedObj.value(QStringLiteral("error")).toInt(0);
+    if (outErrCode) {
+        *outErrCode = mergedErrCode;
+    }
+    const bool mergedHasIsSent = mergedObj.contains(QStringLiteral("isSent"));
+    const bool mergedHasIsDelivered = mergedObj.contains(QStringLiteral("isDelivered"));
+    const bool mergedIsDelivered = mergedObj.value(QStringLiteral("isDelivered")).toBool(false) ||
+                                   (mergedObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                                   (mergedObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+    const QString finalReceipt = computeOutgoingReceiptText(
+        mergedObj,
+        hasLaterIncoming,
+        0,
+        realGuid.isEmpty() ? 0 : m_pendingDeliveryAddedAtMs.value(realGuid, 0),
+        !realGuid.isEmpty() && m_expiredPendingDeliveryGuids.contains(realGuid));
+    if (!realGuid.isEmpty()) {
+        if (mergedIsDelivered || mergedErrCode != 0 ||
+            (mergedHasIsSent && mergedObj.value(QStringLiteral("isSent")).toBool())) {
+            m_expiredPendingDeliveryGuids.remove(realGuid);
+        }
+        if (mergedErrCode == 0 && !mergedIsDelivered && (mergedHasIsSent || mergedHasIsDelivered) &&
+            finalReceipt != QStringLiteral("⚠ Not Delivered") &&
+            !m_expiredPendingDeliveryGuids.contains(realGuid)) {
+            m_pendingDeliveryMessages.insert(realGuid, canonicalGuid);
+            if (!m_pendingDeliveryAddedAtMs.contains(realGuid)) {
+                m_pendingDeliveryAddedAtMs.insert(realGuid, QDateTime::currentMSecsSinceEpoch());
+            }
+        }
+    }
+    return finalReceipt;
+}
+
 void Backend::sendMessage(const QString &chatGuid, const QString &text, const QString &replyToGuid) {
     const QString trimmed = replaceEmojiShortcodes(text.trimmed());
     if (chatGuid.isEmpty() || trimmed.isEmpty()) return;
@@ -6914,10 +7069,6 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         const QString realGuid = dataObj.value(QStringLiteral("guid")).toString();
         const qint64 dateCreated = dataObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
         const int sendErrCode = dataObj.value(QStringLiteral("error")).toInt(0);
-        const bool hasIsSent = dataObj.contains(QStringLiteral("isSent"));
-        const bool hasIsDelivered = dataObj.contains(QStringLiteral("isDelivered"));
-        const qint64 dateDelivered = dataObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
-        const bool isDeliveredFlag = dataObj.value(QStringLiteral("isDelivered")).toBool(false) || (dateDelivered > 0);
         const bool looksLikeSyntheticChatGuid = realGuid.startsWith(QStringLiteral("iMessage;")) ||
                                                 realGuid.startsWith(QStringLiteral("SMS;")) ||
                                                 realGuid.startsWith(QStringLiteral("RCS;"));
@@ -6940,6 +7091,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
                 m_seenMessageGuids.remove(tempGuid);
                 m_pendingDeliveryMessages.remove(tempGuid);
                 m_pendingDeliveryAddedAtMs.remove(tempGuid);
+                m_expiredPendingDeliveryGuids.remove(tempGuid);
                 m_inFlightDeliveryCheckGuids.remove(tempGuid);
                 m_messageObservationSeq.remove(tempGuid);
                 if (m_chatMessagesCache.contains(canonicalGuid)) {
@@ -6951,12 +7103,9 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
             }
             cacheMessageForChat(canonicalGuid, dataObj);
 
-            const QString finalReceipt = computeOutgoingReceiptText(dataObj);
-            if (!isDeliveredFlag && (hasIsSent || hasIsDelivered) &&
-                finalReceipt != QStringLiteral("⚠ Not Delivered")) {
-                m_pendingDeliveryMessages.insert(realGuid, canonicalGuid);
-                m_pendingDeliveryAddedAtMs.insert(realGuid, QDateTime::currentMSecsSinceEpoch());
-            }
+            int mergedErrCode = 0;
+            const QString finalReceipt = resolveMergedOutgoingReceiptAndPending(
+                canonicalGuid, realGuid, dataObj, &mergedErrCode);
 
             if (canonicalGuid == m_selectedChatGuid) {
                 int realIdx = -1;
@@ -6974,8 +7123,8 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
                 if (realIdx >= 0) {
                     QVariantMap m = m_messages[realIdx].toMap();
                     m.insert(QStringLiteral("receiptText"), finalReceipt);
-                    m.insert(QStringLiteral("isFailed"), false);
-                    m.insert(QStringLiteral("errorCode"), 0);
+                    m.insert(QStringLiteral("isFailed"), mergedErrCode != 0);
+                    m.insert(QStringLiteral("errorCode"), mergedErrCode);
                     m_messages[realIdx] = m;
                     for (int k = dupOrTempIndices.size() - 1; k >= 0; --k) {
                         m_messages.removeAt(dupOrTempIndices[k]);
@@ -6987,8 +7136,8 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
                     QVariantMap m = m_messages[keepIdx].toMap();
                     m.insert(QStringLiteral("guid"), realGuid);
                     m.insert(QStringLiteral("receiptText"), finalReceipt);
-                    m.insert(QStringLiteral("isFailed"), false);
-                    m.insert(QStringLiteral("errorCode"), 0);
+                    m.insert(QStringLiteral("isFailed"), mergedErrCode != 0);
+                    m.insert(QStringLiteral("errorCode"), mergedErrCode);
                     m_messages[keepIdx] = m;
                     for (int k = dupOrTempIndices.size() - 1; k >= 1; --k) {
                         m_messages.removeAt(dupOrTempIndices[k]);
@@ -7276,6 +7425,7 @@ void Backend::deleteMessage(const QString &messageGuid, const QString &chatGuid)
     m_deletedMessageGuids.insert(resolvedMsgGuid);
     m_pendingDeliveryMessages.remove(resolvedMsgGuid);
     m_pendingDeliveryAddedAtMs.remove(resolvedMsgGuid);
+    m_expiredPendingDeliveryGuids.remove(resolvedMsgGuid);
     m_inFlightDeliveryCheckGuids.remove(resolvedMsgGuid);
     m_messageObservationSeq.remove(resolvedMsgGuid);
 
@@ -7295,26 +7445,34 @@ void Backend::deleteMessage(const QString &messageGuid, const QString &chatGuid)
             m_deletedMessageGuids.insert(cg);
             m_pendingDeliveryMessages.remove(cg);
             m_pendingDeliveryAddedAtMs.remove(cg);
+            m_expiredPendingDeliveryGuids.remove(cg);
             m_inFlightDeliveryCheckGuids.remove(cg);
             m_messageObservationSeq.remove(cg);
         }
     }
 
-    // 3. Optimistically remove from m_messages in UI immediately
-    bool removedFromUi = false;
-    for (int i = m_messages.size() - 1; i >= 0; --i) {
-        if (m_messages[i].toMap().value(QStringLiteral("guid")).toString() == resolvedMsgGuid) {
-            if (!removedFromUi) {
-                emit aboutToChangeMessages();
-            }
-            m_messages.removeAt(i);
-            removedFromUi = true;
-        }
-    }
-    if (removedFromUi) {
-        emit messagesChanged();
-    } else if (resolvedChatGuid == m_selectedChatGuid) {
+    // 3. Remove from UI timeline immediately and restore preceding receipt when active chat is affected
+    const QString canonicalChat = resolveCanonicalChatGuid(resolvedChatGuid);
+    const bool isActiveSelectedChat = !m_selectedChatGuid.isEmpty() &&
+                                      !canonicalChat.isEmpty() &&
+                                      (canonicalChat == m_selectedChatGuid ||
+                                       isSameConversation(canonicalChat, m_selectedChatGuid));
+    if (isActiveSelectedChat && (!m_demoMode || m_chatMessagesCache.contains(m_selectedChatGuid))) {
         rebuildSelectedChatMessages();
+    } else {
+        bool removedFromUi = false;
+        for (int i = m_messages.size() - 1; i >= 0; --i) {
+            if (m_messages[i].toMap().value(QStringLiteral("guid")).toString() == resolvedMsgGuid) {
+                if (!removedFromUi) {
+                    emit aboutToChangeMessages();
+                }
+                m_messages.removeAt(i);
+                removedFromUi = true;
+            }
+        }
+        if (removedFromUi) {
+            emit messagesChanged();
+        }
     }
 
     // 4. Update chat preview & persist state
@@ -7381,6 +7539,14 @@ void Backend::unsendMessage(const QString &messageGuid, const QString &chatGuid)
     if (resolvedChatGuid.isEmpty()) {
         resolvedChatGuid = m_selectedChatGuid;
     }
+    if (resolvedChatGuid.isEmpty()) {
+        for (auto it = m_chatMessagesCache.constBegin(); it != m_chatMessagesCache.constEnd(); ++it) {
+            if (it.value().contains(resolvedMsgGuid)) {
+                resolvedChatGuid = it.key();
+                break;
+            }
+        }
+    }
 
     int partIndex = 0;
     if (!resolvedChatGuid.isEmpty() && m_chatMessagesCache.contains(resolvedChatGuid)) {
@@ -7390,6 +7556,7 @@ void Backend::unsendMessage(const QString &messageGuid, const QString &chatGuid)
     m_deletedMessageGuids.insert(resolvedMsgGuid);
     m_pendingDeliveryMessages.remove(resolvedMsgGuid);
     m_pendingDeliveryAddedAtMs.remove(resolvedMsgGuid);
+    m_expiredPendingDeliveryGuids.remove(resolvedMsgGuid);
     m_inFlightDeliveryCheckGuids.remove(resolvedMsgGuid);
     m_messageObservationSeq.remove(resolvedMsgGuid);
 
@@ -7397,20 +7564,27 @@ void Backend::unsendMessage(const QString &messageGuid, const QString &chatGuid)
         chatIt.value().remove(resolvedMsgGuid);
     }
 
-    bool removedFromUi = false;
-    for (int i = m_messages.size() - 1; i >= 0; --i) {
-        if (m_messages[i].toMap().value(QStringLiteral("guid")).toString() == resolvedMsgGuid) {
-            if (!removedFromUi) {
-                emit aboutToChangeMessages();
-            }
-            m_messages.removeAt(i);
-            removedFromUi = true;
-        }
-    }
-    if (removedFromUi) {
-        emit messagesChanged();
-    } else if (resolvedChatGuid == m_selectedChatGuid) {
+    const QString canonicalChat = resolveCanonicalChatGuid(resolvedChatGuid);
+    const bool isActiveSelectedChat = !m_selectedChatGuid.isEmpty() &&
+                                      !canonicalChat.isEmpty() &&
+                                      (canonicalChat == m_selectedChatGuid ||
+                                       isSameConversation(canonicalChat, m_selectedChatGuid));
+    if (isActiveSelectedChat && (!m_demoMode || m_chatMessagesCache.contains(m_selectedChatGuid))) {
         rebuildSelectedChatMessages();
+    } else {
+        bool removedFromUi = false;
+        for (int i = m_messages.size() - 1; i >= 0; --i) {
+            if (m_messages[i].toMap().value(QStringLiteral("guid")).toString() == resolvedMsgGuid) {
+                if (!removedFromUi) {
+                    emit aboutToChangeMessages();
+                }
+                m_messages.removeAt(i);
+                removedFromUi = true;
+            }
+        }
+        if (removedFromUi) {
+            emit messagesChanged();
+        }
     }
 
     if (!resolvedChatGuid.isEmpty()) {
@@ -7922,6 +8096,10 @@ QString Backend::pasteClipboardImageToTempFile() {
 }
 
 void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, const QString &caption) {
+    sendAttachmentInternal(chatGuid, filePath, caption, false);
+}
+
+void Backend::sendAttachmentInternal(const QString &chatGuid, const QString &filePath, const QString &caption, bool ownedVoiceRecording) {
     if (chatGuid.isEmpty() || filePath.trimmed().isEmpty()) return;
     const QString canonicalGuid = resolveCanonicalChatGuid(chatGuid);
     const QString sendChatGuid = resolveActiveSendChatGuid(canonicalGuid);
@@ -8059,7 +8237,7 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     req.setTransferTimeout(45000);
     QNetworkReply *reply = m_sendNam.post(req, multiPart);
     multiPart->setParent(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, tempGuid, absLocalPath, isAud]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, tempGuid, absLocalPath, isAud, ownedVoiceRecording]() {
         reply->deleteLater();
         if (m_activeSendCount > 0) {
             --m_activeSendCount;
@@ -8070,10 +8248,6 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
             const QJsonObject dataObj = QJsonDocument::fromJson(respBytes).object().value(QStringLiteral("data")).toObject();
             const QString realGuid = dataObj.value(QStringLiteral("guid")).toString();
             const int sendErrCode = dataObj.value(QStringLiteral("error")).toInt(0);
-            const bool hasIsSent = dataObj.contains(QStringLiteral("isSent"));
-            const bool hasIsDelivered = dataObj.contains(QStringLiteral("isDelivered"));
-            const bool isDeliveredFlag = dataObj.value(QStringLiteral("isDelivered")).toBool(false) ||
-                                         (dataObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0);
             const QJsonArray atts = dataObj.value(QStringLiteral("attachments")).toArray();
             QString firstAttGuid;
             QString persistedLocalPath = absLocalPath;
@@ -8116,19 +8290,20 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
                     }
                 }
             }
-            if (copiedVoiceMemoToPersistentCache && persistedLocalPath != absLocalPath &&
-                QFileInfo::exists(persistedLocalPath) &&
-                (absLocalPath.contains(QStringLiteral("/voice_memos/")) ||
-                 QFileInfo(absLocalPath).fileName().startsWith(QStringLiteral("voice_memo_")))) {
+            if (ownedVoiceRecording && copiedVoiceMemoToPersistentCache && persistedLocalPath != absLocalPath &&
+                QFileInfo::exists(persistedLocalPath)) {
                 insertCachedAttachmentPath(m_attachmentPaths, tempGuid, persistedLocalPath);
                 QFile::remove(absLocalPath);
             }
+            int mergedErrCode = sendErrCode;
+            QString finalReceipt;
             if (!realGuid.isEmpty()) {
                 m_seenMessageGuids.insert(realGuid);
                 if (!tempGuid.isEmpty() && tempGuid != realGuid) {
                     m_seenMessageGuids.remove(tempGuid);
                     m_pendingDeliveryMessages.remove(tempGuid);
                     m_pendingDeliveryAddedAtMs.remove(tempGuid);
+                    m_expiredPendingDeliveryGuids.remove(tempGuid);
                     m_inFlightDeliveryCheckGuids.remove(tempGuid);
                     m_messageObservationSeq.remove(tempGuid);
                     if (m_chatMessagesCache.contains(canonicalGuid)) {
@@ -8136,13 +8311,13 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
                     }
                 }
                 cacheMessageForChat(canonicalGuid, dataObj);
+                finalReceipt = resolveMergedOutgoingReceiptAndPending(
+                    canonicalGuid, realGuid, dataObj, &mergedErrCode);
+            } else {
+                finalReceipt = computeOutgoingReceiptText(dataObj);
             }
-            const QString finalReceipt = computeOutgoingReceiptText(dataObj);
-            if (sendErrCode != 0) {
-                emit toastMessage(QStringLiteral("⚠ Failed to send attachment (error %1)").arg(sendErrCode));
-            } else if (!isDeliveredFlag && (hasIsSent || hasIsDelivered) && !realGuid.isEmpty()) {
-                m_pendingDeliveryMessages.insert(realGuid, canonicalGuid);
-                m_pendingDeliveryAddedAtMs.insert(realGuid, QDateTime::currentMSecsSinceEpoch());
+            if (mergedErrCode != 0) {
+                emit toastMessage(QStringLiteral("⚠ Failed to send attachment (error %1)").arg(mergedErrCode));
             }
             if (!firstAttGuid.isEmpty() && m_playingAudioGuid == tempGuid) {
                 m_playingAudioGuid = firstAttGuid;
@@ -8188,8 +8363,8 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
                     updateAttList(m, QStringLiteral("imageAttachments"));
                     updateAttList(m, QStringLiteral("fileAttachments"));
                     m.insert(QStringLiteral("receiptText"), finalReceipt);
-                    m.insert(QStringLiteral("isFailed"), sendErrCode != 0);
-                    m.insert(QStringLiteral("errorCode"), sendErrCode);
+                    m.insert(QStringLiteral("isFailed"), mergedErrCode != 0);
+                    m.insert(QStringLiteral("errorCode"), mergedErrCode);
                 };
                 bool updatedOpt = false;
                 if (realIdx >= 0) {
@@ -9003,27 +9178,6 @@ void Backend::saveAudioDeviceConfig() const {
     }
     cfgObj.insert(QStringLiteral("audioInputDevice"), m_selectedAudioInputDevice);
     cfgObj.insert(QStringLiteral("audioOutputDevice"), m_selectedAudioOutputDevice);
-    auto writeConfigAtomically = [](const QString &targetPath, const QJsonObject &obj) -> bool {
-        if (targetPath.isEmpty()) return false;
-        const QFileInfo targetFi(targetPath);
-        if (targetFi.exists() && targetFi.isDir()) return false;
-        QDir().mkpath(targetFi.absolutePath());
-        const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Indented);
-        QSaveFile outFile(targetPath);
-        if (!outFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            return false;
-        }
-        outFile.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-        if (outFile.write(payload) != payload.size()) {
-            outFile.cancelWriting();
-            return false;
-        }
-        if (!outFile.commit()) {
-            return false;
-        }
-        QFile::setPermissions(targetPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-        return true;
-    };
     writeConfigAtomically(cfgPath, cfgObj);
 }
 
@@ -10525,6 +10679,7 @@ void Backend::clearStagedVoiceMemo(bool removeFile) {
     m_recordedVoiceDurationSeconds = 0;
     m_recordedVoiceWaveform.clear();
     m_recordedVoicePath.clear();
+    m_recordedVoiceChatGuid.clear();
 }
 
 QString Backend::finalizeCapturedVoiceWav(const QString &recPath) {
@@ -10706,6 +10861,7 @@ void Backend::startVoiceRecording() {
     m_voiceRecordingSeconds = 0;
     m_voiceRecordingWaveform = computeWaveformBars(QUuid::createUuid().toString(), 28);
     m_currentVoiceRecordingPath = targetPath;
+    m_recordedVoiceChatGuid = m_selectedChatGuid;
     m_voiceRecordingTimer.start();
     emit voiceRecordingChanged();
 }
@@ -10738,6 +10894,14 @@ void Backend::togglePreviewRecordedVoiceMemo() {
     toggleAudioPlayback(QStringLiteral("voice-memo-preview"), m_recordedVoicePath);
 }
 
+bool Backend::canSendRecordedVoiceMemoToSelectedChat() const {
+    if (m_selectedChatGuid.isEmpty()) return false;
+    if (!m_recordedVoiceChatGuid.isEmpty()) {
+        return isSameConversation(m_recordedVoiceChatGuid, m_selectedChatGuid);
+    }
+    return true;
+}
+
 void Backend::sendRecordedVoiceMemo() {
     if (!m_hasRecordedVoiceMemo || m_recordedVoicePath.isEmpty()) return;
     const QString recPath = m_recordedVoicePath;
@@ -10752,13 +10916,17 @@ void Backend::sendRecordedVoiceMemo() {
         emit toastMessage(QStringLiteral("⚠ Select a conversation before sending voice memo"));
         return;
     }
+    if (!m_recordedVoiceChatGuid.isEmpty() && !isSameConversation(m_recordedVoiceChatGuid, m_selectedChatGuid)) {
+        emit toastMessage(QStringLiteral("⚠ Voice memo belongs to another conversation; switch back or discard it"));
+        return;
+    }
     if (!m_demoMode && (m_serverUrl.isEmpty() || m_password.isEmpty() || !buildApiUrl(QStringLiteral("/api/v1/message/attachment")).isValid())) {
         emit toastMessage(QStringLiteral("⚠ Relay server not ready; voice memo kept as draft"));
         return;
     }
     clearStagedVoiceMemo(false);
     emit voiceRecordingChanged();
-    sendAttachment(m_selectedChatGuid, recPath, QString());
+    sendAttachmentInternal(m_selectedChatGuid, recPath, QString(), true);
 }
 
 void Backend::cancelVoiceRecording() {

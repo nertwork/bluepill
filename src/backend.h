@@ -117,6 +117,7 @@ class Backend : public QObject {
     Q_PROPERTY(int recordedVoiceDurationSeconds READ recordedVoiceDurationSeconds NOTIFY voiceRecordingChanged)
     Q_PROPERTY(QVariantList recordedVoiceWaveform READ recordedVoiceWaveform NOTIFY voiceRecordingChanged)
     Q_PROPERTY(QString recordedVoicePath READ recordedVoicePath NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(QString recordedVoiceChatGuid READ recordedVoiceChatGuid NOTIFY voiceRecordingChanged)
     Q_PROPERTY(QVariantList audioInputDevices READ audioInputDevices NOTIFY audioDevicesChanged)
     Q_PROPERTY(QVariantList audioOutputDevices READ audioOutputDevices NOTIFY audioDevicesChanged)
     Q_PROPERTY(QString selectedAudioInputDevice READ selectedAudioInputDevice WRITE setSelectedAudioInputDevice NOTIFY audioDevicesChanged)
@@ -195,6 +196,7 @@ public:
     int recordedVoiceDurationSeconds() const { return m_recordedVoiceDurationSeconds; }
     QVariantList recordedVoiceWaveform() const { return m_recordedVoiceWaveform; }
     QString recordedVoicePath() const { return m_recordedVoicePath; }
+    QString recordedVoiceChatGuid() const { return m_recordedVoiceChatGuid; }
     QVariantList audioInputDevices() const { return m_audioInputDevices; }
     QVariantList audioOutputDevices() const { return m_audioOutputDevices; }
     QString selectedAudioInputDevice() const { return m_selectedAudioInputDevice; }
@@ -317,6 +319,7 @@ public:
     Q_INVOKABLE void sendRecordedVoiceMemo();
     Q_INVOKABLE void stopAndSendVoiceRecording();
     Q_INVOKABLE void cancelVoiceRecording();
+    Q_INVOKABLE bool canSendRecordedVoiceMemoToSelectedChat() const;
     Q_INVOKABLE void refreshAudioDevices();
     Q_INVOKABLE void sendMessageWithEffect(const QString &text, const QString &effectId);
     Q_INVOKABLE void scheduleMessage(const QString &text, qint64 sendAtMs);
@@ -379,6 +382,7 @@ public:
         m_soundPlayCountForTest = 0;
         m_lastSoundPresetPlayed.clear();
     }
+    void rebuildSelectedChatMessagesForTest() { rebuildSelectedChatMessages(); }
 
     // Pure testable helpers
     static QString normalizeHandle(const QString &raw);
@@ -401,7 +405,9 @@ public:
     static QString computeOutgoingReceiptText(
         const QJsonObject &msgObj,
         bool hasLaterIncomingReply = false,
-        qint64 nowMs = 0);
+        qint64 nowMs = 0,
+        qint64 addedAtMs = 0,
+        bool forceExpired = false);
     static int wavDurationSeconds(const QString &filePath);
     static QVariantList computeAudioFileWaveformBars(const QString &filePath, const QString &seed, int count = 28);
     static QVariantList parsePactlDeviceList(const QByteArray &rawOutput, bool filterMonitorSources);
@@ -413,7 +419,9 @@ public:
         const QHash<QString, QVariantMap> &previewCache = {},
         QStringList *missingPreviewsOut = nullptr,
         const QSet<QString> &deletedMessageGuids = {},
-        const QHash<QString, QString> &recentOutboundEffects = {});
+        const QHash<QString, QString> &recentOutboundEffects = {},
+        const QHash<QString, qint64> &pendingDeliveryAddedAtMs = {},
+        const QSet<QString> &expiredPendingDeliveryGuids = {});
 
     // Contact resolution & state
     void loadCredentials();
@@ -442,6 +450,8 @@ public:
     QString resolveActiveSendChatGuidForTest(const QString &chatGuid) const { return resolveActiveSendChatGuid(chatGuid); }
     QString currentVoiceRecordingPathForTest() const { return m_currentVoiceRecordingPath; }
     int pendingDeliveryCountForTest() const { return m_pendingDeliveryMessages.size(); }
+    int pendingDeliveryInFlightCountForTest() const { return m_inFlightDeliveryCheckGuids.size(); }
+    quint64 pendingDeliveryCheckCompletedCountForTest() const { return m_pendingDeliveryCheckCompletedCountForTest; }
     void checkPendingDeliveryStatusesForTest() { checkPendingDeliveryStatuses(); }
     QStringList lastPendingDeliveryBatchForTest() const { return m_lastPendingDeliveryBatchForTest; }
     void addPendingDeliveryForTest(const QString &msgGuid, const QString &chatGuid, qint64 addedAtMs = 0);
@@ -490,6 +500,7 @@ signals:
     void toastMessage(const QString &text);
     void attachmentReady(const QString &attachmentGuid, const QString &localUrl);
     void linkPreviewUpdated(const QString &messageGuid, const QVariantMap &previewData);
+    void pendingDeliveryCheckFinishedForTest();
 
 private:
     QNetworkRequest makeRequest(const QString &pathAndQuery) const;
@@ -524,6 +535,8 @@ private:
     void rebuildSelectedChatMessages();
     void downloadAttachment(const QString &attachmentGuid, const QString &transferName, bool highPriority = false);
     void pumpAttachmentDownloadQueue();
+    void sendAttachmentInternal(const QString &chatGuid, const QString &filePath, const QString &caption, bool ownedVoiceRecording);
+    QString resolveMergedOutgoingReceiptAndPending(const QString &canonicalGuid, const QString &realGuid, const QJsonObject &fallbackObj, int *outErrCode = nullptr);
     void fetchLinkPreview(const QString &msgGuid, const QString &url);
     void processIncomingMessages(const QJsonArray &messagesArray, bool isInitialLoad);
     void recordChatGroupMetadata(const QJsonObject &chatObj);
@@ -620,7 +633,9 @@ private:
     QHash<QString, QString> m_chatPreferredSendGuids;
     QHash<QString, QString> m_pendingDeliveryMessages;
     QHash<QString, qint64> m_pendingDeliveryAddedAtMs;
+    QSet<QString> m_expiredPendingDeliveryGuids;
     QSet<QString> m_inFlightDeliveryCheckGuids;
+    quint64 m_pendingDeliveryCheckCompletedCountForTest = 0;
     quint64 m_deliveryObservationCounter = 0;
     QHash<QString, quint64> m_messageObservationSeq;
     int m_pendingDeliveryRotationCursor = 0;
@@ -685,6 +700,7 @@ private:
     int m_recordedVoiceDurationSeconds = 0;
     QVariantList m_recordedVoiceWaveform;
     QString m_recordedVoicePath;
+    QString m_recordedVoiceChatGuid;
     QPointer<QProcess> m_voiceRecordProcess;
     QVariantList m_audioInputDevices;
     QVariantList m_audioOutputDevices;
