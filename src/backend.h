@@ -459,6 +459,11 @@ public:
     void checkPendingDeliveryStatusesForTest() { checkPendingDeliveryStatuses(); }
     QStringList lastPendingDeliveryBatchForTest() const { return m_lastPendingDeliveryBatchForTest; }
     void addPendingDeliveryForTest(const QString &msgGuid, const QString &chatGuid, qint64 addedAtMs = 0);
+    void agePendingDeliveryForTest(const QString &msgGuid, qint64 ageMs);
+    void setMessagesForTest(const QVariantList &messages) {
+        m_messages = messages;
+        emit messagesChanged();
+    }
     void markLiveIncomingAttachmentForTest(const QString &attachmentGuid) {
         if (!attachmentGuid.isEmpty()) m_liveIncomingAttachments.insert(attachmentGuid);
     }

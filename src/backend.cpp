@@ -3802,6 +3802,19 @@ void Backend::addPendingDeliveryForTest(const QString &msgGuid, const QString &c
     m_expiredPendingDeliveryGuids.remove(msgGuid);
 }
 
+void Backend::agePendingDeliveryForTest(const QString &msgGuid, qint64 ageMs) {
+    if (msgGuid.isEmpty()) return;
+    const qint64 agedTs = QDateTime::currentMSecsSinceEpoch() - ageMs;
+    if (m_pendingDeliveryAddedAtMs.contains(msgGuid)) {
+        m_pendingDeliveryAddedAtMs.insert(msgGuid, agedTs);
+    }
+    const QString chatGuid = resolveCanonicalChatGuid(m_pendingDeliveryMessages.value(msgGuid));
+    if (!chatGuid.isEmpty() && m_chatMessagesCache.contains(chatGuid) &&
+        m_chatMessagesCache[chatGuid].contains(msgGuid)) {
+        m_chatMessagesCache[chatGuid][msgGuid].insert(QStringLiteral("dateCreated"), agedTs);
+    }
+}
+
 void Backend::clearPendingDeliveryTrackingForGuid(const QString &msgGuid, bool clearExpired) {
     if (msgGuid.isEmpty()) return;
     m_pendingDeliveryMessages.remove(msgGuid);
@@ -5187,10 +5200,11 @@ QString Backend::computeOutgoingReceiptText(
     if (dateDelivered > 0 || isDeliveredFlag) {
         return QStringLiteral("Delivered");
     }
-    if (!hasIsSent && !hasIsDelivered) {
+    const bool isPending = msgObj.value(QStringLiteral("pending")).toBool(false);
+    if (!isPending && !hasIsSent && !hasIsDelivered) {
         return QStringLiteral("Delivered");
     }
-    if (hasIsSent && !isSentFlag) {
+    if ((hasIsSent && !isSentFlag) || (isPending && !hasIsSent)) {
         if (hasLaterIncomingReply) {
             return QStringLiteral("Sent");
         }
@@ -5848,13 +5862,9 @@ static QJsonObject mergeCachedMessageObject(const QJsonObject &existing, const Q
             incoming.value(QStringLiteral("isDelivered")).toBool() ||
             (incoming.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
             (incoming.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
-        const bool mergedHasPositiveReceipt =
-            merged.value(QStringLiteral("isDelivered")).toBool() ||
-            (merged.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
-            (merged.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
         const int incomingErr = incoming.value(QStringLiteral("error")).toInt(0);
         const bool incomingExplicitNewError = (incomingErr != 0 && !incomingIsPending && !incomingHasPositiveReceipt);
-        if (mergedHasPositiveReceipt && !incomingExplicitNewError) {
+        if (incomingHasPositiveReceipt && !incomingExplicitNewError) {
             merged.insert(QStringLiteral("error"), 0);
         }
     }
@@ -6241,21 +6251,45 @@ void Backend::rebuildSelectedChatMessages() {
             }
         }
     }
+    auto effectiveMsgTs = [](const QVariantMap &vm) -> qint64 {
+        const qint64 dc = vm.value(QStringLiteral("dateCreated")).toLongLong();
+        return (dc > 0) ? dc : vm.value(QStringLiteral("optimisticCreatedAtMs")).toLongLong();
+    };
     for (const QVariant &curr : std::as_const(retainedOptimistic)) {
         const QVariantMap cm = curr.toMap();
         const QString g = cm.value(QStringLiteral("guid")).toString();
-        const qint64 optDate = cm.value(QStringLiteral("dateCreated")).toLongLong();
-        const qint64 optTs = (optDate > 0) ? optDate : cm.value(QStringLiteral("optimisticCreatedAtMs")).toLongLong();
+        const qint64 optTs = effectiveMsgTs(cm);
         const int optPrevIdx = prevTimelineOrder.value(g, std::numeric_limits<int>::max());
-        int insertAt = nextMessages.size();
+
+        int groupEnd = nextMessages.size();
+        int lastPredIdx = -1;
         for (int insIdx = 0; insIdx < nextMessages.size(); ++insIdx) {
             const QVariantMap nm = nextMessages.at(insIdx).toMap();
-            const QString nGuid = nm.value(QStringLiteral("guid")).toString();
-            const qint64 nDate = nm.value(QStringLiteral("dateCreated")).toLongLong();
-            const int nPrevIdx = prevTimelineOrder.value(nGuid, std::numeric_limits<int>::max());
-            if (nDate > optTs || (nDate == optTs && optPrevIdx < nPrevIdx)) {
-                insertAt = insIdx;
+            const qint64 nDate = effectiveMsgTs(nm);
+            if (nDate > optTs) {
+                groupEnd = insIdx;
                 break;
+            }
+            if (nDate == optTs) {
+                const QString nGuid = nm.value(QStringLiteral("guid")).toString();
+                const int nPrevIdx = prevTimelineOrder.value(nGuid, std::numeric_limits<int>::max());
+                if (nPrevIdx != std::numeric_limits<int>::max() && nPrevIdx < optPrevIdx) {
+                    lastPredIdx = insIdx;
+                }
+            }
+        }
+
+        int insertAt = groupEnd;
+        for (int insIdx = lastPredIdx + 1; insIdx < groupEnd; ++insIdx) {
+            const QVariantMap nm = nextMessages.at(insIdx).toMap();
+            const qint64 nDate = effectiveMsgTs(nm);
+            if (nDate == optTs) {
+                const QString nGuid = nm.value(QStringLiteral("guid")).toString();
+                const int nPrevIdx = prevTimelineOrder.value(nGuid, std::numeric_limits<int>::max());
+                if (optPrevIdx < nPrevIdx) {
+                    insertAt = insIdx;
+                    break;
+                }
             }
         }
         nextMessages.insert(insertAt, curr);
@@ -7344,12 +7378,27 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         if (dataObj.isEmpty()) {
             return false;
         }
-        const QString realGuid = dataObj.value(QStringLiteral("guid")).toString();
+        const QString realGuid = dataObj.value(QStringLiteral("guid")).toString().trimmed();
+        const QString ackTempGuid = dataObj.value(QStringLiteral("tempGuid")).toString().trimmed();
         const qint64 dateCreated = dataObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
         const int sendErrCode = dataObj.value(QStringLiteral("error")).toInt(0);
         const bool looksLikeSyntheticChatGuid = realGuid.startsWith(QStringLiteral("iMessage;")) ||
                                                 realGuid.startsWith(QStringLiteral("SMS;")) ||
                                                 realGuid.startsWith(QStringLiteral("RCS;"));
+        const bool tempGuidMatchesIfPresent = ackTempGuid.isEmpty() || tempGuid.isEmpty() || (ackTempGuid == tempGuid);
+        const bool isPendingAck = dataObj.value(QStringLiteral("pending")).isBool() &&
+                                  dataObj.value(QStringLiteral("pending")).toBool(false);
+        const bool hasSendResult =
+            (sendErrCode != 0) ||
+            dataObj.value(QStringLiteral("isSent")).isBool() ||
+            dataObj.value(QStringLiteral("isDelivered")).isBool() ||
+            (dataObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+            (dataObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0) ||
+            (dataObj.value(QStringLiteral("originalROWID")).toVariant().toLongLong() > 0) ||
+            (dateCreated > 0 && dataObj.contains(QStringLiteral("isFromMe")));
+        if (!tempGuidMatchesIfPresent || (!isPendingAck && !hasSendResult)) {
+            return false;
+        }
 
         if (sendErrCode != 0) {
             if (!realGuid.isEmpty() && !looksLikeSyntheticChatGuid) {
@@ -7363,7 +7412,39 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
             return false;
         }
 
+        if (realGuid.isEmpty() && isPendingAck && !tempGuid.isEmpty()) {
+            QJsonObject pendingObj = dataObj;
+            pendingObj.insert(QStringLiteral("guid"), tempGuid);
+            pendingObj.insert(QStringLiteral("tempGuid"), tempGuid);
+            if (!pendingObj.contains(QStringLiteral("isFromMe"))) {
+                pendingObj.insert(QStringLiteral("isFromMe"), true);
+            }
+            const bool hasPositiveDelivery =
+                pendingObj.value(QStringLiteral("isDelivered")).toBool(false) ||
+                (pendingObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                (pendingObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+            if (!hasPositiveDelivery) {
+                pendingObj.insert(QStringLiteral("isSent"), false);
+                pendingObj.insert(QStringLiteral("isDelivered"), false);
+                pendingObj.insert(QStringLiteral("pending"), true);
+            }
+            cacheMessageForChat(canonicalGuid, pendingObj);
+            saveMessagesCache();
+            return true;
+        }
+
         if (!realGuid.isEmpty() && !looksLikeSyntheticChatGuid) {
+            QJsonObject normalizedObj = dataObj;
+            const bool hasPositiveDelivery =
+                normalizedObj.value(QStringLiteral("isDelivered")).toBool(false) ||
+                (normalizedObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                (normalizedObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+            if (isPendingAck && !hasPositiveDelivery &&
+                !normalizedObj.contains(QStringLiteral("isSent")) &&
+                !normalizedObj.contains(QStringLiteral("isDelivered"))) {
+                normalizedObj.insert(QStringLiteral("isSent"), false);
+                normalizedObj.insert(QStringLiteral("isDelivered"), false);
+            }
             m_seenMessageGuids.insert(realGuid);
             if (!tempGuid.isEmpty() && tempGuid != realGuid) {
                 m_seenMessageGuids.remove(tempGuid);
@@ -7379,11 +7460,11 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
             if (dateCreated > m_lastMessageTimestamp) {
                 m_lastMessageTimestamp = dateCreated;
             }
-            cacheMessageForChat(canonicalGuid, dataObj);
+            cacheMessageForChat(canonicalGuid, normalizedObj);
 
             int mergedErrCode = 0;
             const QString finalReceipt = resolveMergedOutgoingReceiptAndPending(
-                canonicalGuid, realGuid, dataObj, &mergedErrCode);
+                canonicalGuid, realGuid, normalizedObj, &mergedErrCode);
 
             if (canonicalGuid == m_selectedChatGuid) {
                 int realIdx = -1;
@@ -8542,27 +8623,52 @@ void Backend::sendAttachmentInternal(const QString &chatGuid, const QString &fil
                                             : QJsonObject();
             const QJsonValue dataVal = rootObj.value(QStringLiteral("data"));
             const QJsonObject dataObj = dataVal.isObject() ? dataVal.toObject() : QJsonObject();
+            const QString realGuidRaw = dataObj.value(QStringLiteral("guid")).toString().trimmed();
+            const QString ackTempGuid = dataObj.value(QStringLiteral("tempGuid")).toString().trimmed();
+            const QString ackUploadUuid = dataObj.value(QStringLiteral("uploadUuid")).toString().trimmed();
+            const bool looksLikeSyntheticChatGuid =
+                realGuidRaw.startsWith(QStringLiteral("iMessage;")) ||
+                realGuidRaw.startsWith(QStringLiteral("SMS;")) ||
+                realGuidRaw.startsWith(QStringLiteral("RCS;"));
+            const QString realGuid = looksLikeSyntheticChatGuid ? QString() : realGuidRaw;
+
+            const bool tempGuidMatchesIfPresent =
+                ackTempGuid.isEmpty() || tempGuid.isEmpty() || (ackTempGuid == tempGuid);
+            const bool hasCorrelatedIdentity =
+                tempGuidMatchesIfPresent &&
+                (!realGuid.isEmpty() || !ackTempGuid.isEmpty() || !ackUploadUuid.isEmpty());
+            const bool isExplicitPendingAck =
+                dataObj.value(QStringLiteral("pending")).isBool() &&
+                dataObj.value(QStringLiteral("pending")).toBool(false) &&
+                hasCorrelatedIdentity;
+
+            const int sendErrCode = dataObj.value(QStringLiteral("error")).toInt(0);
+            const bool hasExplicitError =
+                dataObj.value(QStringLiteral("error")).isDouble() && (sendErrCode != 0);
+            const bool hasSendBool =
+                dataObj.value(QStringLiteral("isSent")).isBool() ||
+                dataObj.value(QStringLiteral("isDelivered")).isBool();
+            const bool hasPositiveReceiptTimestamp =
+                (dataObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                (dataObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+            const bool hasConfirmedDbRow =
+                (!realGuid.isEmpty()) &&
+                ((dataObj.value(QStringLiteral("originalROWID")).toVariant().toLongLong() > 0) ||
+                 !dataObj.value(QStringLiteral("attachments")).toArray().isEmpty());
+            const bool hasSendResult =
+                hasExplicitError ||
+                ((hasSendBool || hasPositiveReceiptTimestamp || hasConfirmedDbRow) && hasCorrelatedIdentity);
+
             const bool validUploadAck =
                 (parseErr.error == QJsonParseError::NoError) &&
                 doc.isObject() &&
                 dataVal.isObject() &&
                 !dataObj.isEmpty() &&
-                (dataObj.contains(QStringLiteral("guid")) ||
-                 dataObj.contains(QStringLiteral("tempGuid")) ||
-                 dataObj.contains(QStringLiteral("uploadUuid")) ||
-                 dataObj.contains(QStringLiteral("attachments")) ||
-                 dataObj.contains(QStringLiteral("isFromMe")) ||
-                 dataObj.contains(QStringLiteral("isSent")) ||
-                 dataObj.contains(QStringLiteral("isDelivered")) ||
-                 dataObj.contains(QStringLiteral("dateCreated")) ||
-                 dataObj.contains(QStringLiteral("originalROWID")) ||
-                 dataObj.contains(QStringLiteral("error")));
+                (isExplicitPendingAck || hasSendResult);
             if (!validUploadAck) {
                 markAttachmentFailed();
                 return;
             }
-            const QString realGuid = dataObj.value(QStringLiteral("guid")).toString();
-            const int sendErrCode = dataObj.value(QStringLiteral("error")).toInt(0);
             int mergedErrCode = sendErrCode;
             QString finalReceipt;
             QJsonObject effectiveObj = dataObj;
@@ -8582,6 +8688,24 @@ void Backend::sendAttachmentInternal(const QString &chatGuid, const QString &fil
                 }
                 if (!uploadObj.contains(QStringLiteral("isFromMe"))) {
                     uploadObj.insert(QStringLiteral("isFromMe"), true);
+                }
+                const bool uploadHasPositiveDelivery =
+                    uploadObj.value(QStringLiteral("isDelivered")).toBool(false) ||
+                    (uploadObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                    (uploadObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+                if (!uploadHasPositiveDelivery && sendErrCode == 0) {
+                    if (uploadObj.value(QStringLiteral("pending")).toBool(false)) {
+                        if (!uploadObj.contains(QStringLiteral("isSent"))) {
+                            uploadObj.insert(QStringLiteral("isSent"), false);
+                        }
+                        if (!uploadObj.contains(QStringLiteral("isDelivered"))) {
+                            uploadObj.insert(QStringLiteral("isDelivered"), false);
+                        }
+                    } else if (!uploadObj.contains(QStringLiteral("isSent")) &&
+                               !uploadObj.contains(QStringLiteral("isDelivered"))) {
+                        uploadObj.insert(QStringLiteral("isSent"), true);
+                        uploadObj.insert(QStringLiteral("isDelivered"), false);
+                    }
                 }
                 cacheMessageForChat(canonicalGuid, uploadObj);
                 if (m_chatMessagesCache.contains(canonicalGuid) &&
