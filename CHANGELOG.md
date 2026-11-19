@@ -2,6 +2,13 @@
 
 All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this file.
 
+## [1.2.3] - 2026-11-18
+
+### Fixed
+- **Sending & Delivery Receipt Reliability:** Eliminated stuck `"Sending..."` states on slow or delayed `chat.db` commits across `bluepill-server` and the Qt6 client (`_poll_wal_once` ROWID boundary tracking, atomic fallback claims, strict `tempGuid` correlation, and stale error/receipt freshness guards).
+- **Voice Memo Capture, Playback & Cancellation:** Fixed voice memo recording cleanup, waveform bar extraction/retention across optimistic and server rows, audio device selection persistence & reconciliation, and clean recording cancellation.
+- **Clipboard Image Staging, Popups & UI Stability:** Fixed pasted/staged image handling, popup and media viewer clipping, and message-list timeline ordering/rebuild stability (removing message-area jumping).
+
 ## [1.2.2] - 2026-11-18
 
 ### Fixed
