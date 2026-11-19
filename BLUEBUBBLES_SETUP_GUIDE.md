@@ -28,13 +28,19 @@ curl -s "http://127.0.0.1:1235/api/v1/server/info"
 ```
 Open **`http://127.0.0.1:1235/web`** in any browser (or `https://your-relay.example.com/web` behind a TLS reverse proxy / Tailscale Serve) to use the built-in **BluePill Web UI** without installing any client software.
 
+### 4. Connect the Linux Client
+`bluepill-server` listens on `127.0.0.1` unless it's started with `--host` (e.g. `--host 0.0.0.0` or the Mac's Tailscale IP). Once the relay is reachable from Linux:
+1. Launch `bluepill` and press **`Ctrl+,`**. If Tailscale is running, your relay Mac shows up under **Macs on your Tailscale network**, and a single relay is filled in automatically.
+2. Otherwise, type the Mac's host name (e.g. `mac-relay.example.com`). No scheme means `http://`, and an empty **Port** means `1235`.
+3. Enter the relay password and click **Save & Connect**.
+
 ---
 
 ## Option B: Legacy BlueBubbles Server (`BlueBubbles.app`)
 
 If you already run **BlueBubbles Server (`v1.9.x`)** on macOS:
 1. Launch `BluePill` on Linux (`bluepill`) and press **`Ctrl+,`** (or click **`⚙ Server`** in the top bar).
-2. Enter your **Primary Server URL** (e.g., `https://bluebubbles.example.com`), optional **Failover Server URL**, and **API Password**.
+2. Enter your **Primary Server URL** (e.g., `https://bluebubbles.example.com`) and its **Port**: `443` behind a TLS proxy, or BlueBubbles' own port (default `1234`). An empty Port field means `1235`, the BluePill relay default. Then enter the optional **Failover Server URL** (with its port inline) and your **API Password**.
 3. Click **Save & Connect**. `BluePill` automatically detects BlueBubbles Server `v1.9.x`, connects via Socket.IO v4 push + REST delta polling, and reconciles read/unread states via parameterized SQL `where` queries.
 
 ---

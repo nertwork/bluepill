@@ -505,6 +505,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#caddy-configuration-etccaddycaddyfile">Caddy Configuration (/etc/caddy/Caddyfile)</a></li>
 <li><a href="#nginx-configuration">Nginx Configuration</a></li>
 <li><a href="#tailscale-serve">Tailscale Serve</a></li>
+<li><a href="#client-port-for-reverse-proxies">Client Port for Reverse Proxies</a></li>
 </ul>
 </li>
 </ul>
@@ -529,6 +530,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 </ul>
 </div>
+
 
 
 
@@ -594,7 +596,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
     end
 
     subgraph Browser[&quot;Universal Web Access&quot;]
-        WEB[&quot;BluePill Embedded Web UI\n(http://&lt;relay&gt;:1234/web)&quot;]
+        WEB[&quot;BluePill Embedded Web UI\n(http://&lt;relay&gt;:1235/web)&quot;]
     end
 
     subgraph Mac[&quot;macOS Relay Host (Intel / Apple Silicon / KVM)&quot;]
@@ -659,7 +661,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <p><strong>Embedded Web UI (<code>/web</code>):</strong></p>
 </li>
 <li>Built directly into <code>bluepill-server</code> with zero external dependencies.</li>
-<li>Provides full browser access at <code>http://&lt;relay-host&gt;:1234/web</code> on any desktop, laptop, tablet, or phone.</li>
+<li>Provides full browser access at <code>http://&lt;relay-host&gt;:1235/web</code> on any desktop, laptop, tablet, or phone.</li>
 <li>
 <p>Features inline 28-bar voice memo waveform players, browser audio recording (<code>🎙</code>), Expressive Send pickers, Send Later scheduled messaging, attachment drag-and-drop, global search, Find My tracking, and live server logs.</p>
 </li>
@@ -918,7 +920,7 @@ bluepill-server --version
 cat &lt;&lt; 'EOF_CONFIG' &gt; ~/.config/bluepill/server.json
 {
   &quot;host&quot;: &quot;0.0.0.0&quot;,
-  &quot;port&quot;: 1234,
+  &quot;port&quot;: 1235,
   &quot;password&quot;: &quot;CHANGE_ME_TO_A_SECURE_TOKEN&quot;,
   &quot;helperPort&quot;: 45670,
   &quot;enableBackgroundDaemons&quot;: true
@@ -926,6 +928,12 @@ cat &lt;&lt; 'EOF_CONFIG' &gt; ~/.config/bluepill/server.json
 EOF_CONFIG
 chmod 600 ~/.config/bluepill/server.json
 </code></pre>
+<blockquote>
+<p>[!NOTE]
+<code>bluepill-server</code> reads <code>password</code> and the iCloud module toggles (<code>enableNotes</code>, <code>enableCalendar</code>, <code>enablePhotos</code>) from <code>server.json</code>, but it takes its <strong>listen address and port from the command line</strong> (<code>--host</code> / <code>--port</code>, or <code>BLUEPILL_HOST</code> / <code>BLUEPILL_PORT</code>). Without <code>--host</code> it listens on <code>127.0.0.1</code> only, so Linux clients on your LAN or tailnet can't reach it. To accept remote connections, start it with <code>--host &lt;the Mac's Tailscale IP&gt;</code> (recommended; WireGuard-encrypted) or <code>--host 0.0.0.0</code>. The Homebrew service listens on port <code>1235</code>, which is the port the Linux client uses when you don't enter one.</p>
+<p>[!WARNING]
+The relay speaks plain HTTP. With <code>--host 0.0.0.0</code>, the relay password and your messages cross the LAN unencrypted. On any network you don't fully trust, bind to the Tailscale IP or use <a href="#reverse-proxy--tls-termination">Reverse Proxy &amp; TLS Termination</a>.</p>
+</blockquote>
 <h4 id="2-run-built-in-self-test">2. Run Built-In Self-Test</h4>
 <p>Verify timestamp conversion, typedstream parsing, and database bindings:</p>
 <pre><code class="language-bash">bluepill-server --selftest &lt;/dev/null
@@ -957,7 +965,7 @@ cat &lt;&lt; 'EOF_PLIST' &gt; ~/Library/LaunchAgents/com.nertwork.bluepill-serve
         &lt;string&gt;/opt/homebrew/bin/bluepill-server&lt;/string&gt;
         &lt;string&gt;serve&lt;/string&gt;
         &lt;string&gt;--port&lt;/string&gt;
-        &lt;string&gt;1234&lt;/string&gt;
+        &lt;string&gt;1235&lt;/string&gt;
         &lt;string&gt;--password&lt;/string&gt;
         &lt;string&gt;CHANGE_ME_TO_A_SECURE_TOKEN&lt;/string&gt;
     &lt;/array&gt;
@@ -1045,7 +1053,10 @@ EOF_PLIST
 <ul>
 <li>Connects over LAN, WireGuard, or Tailscale.</li>
 <li>Full two-way push event delivery via WebSockets.</li>
-<li>URL Format: <code>http://192.168.1.50:1235</code> or <code>https://bluepill.example.com</code>.</li>
+<li>URL Format: <code>http://192.168.1.50:1235</code> or <code>https://bluepill.example.com:443</code>.</li>
+<li>In <strong>⚙ Settings</strong>, a URL without a scheme uses <code>http://</code>, and an empty <strong>Port</strong> field uses <code>1235</code> for both <code>http://</code> and <code>https://</code>. A port typed into the URL (<code>host:8080</code>) moves into the Port field.</li>
+<li>The client sends the relay password over plain <code>http://</code> only to localhost, Tailscale (<code>100.64.0.0/10</code>, <code>fd7a:115c:a1e0::/48</code>, <code>*.ts.net</code>, or a custom-domain name that resolves only to devices on your tailnet, confirmed with <code>tailscale status</code>) and private LAN addresses (RFC 1918, link-local, IPv6 ULA, <code>*.local</code>). A public host needs <code>https://</code>, and Settings shows a warning when an <code>http://</code> URL would be refused.</li>
+<li><strong>Tailscale:</strong> if <code>tailscale</code> is installed and connected on the Linux client, Settings lists the online Macs on your tailnet, checks each for a relay on <code>:1235</code>, and fills in the URL with one click. If exactly one relay answers on first run, it's filled in for you. The relay must be started with <code>--host</code> (see <a href="#configuration--self-test">Configuration &amp; Self-Test</a>) to be reachable.</li>
 </ul>
 <h4 id="method-2-direct-ssh-transport-ssh">Method 2: Direct SSH Transport (<code>ssh://</code>)</h4>
 <ul>
@@ -1059,7 +1070,7 @@ EOF_PLIST
 <p>To expose your relay over HTTPS with public or private TLS certificates:</p>
 <h4 id="caddy-configuration-etccaddycaddyfile">Caddy Configuration (<code>/etc/caddy/Caddyfile</code>)</h4>
 <pre><code class="language-caddy">bluepill.example.com {
-    reverse_proxy 127.0.0.1:1234 {
+    reverse_proxy 127.0.0.1:1235 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
     }
@@ -1074,7 +1085,7 @@ EOF_PLIST
     ssl_certificate_key /etc/letsencrypt/live/bluepill.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:1234;
+        proxy_pass http://127.0.0.1:1235;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection &quot;upgrade&quot;;
@@ -1087,17 +1098,19 @@ EOF_PLIST
 </code></pre>
 <h4 id="tailscale-serve">Tailscale Serve</h4>
 <p>If using Tailscale on your Mac, terminate TLS effortlessly:</p>
-<pre><code class="language-bash">tailscale serve --bg 1234
+<pre><code class="language-bash">tailscale serve --bg 1235
 </code></pre>
+<h4 id="client-port-for-reverse-proxies">Client Port for Reverse Proxies</h4>
+<p>Caddy, Nginx, and Tailscale Serve all listen on <code>443</code>. In the Linux client's <strong>⚙ Settings</strong>, enter <code>https://&lt;your-host&gt;</code> and set <strong>Port</strong> to <code>443</code>. An empty Port field means <code>1235</code>. Saved <code>config.json</code> URLs are used exactly as written, so a saved <code>https://bluepill.example.com</code> keeps using <code>443</code>.</p>
 <hr />
 <h2 id="4-built-in-web-ui-operations-web">4. Built-In Web UI Operations (<code>/web</code>)</h2>
 <p>Every instance of <code>bluepill-server</code> includes an embedded, dark-slate Web client accessible at:</p>
-<pre><code class="language-text">http://&lt;relay-host&gt;:1234/web
+<pre><code class="language-text">http://&lt;relay-host&gt;:1235/web
 </code></pre>
 <h3 id="key-capabilities-in-the-web-ui">Key Capabilities in the Web UI:</h3>
 <ol>
 <li><strong>Authentication:</strong></li>
-<li>Enter your relay password in the top-right authorization input or pass it in the query string: <code>http://&lt;host&gt;:1234/web?password=YOUR_PASSWORD</code>.</li>
+<li>Enter your relay password in the top-right authorization input or pass it in the query string: <code>http://&lt;host&gt;:1235/web?password=YOUR_PASSWORD</code>.</li>
 <li>
 <p>Credentials are saved in browser <code>localStorage</code>.</p>
 </li>
@@ -1416,8 +1429,11 @@ sqlite3 ~/Library/Messages/chat.db &quot;PRAGMA wal_checkpoint(PASSIVE);&quot; &
 sudo pmset -c sleep 0
 sudo pmset -c disablesleep 1
 
-# Or run bluepill-server wrapped in caffeinate
-caffeinate -s bluepill-server serve --port 1234
+# Or run bluepill-server wrapped in caffeinate. Stop the Homebrew service first,
+# because it already holds port 1235, then start it again when you're done:
+brew services stop bluepill
+caffeinate -s bluepill-server serve --port 1235
+brew services start bluepill
 </code></pre>
 <h3 id="runbook-3-diagnosing-private-api-45670-unavailability">Runbook 3: Diagnosing Private API (:45670) Unavailability</h3>
 <p>If <code>/api/v1/server/info</code> reports <code>private_api: false</code>:

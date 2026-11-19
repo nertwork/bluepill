@@ -435,6 +435,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#1-prerequisites-on-macos">1. Prerequisites on macOS</a></li>
 <li><a href="#2-install-via-homebrew">2. Install via Homebrew</a></li>
 <li><a href="#3-verify-the-relay-built-in-web-ui">3. Verify the Relay &amp; Built-In Web UI</a></li>
+<li><a href="#4-connect-the-linux-client">4. Connect the Linux Client</a></li>
 </ul>
 </li>
 <li><a href="#option-b-legacy-bluebubbles-server-bluebubblesapp">Option B: Legacy BlueBubbles Server (BlueBubbles.app)</a></li>
@@ -443,6 +444,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 </ul>
 </div>
+
 
 
 
@@ -486,11 +488,16 @@ brew services start bluepill
 curl -s &quot;http://127.0.0.1:1235/api/v1/server/info&quot;
 </code></pre>
 <p>Open <strong><code>http://127.0.0.1:1235/web</code></strong> in any browser (or <code>https://your-relay.example.com/web</code> behind a TLS reverse proxy / Tailscale Serve) to use the built-in <strong>BluePill Web UI</strong> without installing any client software.</p>
+<h3 id="4-connect-the-linux-client">4. Connect the Linux Client</h3>
+<p><code>bluepill-server</code> listens on <code>127.0.0.1</code> unless it's started with <code>--host</code> (e.g. <code>--host 0.0.0.0</code> or the Mac's Tailscale IP). Once the relay is reachable from Linux:
+1. Launch <code>bluepill</code> and press <strong><code>Ctrl+,</code></strong>. If Tailscale is running, your relay Mac shows up under <strong>Macs on your Tailscale network</strong>, and a single relay is filled in automatically.
+2. Otherwise, type the Mac's host name (e.g. <code>mac-relay.example.com</code>). No scheme means <code>http://</code>, and an empty <strong>Port</strong> means <code>1235</code>.
+3. Enter the relay password and click <strong>Save &amp; Connect</strong>.</p>
 <hr />
 <h2 id="option-b-legacy-bluebubbles-server-bluebubblesapp">Option B: Legacy BlueBubbles Server (<code>BlueBubbles.app</code>)</h2>
 <p>If you already run <strong>BlueBubbles Server (<code>v1.9.x</code>)</strong> on macOS:
 1. Launch <code>BluePill</code> on Linux (<code>bluepill</code>) and press <strong><code>Ctrl+,</code></strong> (or click <strong><code>⚙ Server</code></strong> in the top bar).
-2. Enter your <strong>Primary Server URL</strong> (e.g., <code>https://bluebubbles.example.com</code>), optional <strong>Failover Server URL</strong>, and <strong>API Password</strong>.
+2. Enter your <strong>Primary Server URL</strong> (e.g., <code>https://bluebubbles.example.com</code>) and its <strong>Port</strong>: <code>443</code> behind a TLS proxy, or BlueBubbles' own port (default <code>1234</code>). An empty Port field means <code>1235</code>, the BluePill relay default. Then enter the optional <strong>Failover Server URL</strong> (with its port inline) and your <strong>API Password</strong>.
 3. Click <strong>Save &amp; Connect</strong>. <code>BluePill</code> automatically detects BlueBubbles Server <code>v1.9.x</code>, connects via Socket.IO v4 push + REST delta polling, and reconciles read/unread states via parameterized SQL <code>where</code> queries.</p>
 <hr />
 <h2 id="platform-compatibility-matrix">Platform Compatibility Matrix</h2>

@@ -57,7 +57,7 @@ flowchart TD
     end
 
     subgraph Browser["Universal Web Access"]
-        WEB["BluePill Embedded Web UI\n(http://<relay>:1234/web)"]
+        WEB["BluePill Embedded Web UI\n(http://<relay>:1235/web)"]
     end
 
     subgraph Mac["macOS Relay Host (Intel / Apple Silicon / KVM)"]
@@ -112,7 +112,7 @@ flowchart TD
 
 4. **Embedded Web UI (`/web`):**
    - Built directly into `bluepill-server` with zero external dependencies.
-   - Provides full browser access at `http://<relay-host>:1234/web` on any desktop, laptop, tablet, or phone.
+   - Provides full browser access at `http://<relay-host>:1235/web` on any desktop, laptop, tablet, or phone.
    - Features inline 28-bar voice memo waveform players, browser audio recording (`🎙`), Expressive Send pickers, Send Later scheduled messaging, attachment drag-and-drop, global search, Find My tracking, and live server logs.
 
 5. **Direct SSH Transport (`ssh://`):**
@@ -439,7 +439,7 @@ mkdir -p ~/.config/bluepill
 cat << 'EOF_CONFIG' > ~/.config/bluepill/server.json
 {
   "host": "0.0.0.0",
-  "port": 1234,
+  "port": 1235,
   "password": "CHANGE_ME_TO_A_SECURE_TOKEN",
   "helperPort": 45670,
   "enableBackgroundDaemons": true
@@ -447,6 +447,12 @@ cat << 'EOF_CONFIG' > ~/.config/bluepill/server.json
 EOF_CONFIG
 chmod 600 ~/.config/bluepill/server.json
 ```
+
+> [!NOTE]
+> `bluepill-server` reads `password` and the iCloud module toggles (`enableNotes`, `enableCalendar`, `enablePhotos`) from `server.json`, but it takes its **listen address and port from the command line** (`--host` / `--port`, or `BLUEPILL_HOST` / `BLUEPILL_PORT`). Without `--host` it listens on `127.0.0.1` only, so Linux clients on your LAN or tailnet can't reach it. To accept remote connections, start it with `--host <the Mac's Tailscale IP>` (recommended; WireGuard-encrypted) or `--host 0.0.0.0`. The Homebrew service listens on port `1235`, which is the port the Linux client uses when you don't enter one.
+
+> [!WARNING]
+> The relay speaks plain HTTP. With `--host 0.0.0.0`, the relay password and your messages cross the LAN unencrypted. On any network you don't fully trust, bind to the Tailscale IP or use [Reverse Proxy & TLS Termination](#reverse-proxy--tls-termination).
 
 #### 2. Run Built-In Self-Test
 Verify timestamp conversion, typedstream parsing, and database bindings:
@@ -488,7 +494,7 @@ cat << 'EOF_PLIST' > ~/Library/LaunchAgents/com.nertwork.bluepill-server.plist
         <string>/opt/homebrew/bin/bluepill-server</string>
         <string>serve</string>
         <string>--port</string>
-        <string>1234</string>
+        <string>1235</string>
         <string>--password</string>
         <string>CHANGE_ME_TO_A_SECURE_TOKEN</string>
     </array>
@@ -547,7 +553,10 @@ BluePill supports two primary connection methods between Linux workstations and 
 #### Method 1: HTTP/REST + Socket.IO v4 (Recommended for LAN / VPN)
 - Connects over LAN, WireGuard, or Tailscale.
 - Full two-way push event delivery via WebSockets.
-- URL Format: `http://192.168.1.50:1235` or `https://bluepill.example.com`.
+- URL Format: `http://192.168.1.50:1235` or `https://bluepill.example.com:443`.
+- In **⚙ Settings**, a URL without a scheme uses `http://`, and an empty **Port** field uses `1235` for both `http://` and `https://`. A port typed into the URL (`host:8080`) moves into the Port field.
+- The client sends the relay password over plain `http://` only to localhost, Tailscale (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`, `*.ts.net`, or a custom-domain name that resolves only to devices on your tailnet, confirmed with `tailscale status`) and private LAN addresses (RFC 1918, link-local, IPv6 ULA, `*.local`). A public host needs `https://`, and Settings shows a warning when an `http://` URL would be refused.
+- **Tailscale:** if `tailscale` is installed and connected on the Linux client, Settings lists the online Macs on your tailnet, checks each for a relay on `:1235`, and fills in the URL with one click. If exactly one relay answers on first run, it's filled in for you. The relay must be started with `--host` (see [Configuration & Self-Test](#configuration--self-test)) to be reachable.
 
 #### Method 2: Direct SSH Transport (`ssh://`)
 - Runs entirely over an encrypted OpenSSH session.
@@ -564,7 +573,7 @@ To expose your relay over HTTPS with public or private TLS certificates:
 #### Caddy Configuration (`/etc/caddy/Caddyfile`)
 ```caddy
 bluepill.example.com {
-    reverse_proxy 127.0.0.1:1234 {
+    reverse_proxy 127.0.0.1:1235 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
     }
@@ -581,7 +590,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/bluepill.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:1234;
+        proxy_pass http://127.0.0.1:1235;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -596,8 +605,11 @@ server {
 #### Tailscale Serve
 If using Tailscale on your Mac, terminate TLS effortlessly:
 ```bash
-tailscale serve --bg 1234
+tailscale serve --bg 1235
 ```
+
+#### Client Port for Reverse Proxies
+Caddy, Nginx, and Tailscale Serve all listen on `443`. In the Linux client's **⚙ Settings**, enter `https://<your-host>` and set **Port** to `443`. An empty Port field means `1235`. Saved `config.json` URLs are used exactly as written, so a saved `https://bluepill.example.com` keeps using `443`.
 
 ---
 
@@ -605,13 +617,13 @@ tailscale serve --bg 1234
 
 Every instance of `bluepill-server` includes an embedded, dark-slate Web client accessible at:
 ```text
-http://<relay-host>:1234/web
+http://<relay-host>:1235/web
 ```
 
 ### Key Capabilities in the Web UI:
 
 1. **Authentication:**
-   - Enter your relay password in the top-right authorization input or pass it in the query string: `http://<host>:1234/web?password=YOUR_PASSWORD`.
+   - Enter your relay password in the top-right authorization input or pass it in the query string: `http://<host>:1235/web?password=YOUR_PASSWORD`.
    - Credentials are saved in browser `localStorage`.
 
 2. **Pinned Conversations Avatar Bar:**
@@ -707,8 +719,11 @@ If the macOS host enters deep sleep and suspends network daemons:
 sudo pmset -c sleep 0
 sudo pmset -c disablesleep 1
 
-# Or run bluepill-server wrapped in caffeinate
-caffeinate -s bluepill-server serve --port 1234
+# Or run bluepill-server wrapped in caffeinate. Stop the Homebrew service first,
+# because it already holds port 1235, then start it again when you're done:
+brew services stop bluepill
+caffeinate -s bluepill-server serve --port 1235
+brew services start bluepill
 ```
 
 ### Runbook 3: Diagnosing Private API (:45670) Unavailability

@@ -98,7 +98,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     cat << EOF_CFG > "${CONFIG_FILE}"
 {
   "host": "0.0.0.0",
-  "port": 1234,
+  "port": 1235,
   "password": "${GENERATED_KEY}",
   "helperPort": 45670,
   "enableBackgroundDaemons": true
@@ -110,6 +110,10 @@ else
     echo "Configuration already exists at ${CONFIG_FILE}"
 fi
 ```
+
+> **Note:** `bluepill-server` reads `password` and the iCloud module toggles (`enableNotes`, `enableCalendar`, `enablePhotos`) from `server.json`, but **not** `host`/`port`. Those come from `--host` / `--port` (or `BLUEPILL_HOST` / `BLUEPILL_PORT`), and without `--host` the relay listens on `127.0.0.1` only. For remote Linux clients, set `BLUEPILL_BIND_HOST` to the Mac's Tailscale IP (`tailscale ip -4`), which keeps traffic WireGuard-encrypted.
+>
+> **Security:** the relay speaks plain HTTP. Binding to `0.0.0.0` sends the relay password across your LAN in cleartext. On networks you don't fully trust, bind to the Tailscale IP or put a TLS reverse proxy in front (see [Reverse Proxy & TLS Termination](INSTALLATION_AND_OPERATIONS_GUIDE.md#reverse-proxy--tls-termination)).
 
 ### Step 2.4: Execute Built-In Self-Test
 Verify that typedstream serialization and database engines pass all assertions:
@@ -123,8 +127,9 @@ Configure automatic startup on user login:
 
 ```bash
 PLIST_PATH="${HOME}/Library/LaunchAgents/com.nertwork.bluepill-server.plist"
+BIND_HOST="${BLUEPILL_BIND_HOST:-127.0.0.1}"   # see the note above
 BINARY_PATH="$(which bluepill-server)"
-SERVER_PORT=$(jq -r '.port // 1234' "${CONFIG_FILE}")
+SERVER_PORT=$(jq -r '.port // 1235' "${CONFIG_FILE}")
 SERVER_PWD=$(jq -r '.password // ""' "${CONFIG_FILE}")
 
 mkdir -p "${HOME}/Library/LaunchAgents"
@@ -139,6 +144,8 @@ cat << EOF_PL > "${PLIST_PATH}"
     <array>
         <string>${BINARY_PATH}</string>
         <string>serve</string>
+        <string>--host</string>
+        <string>${BIND_HOST}</string>
         <string>--port</string>
         <string>${SERVER_PORT}</string>
         <string>--password</string>
@@ -166,7 +173,9 @@ timeout 10s launchctl bootstrap "gui/$(id -u)" "${PLIST_PATH}" </dev/null
 sleep 2
 
 # Verify local REST heartbeat
-timeout 5s curl -s -f "http://127.0.0.1:${SERVER_PORT}/api/v1/ping?password=${SERVER_PWD}" </dev/null
+# Verify against the bound address (0.0.0.0 is checked via loopback)
+CHECK_HOST="${BIND_HOST/#0.0.0.0/127.0.0.1}"
+timeout 5s curl -s -f "http://${CHECK_HOST}:${SERVER_PORT}/api/v1/ping?password=${SERVER_PWD}" </dev/null
 ```
 
 ---
@@ -217,7 +226,14 @@ mkdir -p "${CLIENT_CONFIG_DIR}"
 chmod 700 "${CLIENT_CONFIG_DIR}"
 
 CLIENT_CONFIG="${CLIENT_CONFIG_DIR}/config.json"
-RELAY_URL="http://127.0.0.1:1234" # Or ssh://user@mac-host / https://relay.example.com
+# Point at the port the relay actually listens on, i.e. the --port its service passes
+# (the Phase 2 LaunchAgent uses server.json's "port"; the Homebrew service uses 1235;
+# bluepill-server itself never reads "port" from server.json; check with
+# `lsof -iTCP -sTCP:LISTEN -P | grep -i python` on the Mac),
+# on an address this machine can reach: the Mac's bind
+# address, or, if it binds 0.0.0.0, the Mac's Tailscale/LAN IP or hostname (never 0.0.0.0).
+# Or ssh://user@mac-host / https://relay.example.com:443
+RELAY_URL="http://127.0.0.1:1235"
 RELAY_PWD="CHANGE_ME_TO_A_SECURE_TOKEN"
 
 cat << EOF_CLI > "${CLIENT_CONFIG}"
@@ -279,13 +295,17 @@ fi
 Run this non-interactive verification script to validate complete connectivity across all components:
 
 ```bash
-RELAY_HOST="127.0.0.1:1234" # Or your configured relay address
+RELAY_URL="http://127.0.0.1:1235" # Same value as RELAY_URL in Step 3.2 (scheme included)
 RELAY_PWD="CHANGE_ME_TO_A_SECURE_TOKEN"
+RELAY_ADDR="${RELAY_URL%/}"
+# These HTTP checks can't test an ssh:// relay: for SSH mode, run them on the Mac
+# (e.g. via `ssh user@mac-host`) against the relay's bound address and port:
+# http://<BIND_HOST>:<port>, or http://127.0.0.1:<port> if it binds 127.0.0.1 or 0.0.0.0.
 
 echo "=== BluePill End-to-End Validation ==="
 
 # 1. Ping Check
-PING_RESP=$(timeout 5s curl -s -f "http://${RELAY_HOST}/api/v1/ping?password=${RELAY_PWD}" </dev/null || echo "FAILED")
+PING_RESP=$(timeout 5s curl -s -f "${RELAY_ADDR}/api/v1/ping?password=${RELAY_PWD}" </dev/null || echo "FAILED")
 if [[ "$PING_RESP" == *"pong"* ]]; then
     echo "[✓] REST Ping: OK"
 else
@@ -293,13 +313,13 @@ else
 fi
 
 # 2. Server Info & Private API Check
-INFO_RESP=$(timeout 5s curl -s -f "http://${RELAY_HOST}/api/v1/server/info?password=${RELAY_PWD}" </dev/null || echo "{}")
+INFO_RESP=$(timeout 5s curl -s -f "${RELAY_ADDR}/api/v1/server/info?password=${RELAY_PWD}" </dev/null || echo "{}")
 OS_VER=$(echo "$INFO_RESP" | jq -r '.data.os_version // "Unknown"')
 PRIV_API=$(echo "$INFO_RESP" | jq -r '.data.private_api // false')
 echo "[✓] Server OS: ${OS_VER}, Private API Active: ${PRIV_API}"
 
 # 3. Web UI Accessibility Check
-WEB_CODE=$(timeout 5s curl -s -o /dev/null -w "%{http_code}" "http://${RELAY_HOST}/web" </dev/null || echo "000")
+WEB_CODE=$(timeout 5s curl -s -o /dev/null -w "%{http_code}" "${RELAY_ADDR}/web" </dev/null || echo "000")
 if [[ "$WEB_CODE" == "200" ]]; then
     echo "[✓] Embedded Web UI: OK (HTTP 200)"
 else
@@ -307,7 +327,7 @@ else
 fi
 
 # 4. Chat Query Check
-CHAT_RESP=$(timeout 5s curl -s -f -X POST "http://${RELAY_HOST}/api/v1/chat/query?password=${RELAY_PWD}" \
+CHAT_RESP=$(timeout 5s curl -s -f -X POST "${RELAY_ADDR}/api/v1/chat/query?password=${RELAY_PWD}" \
     -H "Content-Type: application/json" -d '{"limit": 5, "offset": 0}' </dev/null || echo "FAILED")
 if [[ "$CHAT_RESP" == *"\"status\":200"* ]] || [[ "$CHAT_RESP" == *"\"data\":"* ]]; then
     echo "[✓] Chat Database Query: OK"
