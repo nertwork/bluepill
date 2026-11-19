@@ -75,6 +75,7 @@ ApplicationWindow {
     property string tapbackEmojiCategory: "All"
     property real tapbackEmojiPopupX: 0
     property real tapbackEmojiPopupY: 0
+    property Item previousFocusBeforeTapbackPicker: null
     property string settingsActiveTab: "all"
     // Shows on hover when backend.hoverMessageActions is enabled (default true), and always when pinned via right-click.
     readonly property string activeActionMessageGuid: pinnedActionMessageGuid !== ""
@@ -83,6 +84,9 @@ ApplicationWindow {
 
     function openTapbackEmojiPicker(msgGuid, xPos, yPos) {
         if (!msgGuid || msgGuid.length === 0) return
+        if (!root.showTapbackEmojiPicker && root.activeFocusItem && root.activeFocusItem !== tapbackEmojiSearchField) {
+            root.previousFocusBeforeTapbackPicker = root.activeFocusItem
+        }
         root.pinnedActionMessageGuid = msgGuid
         root.tapbackEmojiTargetGuid = msgGuid
         root.tapbackEmojiQuery = ""
@@ -90,12 +94,29 @@ ApplicationWindow {
         root.tapbackEmojiPopupX = Math.max(12, Math.min(xPos || 120, root.width - 360))
         root.tapbackEmojiPopupY = Math.max(56, Math.min(yPos || 120, root.height - 300))
         root.showTapbackEmojiPicker = true
+        Qt.callLater(function() {
+            if (root.showTapbackEmojiPicker) {
+                tapbackEmojiSearchField.forceActiveFocus()
+            }
+        })
     }
 
     function closeTapbackEmojiPicker() {
+        var wasOpen = root.showTapbackEmojiPicker
         root.showTapbackEmojiPicker = false
         root.tapbackEmojiTargetGuid = ""
         root.tapbackEmojiQuery = ""
+        if (wasOpen && root.previousFocusBeforeTapbackPicker) {
+            var prev = root.previousFocusBeforeTapbackPicker
+            root.previousFocusBeforeTapbackPicker = null
+            Qt.callLater(function() {
+                if (prev && prev.visible) {
+                    prev.forceActiveFocus()
+                }
+            })
+        } else {
+            root.previousFocusBeforeTapbackPicker = null
+        }
     }
 
     function selectTapbackCustomEmoji(emoji) {
@@ -1630,7 +1651,8 @@ ApplicationWindow {
                                     id: topStatusPillText
                                     objectName: "topStatusPillText"
                                     text: {
-                                        var ver = Qt.application.version ? ("v" + Qt.application.version) : "v1.2.3"
+                                        var statusMatch = (backend.serverStatus || "").match(/v\d+\.\d+(?:\.\d+)?/i)
+                                        var ver = statusMatch ? statusMatch[0] : (Qt.application.version ? ("v" + Qt.application.version) : "v1.2.3")
                                         var st = backend.connected ? (i18n.tr("Connected") + " " + ver) : i18n.tr("Disconnected")
                                         var host = (backend.serverUrl || "").replace(/^https?:\/\//i, "").replace(/^ssh:\/\//i, "").replace(/\/.*$/, "")
                                         return host.length > 0 ? (st + " · " + host) : st

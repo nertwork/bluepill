@@ -8952,7 +8952,7 @@ void Backend::sendReaction(const QString &chatGuid, const QString &messageGuid, 
         reactionKey = trimmedReaction;
     }
 
-    bool isRemoval = false;
+    bool isRemoval = trimmedReaction.startsWith(QLatin1Char('-')) && trimmedReaction.size() > 1;
     const QString mapped = mapReactionEmoji(reactionKey, QString(), &isRemoval);
     const QString emoji = mapped.isEmpty()
         ? (trimmedReaction.startsWith(QLatin1Char('-')) ? trimmedReaction.mid(1).trimmed() : trimmedReaction)
@@ -8967,7 +8967,6 @@ void Backend::sendReaction(const QString &chatGuid, const QString &messageGuid, 
             for (int j = 0; j < pills.size(); ++j) {
                 QVariantMap p = pills[j].toMap();
                 if (p.value(QStringLiteral("emoji")).toString() == emoji) {
-                    p.insert(QStringLiteral("fromMe"), true);
                     QStringList sList = p.value(QStringLiteral("senderList")).toStringList();
                     if (sList.isEmpty()) {
                         const QString existingSenders = p.value(QStringLiteral("senders")).toString();
@@ -8976,20 +8975,37 @@ void Backend::sendReaction(const QString &chatGuid, const QString &messageGuid, 
                             if (!trimmed.isEmpty()) sList.append(trimmed);
                         }
                     }
-                    if (!sList.contains(QStringLiteral("You"))) {
-                        sList.append(QStringLiteral("You"));
-                        p.insert(QStringLiteral("count"), qMax(p.value(QStringLiteral("count")).toInt() + 1, static_cast<int>(sList.size())));
+                    if (isRemoval) {
+                        sList.removeAll(QStringLiteral("You"));
+                        const int nextCount = qMax(0, p.value(QStringLiteral("count")).toInt() - 1);
+                        if (sList.isEmpty() || nextCount <= 0) {
+                            pills.removeAt(j);
+                        } else {
+                            p.insert(QStringLiteral("fromMe"), false);
+                            p.insert(QStringLiteral("count"), qMax(nextCount, static_cast<int>(sList.size())));
+                            const QString joined = sList.join(QStringLiteral(", "));
+                            p.insert(QStringLiteral("senders"), joined);
+                            p.insert(QStringLiteral("senderList"), QVariant::fromValue(sList));
+                            p.insert(QStringLiteral("tooltipText"), emoji + QStringLiteral(" ") + joined);
+                            pills[j] = p;
+                        }
+                    } else {
+                        p.insert(QStringLiteral("fromMe"), true);
+                        if (!sList.contains(QStringLiteral("You"))) {
+                            sList.append(QStringLiteral("You"));
+                            p.insert(QStringLiteral("count"), qMax(p.value(QStringLiteral("count")).toInt() + 1, static_cast<int>(sList.size())));
+                        }
+                        const QString joined = sList.join(QStringLiteral(", "));
+                        p.insert(QStringLiteral("senders"), joined);
+                        p.insert(QStringLiteral("senderList"), QVariant::fromValue(sList));
+                        p.insert(QStringLiteral("tooltipText"), emoji + QStringLiteral(" ") + joined);
+                        pills[j] = p;
                     }
-                    const QString joined = sList.join(QStringLiteral(", "));
-                    p.insert(QStringLiteral("senders"), joined);
-                    p.insert(QStringLiteral("senderList"), QVariant::fromValue(sList));
-                    p.insert(QStringLiteral("tooltipText"), emoji + QStringLiteral(" ") + joined);
-                    pills[j] = p;
                     updatedExisting = true;
                     break;
                 }
             }
-            if (!updatedExisting) {
+            if (!updatedExisting && !isRemoval) {
                 const QStringList sList{QStringLiteral("You")};
                 QVariantMap newPill;
                 newPill.insert(QStringLiteral("emoji"), emoji);

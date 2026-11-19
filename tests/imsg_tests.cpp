@@ -10610,6 +10610,13 @@ private slots:
         }
         QVERIFY(foundFireEmoji);
 
+        // Verify optimistic removal via sendReaction("-🔥") removes the pill
+        b.sendReaction(activeChatGuid, targetMsgGuid, QStringLiteral("-🔥"));
+        const QVariantList afterRemoveReactions = b.messages().first().toMap().value(QStringLiteral("reactions")).toList();
+        for (const QVariant &rv : afterRemoveReactions) {
+            QVERIFY(rv.toMap().value(QStringLiteral("emoji")).toString() != QStringLiteral("🔥"));
+        }
+
         // Verify buildMessageListFromApi folds associatedMessageType 2006 + associatedMessageEmoji "🚀" and removes on 3006
         QJsonObject parentObj{{QStringLiteral("guid"), QStringLiteral("m-custom-parent")},
                               {QStringLiteral("text"), QStringLiteral("Launch ready")},
