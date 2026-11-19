@@ -446,6 +446,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
@@ -496,6 +497,7 @@ or Direct SSH&quot;| RELAY
 <ul>
 <li><strong>Zero-Latency Startup (<code>messages_cache.json</code>):</strong> Loads up to 500 cached messages per conversation from disk before the first network packet is sent.</li>
 <li><strong>Isolated Network Pools (<code>m_nam</code>, <code>m_sendNam</code>, <code>m_mediaNam</code>, <code>m_socketNam</code>):</strong> User mutations (<code>sendMessage</code>, <code>sendReaction</code>, <code>markChatRead</code>) execute on a dedicated high-priority <code>QNetworkAccessManager</code> (<code>m_sendNam</code>) so background image downloads on <code>m_mediaNam</code> (<code>?force=false</code>, max 2 concurrent) can never stall outbound messages.</li>
+<li><strong>Service Resolution (iMessage / RCS / SMS):</strong> macOS 26 stores every chat GUID as <code>any;-;&lt;handle&gt;</code>, so the GUID prefix can't be trusted. <code>Backend::resolveChatService()</code> checks, in order: a legacy <code>iMessage;</code>/<code>RCS;</code>/<code>SMS;</code> prefix, a chat-level <code>serviceName</code>, the newest message's <code>service</code> (or <code>handle.service</code>), and finally participant handle services. It returns an empty string when the service is still unknown. As messages are cached, the newest one updates the chat's service. The UI draws green bubbles and pills only for a known <code>SMS</code>/<code>RCS</code> service, so iMessage threads never flash green while loading.</li>
 <li><strong>Magic-Byte (<code>ftyp</code>) HEIC/AVIF Transcoding:</strong> Inspects the first 16 bytes of every downloaded attachment for ISO BMFF <code>ftyp</code> headers and converts disguised <code>.heic.jpeg</code> / <code>.avif</code> files to standard JPEG (<code>\xFF\xD8\xFF</code>) asynchronously.</li>
 </ul>
 <h2 id="2-headless-macos-relay-serverbluepill_serverpy-built-in-web-ui">2. Headless macOS Relay (<code>server/bluepill_server.py</code>) &amp; Built-In Web UI</h2>

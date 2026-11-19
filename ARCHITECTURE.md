@@ -40,6 +40,7 @@ or Direct SSH"| RELAY
 ## 1. Linux Desktop Client (`src/backend.{h,cpp}`, `src/Main.qml`)
 - **Zero-Latency Startup (`messages_cache.json`):** Loads up to 500 cached messages per conversation from disk before the first network packet is sent.
 - **Isolated Network Pools (`m_nam`, `m_sendNam`, `m_mediaNam`, `m_socketNam`):** User mutations (`sendMessage`, `sendReaction`, `markChatRead`) execute on a dedicated high-priority `QNetworkAccessManager` (`m_sendNam`) so background image downloads on `m_mediaNam` (`?force=false`, max 2 concurrent) can never stall outbound messages.
+- **Service Resolution (iMessage / RCS / SMS):** macOS 26 stores every chat GUID as `any;-;<handle>`, so the GUID prefix can't be trusted. `Backend::resolveChatService()` checks, in order: a legacy `iMessage;`/`RCS;`/`SMS;` prefix, a chat-level `serviceName`, the newest message's `service` (or `handle.service`), and finally participant handle services. It returns an empty string when the service is still unknown. As messages are cached, the newest one updates the chat's service. The UI draws green bubbles and pills only for a known `SMS`/`RCS` service, so iMessage threads never flash green while loading.
 - **Magic-Byte (`ftyp`) HEIC/AVIF Transcoding:** Inspects the first 16 bytes of every downloaded attachment for ISO BMFF `ftyp` headers and converts disguised `.heic.jpeg` / `.avif` files to standard JPEG (`\xFF\xD8\xFF`) asynchronously.
 
 ## 2. Headless macOS Relay (`server/bluepill_server.py`) & Built-In Web UI
