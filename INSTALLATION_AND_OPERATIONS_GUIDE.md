@@ -101,7 +101,7 @@ flowchart TD
 
 3. **IMCore Private API Helper (`:45670`):**
    - Lightweight companion agent listening on `127.0.0.1:45670`.
-   - Interacts with macOS internal `IMCore` frameworks to unlock advanced iMessage capabilities:
+   - Interacts with macOS `IMCore` frameworks to unlock advanced iMessage capabilities:
      - Real-time Tapback reactions (Love, Like, Dislike, Laugh, Emphasize, Question).
      - Native inline thread replies and parent message association.
      - Message editing and unsend capabilities (macOS Ventura+).
@@ -547,7 +547,7 @@ BluePill supports two primary connection methods between Linux workstations and 
 #### Method 1: HTTP/REST + Socket.IO v4 (Recommended for LAN / VPN)
 - Connects over LAN, WireGuard, or Tailscale.
 - Full two-way push event delivery via WebSockets.
-- URL Format: `http://192.168.1.50:1234` or `https://bluepill.internal.net`.
+- URL Format: `http://192.168.1.50:1235` or `https://bluepill.example.com`.
 
 #### Method 2: Direct SSH Transport (`ssh://`)
 - Runs entirely over an encrypted OpenSSH session.

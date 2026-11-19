@@ -432,6 +432,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <ul>
 <li><a href="#bluepill-configuration-transports-cli-reference">BluePill Configuration, Transports &amp; CLI Reference</a><ul>
 <li><a href="#1-configuration-file-auto-migration">1. Configuration File &amp; Auto-Migration</a><ul>
+<li><a href="#apple-account-relay-local-privacy">Apple Account, Relay &amp; Local Privacy</a></li>
 <li><a href="#environment-variables">Environment Variables</a></li>
 </ul>
 </li>
@@ -454,6 +455,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
@@ -464,11 +466,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
-                </div>
-                <a href="index.html">← Home</a>
-            </div>
-
-            <h1 id="bluepill-configuration-transports-cli-reference">BluePill Configuration, Transports &amp; CLI Reference</h1>
+                <h1 id="bluepill-configuration-transports-cli-reference">BluePill Configuration, Transports &amp; CLI Reference</h1>
 <h2 id="1-configuration-file-auto-migration">1. Configuration File &amp; Auto-Migration</h2>
 <p><code>BluePill</code> stores its server configuration in <code>~/.config/bluepill/config.json</code> with strict <code>0600</code> (<code>-rw-------</code>) owner-only permissions.
 - <strong>Automatic Migration from <code>imsg</code>:</strong> If <code>~/.config/bluepill/config.json</code> does not exist on first launch and <code>~/.config/imsg/config.json</code> is present, <code>BluePill</code> automatically migrates your configuration and credentials seamlessly.
@@ -485,6 +483,12 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
   &quot;tlsVerified&quot;: true
 }
 </code></pre>
+<h3 id="apple-account-relay-local-privacy">Apple Account, Relay &amp; Local Privacy</h3>
+<ul>
+<li><strong>macOS Relay Endpoint:</strong> On your Mac signed into <code>Messages.app</code> with your Apple Account, run <code>bluepill-server init</code> and <code>brew services start bluepill</code>. Your relay listens locally on port <code>1235</code> (or custom <code>--port</code>) and stores its configuration in <code>~/.config/bluepill/server.json</code> (<code>0600</code>).</li>
+<li><strong>Local Database Privacy:</strong> <code>bluepill-server</code> accesses <code>~/Library/Messages/chat.db</code> and <code>AddressBook</code> strictly in read-only SQLite WAL mode (<code>?mode=ro</code>). On Linux, your desktop client caches recent threads locally in <code>~/.cache/imsg/</code> and optionally stores your relay password in the Freedesktop Secret Service keyring (<code>libsecret</code> / <code>secret-tool</code>).</li>
+<li><strong>Transport Security:</strong> All HTTPS and Socket.IO connections enforce <code>QSslSocket::VerifyPeer</code>, and Direct SSH (<code>ssh://user@mac-host</code>) tunnels all traffic over standard OpenSSH with zero open ports.</li>
+</ul>
 <h3 id="environment-variables">Environment Variables</h3>
 <table>
 <thead>

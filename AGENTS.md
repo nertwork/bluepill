@@ -21,10 +21,9 @@ The agent MUST follow the non-interactive workflows detailed below.
      - Inspection / Status: `timeout 10s ...`
      - Network / Downloads: `timeout 60s curl ...`
      - Compilation / Builds: `timeout 300s make ...`
-3. **Zero PII & Credential Masking:**
-   - Never output real personal phone numbers, names, or real email addresses to stdout.
-   - Use standardized test handles: `+15555550100`, `user@example.com`.
-   - Never expose live tokens or passwords. Output `[REDACTED]` or placeholders (`CHANGE_ME_TO_A_SECURE_TOKEN`).
+3. **Privacy & Credential Protection:**
+   - Keep personal contact details private in agent transcripts and logs; use example placeholders (`+15555550100`, `user@example.com`) when demonstrating CLI commands or writing tests.
+   - Never echo live passwords or API tokens to stdout; mask sensitive values or use placeholders (`CHANGE_ME_TO_A_SECURE_TOKEN`).
 4. **Idempotence & Strict Permissions:**
    - Verify before writing configuration files.
    - Enforce `0600` permissions on files containing passwords (`~/.config/bluepill/*.json`).

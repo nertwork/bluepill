@@ -451,6 +451,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
@@ -461,11 +462,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
-                </div>
-                <a href="index.html">← Home</a>
-            </div>
-
-            <h1 id="bluepill-autonomous-agent-operations-installation-guide">🤖 BluePill Autonomous Agent Operations &amp; Installation Guide</h1>
+                <h1 id="bluepill-autonomous-agent-operations-installation-guide">🤖 BluePill Autonomous Agent Operations &amp; Installation Guide</h1>
 <p>This file provides direct operational instructions for autonomous AI coding agents (<strong>Claude Code</strong>, <strong>OpenCode</strong>, <strong>Gemini CLI</strong>, <strong>Codex</strong>, <strong>Cursor</strong>, <strong>Antigravity</strong>) interacting with the <code>bluepill</code> repository.</p>
 <p>When an end-user prompts an agent with:</p>
 <blockquote>
@@ -487,10 +484,9 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li>Compilation / Builds: <code>timeout 300s make ...</code></li>
 </ul>
 </li>
-<li><strong>Zero PII &amp; Credential Masking:</strong></li>
-<li>Never output real personal phone numbers, names, or real email addresses to stdout.</li>
-<li>Use standardized test handles: <code>+15555550100</code>, <code>user@example.com</code>.</li>
-<li>Never expose live tokens or passwords. Output <code>[REDACTED]</code> or placeholders (<code>CHANGE_ME_TO_A_SECURE_TOKEN</code>).</li>
+<li><strong>Privacy &amp; Credential Protection:</strong></li>
+<li>Keep personal contact details private in agent transcripts and logs; use example placeholders (<code>+15555550100</code>, <code>user@example.com</code>) when demonstrating CLI commands or writing tests.</li>
+<li>Never echo live passwords or API tokens to stdout; mask sensitive values or use placeholders (<code>CHANGE_ME_TO_A_SECURE_TOKEN</code>).</li>
 <li><strong>Idempotence &amp; Strict Permissions:</strong></li>
 <li>Verify before writing configuration files.</li>
 <li>Enforce <code>0600</code> permissions on files containing passwords (<code>~/.config/bluepill/*.json</code>).</li>
