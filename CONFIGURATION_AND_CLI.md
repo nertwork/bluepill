@@ -14,7 +14,7 @@
   - **Macs on your Tailscale network:** If `tailscale` is installed and connected, Settings lists the online macOS peers on your tailnet, checks each for a relay on `:1235`, and fills in the URL with one click. If exactly one relay answers on first run, it's filled in for you. A Mac shown as *No relay on :1235* may be running `bluepill-server` without `--host`, so it only listens on `127.0.0.1`.
   - **Failover Server URL (Optional):** `https://backup-relay.example.com:443`. Include the port inline; without one, `1235` is used.
   - **API Password / Key:** Your relay password/token
-  - **Settings Status & Version Banner + Section Tabs (`All`, `Server & Sync`, `UI & Appearance`, `Notifications & Audio`):**
+  - **Settings Status & Version Banner + Section Tabs (`Server & Sync`, `UI & Appearance`, `Notifications & Audio`):**
     - Displays the active **BluePill Client Version** (`v1.2.3`), live **Relay Status & Version**, and **Connected Endpoint** at the top of Settings.
     - **UI & Appearance Preferences** (persisted in `~/.config/bluepill/state.json`):
       - `showTopBarStatusPill` (default `false`): Show or hide the compact connection & version status pill in the top bar next to the BluePill badge.
