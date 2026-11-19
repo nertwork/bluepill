@@ -412,7 +412,7 @@ class BluePillEngine:
         self._helper_clients: List[socket.socket] = []
         self._helper_lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._last_max_rowid: int = 0
+        self._last_max_rowid: Optional[int] = None
         self._detected_account: str = ""
         self.temp_guid_by_guid: Dict[str, str] = {}
         self._outbound_attachments: Dict[str, Tuple[str, str]] = {}
@@ -426,6 +426,7 @@ class BluePillEngine:
         self._tx_events: Dict[str, threading.Event] = {}
         self._tx_results: Dict[str, Dict[str, Any]] = {}
         self._tx_lock = threading.Lock()
+        self._tx_local = threading.local()
         self.deleted_chat_guids: set[str] = set()
         self.deleted_message_guids: set[str] = set()
         is_ephemeral = str(db_path or "").startswith("/nonexistent")
@@ -1510,7 +1511,7 @@ class BluePillEngine:
             self._last_max_rowid = int(row[0] or 0) if row else 0
             conn.close()
         except Exception:
-            self._last_max_rowid = 0
+            self._last_max_rowid = None
 
         t = threading.Thread(target=self._wal_poll_loop, daemon=True)
         t.start()
@@ -1596,39 +1597,44 @@ class BluePillEngine:
             except Exception as exc:
                 self.logger.warning("[wal] failed broadcasting update for rowid=%d: %s", rid, exc)
 
+    def _poll_wal_once(self) -> int:
+        if not os.path.exists(self.db_path):
+            return 0
+        conn = self._open_chat_db()
+        try:
+            row = conn.execute("SELECT COALESCE(MAX(ROWID), 0) FROM message;").fetchone()
+            cur_max = int(row[0] or 0) if row else 0
+            self._poll_tracked_outgoing_updates(conn)
+        finally:
+            conn.close()
+        if self._last_max_rowid is None:
+            self._last_max_rowid = cur_max
+            return 0
+        if cur_max > self._last_max_rowid:
+            prev_max = self._last_max_rowid
+            new_msgs = self.query_messages({"limit": min(25, cur_max - prev_max), "sort": "DESC"})
+            if any(int(m.get("originalROWID") or 0) > prev_max and not m.get("chats") for m in new_msgs):
+                time.sleep(0.18)
+                new_msgs = self.query_messages({"limit": min(25, cur_max - prev_max), "sort": "DESC"})
+            self._last_max_rowid = cur_max
+            emitted = 0
+            for m in reversed(new_msgs):
+                if int(m.get("originalROWID") or 0) <= prev_max:
+                    continue
+                if m.get("isFromMe") and int(m.get("error") or 0) == 0 and not m.get("isDelivered"):
+                    self._register_tracked_outgoing(m)
+                self.broadcast_socketio("new-message", m)
+                emitted += 1
+            if emitted > 0:
+                self.logger.info("[wal] broadcast %d new message(s) rowid %d..%d", emitted, prev_max + 1, cur_max)
+            return emitted
+        return 0
+
     def _wal_poll_loop(self) -> None:
         while not self._stop_event.is_set():
             time.sleep(1.0)
-            if not os.path.exists(self.db_path):
-                continue
             try:
-                conn = self._open_chat_db()
-                try:
-                    row = conn.execute("SELECT COALESCE(MAX(ROWID), 0) FROM message;").fetchone()
-                    cur_max = int(row[0] or 0) if row else 0
-                    self._poll_tracked_outgoing_updates(conn)
-                finally:
-                    conn.close()
-                if self._last_max_rowid == 0:
-                    self._last_max_rowid = cur_max
-                    continue
-                if cur_max > self._last_max_rowid:
-                    prev_max = self._last_max_rowid
-                    new_msgs = self.query_messages({"limit": min(25, cur_max - prev_max), "sort": "DESC"})
-                    if any(int(m.get("originalROWID") or 0) > prev_max and not m.get("chats") for m in new_msgs):
-                        time.sleep(0.18)
-                        new_msgs = self.query_messages({"limit": min(25, cur_max - prev_max), "sort": "DESC"})
-                    self._last_max_rowid = cur_max
-                    emitted = 0
-                    for m in reversed(new_msgs):
-                        if int(m.get("originalROWID") or 0) <= prev_max:
-                            continue
-                        if m.get("isFromMe") and int(m.get("error") or 0) == 0 and not m.get("isDelivered"):
-                            self._register_tracked_outgoing(m)
-                        self.broadcast_socketio("new-message", m)
-                        emitted += 1
-                    if emitted > 0:
-                        self.logger.info("[wal] broadcast %d new message(s) rowid %d..%d", emitted, prev_max + 1, cur_max)
+                self._poll_wal_once()
             except Exception as exc:
                 self.logger.warning("[wal] poll error: %s", exc)
 
@@ -3168,10 +3174,12 @@ class BluePillEngine:
         with self._helper_lock:
             clients = list(self._helper_clients)
         sent = False
+        tx_state = "disconnected"
         for sock in reversed(clients):
             try:
                 sock.sendall(payload)
                 sent = True
+                tx_state = "sent_no_wait"
                 break
             except OSError:
                 with self._helper_lock:
@@ -3180,7 +3188,7 @@ class BluePillEngine:
         identifier = ""
         helper_err = ""
         if sent and wait_timeout > 0:
-            ev.wait(timeout=wait_timeout)
+            replied = ev.wait(timeout=wait_timeout)
             with self._tx_lock:
                 res = self._tx_results.pop(tx_id, {})
                 self._tx_events.pop(tx_id, None)
@@ -3188,15 +3196,25 @@ class BluePillEngine:
             helper_err = str(res.get("error") or "").strip()
             if helper_err and not identifier:
                 sent = False
+                tx_state = "helper_error"
+            elif not replied and not res:
+                tx_state = "timeout"
+            else:
+                tx_state = "confirmed"
         else:
             with self._tx_lock:
                 self._tx_events.pop(tx_id, None)
                 self._tx_results.pop(tx_id, None)
+        try:
+            self._tx_local.last_state = tx_state
+        except Exception:
+            pass
         self.logger.info(
-            "[helper] action=%s tx=%s sent=%s identifier=%s error=%s",
+            "[helper] action=%s tx=%s sent=%s state=%s identifier=%s error=%s",
             action,
             tx_id[:8],
             sent,
+            tx_state,
             identifier or "-",
             helper_err or "-",
         )
@@ -3242,14 +3260,14 @@ class BluePillEngine:
                     conn_exp.close()
             except Exception:
                 pass
-        deadline = time.time() + timeout_s
+        deadline = time.monotonic() + timeout_s
         best_candidate: Optional[Dict[str, Any]] = None
         found_at: Optional[float] = None
         att_join_wait_s = 0.25
         while True:
             if self._stop_event.is_set() or not os.path.exists(self.db_path):
                 break
-            now = time.time()
+            now = time.monotonic()
             effective_deadline = (
                 max(deadline, found_at + att_join_wait_s)
                 if (found_at is not None and require_attachment)
@@ -3259,7 +3277,7 @@ class BluePillEngine:
                 break
             try:
                 recent = self.query_messages({"limit": 12, "sort": "DESC"})
-                for m in recent:
+                for m in reversed(recent):
                     if not m.get("isFromMe"):
                         continue
                     m_rowid = int(m.get("originalROWID") or 0)
@@ -3279,22 +3297,30 @@ class BluePillEngine:
                     helper_match = bool(helper_guid and m_guid == helper_guid)
                     qualifies = (not require_attachment) or has_attachments or helper_match
                     if found_at is None:
-                        found_at = time.time()
+                        found_at = time.monotonic()
                     if qualifies:
                         if temp_guid and m_guid:
                             self.temp_guid_by_guid[m_guid] = temp_guid
                             m["tempGuid"] = temp_guid
-                        if advance_rowid and m_rowid > self._last_max_rowid:
+                        if advance_rowid and (self._last_max_rowid is None or m_rowid > self._last_max_rowid):
                             self._last_max_rowid = m_rowid
                         best_candidate = m
-                    if require_attachment and not has_attachments and (time.time() - found_at) < att_join_wait_s:
+                    if require_attachment and not has_attachments and (time.monotonic() - found_at) < att_join_wait_s:
                         break
                     if not qualifies:
                         continue
                     return m
             except Exception:
                 pass
-            time.sleep(0.06)
+            effective_deadline = (
+                max(deadline, found_at + att_join_wait_s)
+                if (found_at is not None and require_attachment)
+                else deadline
+            )
+            rem_sleep = effective_deadline - time.monotonic()
+            if rem_sleep <= 0:
+                break
+            time.sleep(min(0.06, rem_sleep))
         return best_candidate
 
     def send_text(self, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -3607,7 +3633,12 @@ class BluePillEngine:
             dispatch_pre_rowid = self._get_max_message_rowid() if os.path.exists(self.db_path) else 0
             ok = False
             cap_guid = ""
+            tx_state = ""
             try:
+                try:
+                    self._tx_local.last_state = ""
+                except Exception:
+                    pass
                 ok, cap_guid = self._send_helper_payload_with_tx(
                     "send-message",
                     {
@@ -3621,6 +3652,7 @@ class BluePillEngine:
                     },
                     wait_timeout=0.5,
                 )
+                tx_state = str(getattr(self._tx_local, "last_state", "") or "")
             except Exception as exc:
                 self.logger.warning(
                     "[send_attachment] delayed caption send exception reason=%s chat=%s tempGuid=%s err=%s",
@@ -3631,6 +3663,7 @@ class BluePillEngine:
                 )
                 ok = False
                 cap_guid = ""
+                tx_state = "exception"
 
             if ok:
                 self.logger.info(
@@ -3644,27 +3677,32 @@ class BluePillEngine:
                     self._pending_captions.pop(caption_key, None)
                 return True
 
-            if os.path.exists(self.db_path) and not self._stop_event.is_set():
+            uncertain_dispatch = (tx_state == "timeout") or bool(cap_guid and str(cap_guid).strip())
+            if (
+                uncertain_dispatch
+                and cap_guid
+                and str(cap_guid).strip()
+                and os.path.exists(self.db_path)
+                and not self._stop_event.is_set()
+            ):
+                clean_cap_guid = str(cap_guid).strip()
                 db_cap = self._poll_sent_message_from_db(
                     pre_max_rowid=dispatch_pre_rowid,
                     chat_guid=chat_guid,
                     temp_guid="",
-                    helper_guid=cap_guid,
+                    helper_guid=clean_cap_guid,
                     expected_text=caption,
                     require_attachment=False,
                     timeout_s=0.15,
                     advance_rowid=False,
                 )
-                if (
-                    db_cap is not None
-                    and str(db_cap.get("text") or "").strip() == caption.strip()
-                    and int(db_cap.get("originalROWID") or 0) > dispatch_pre_rowid
-                ):
+                if db_cap is not None and str(db_cap.get("guid") or "").strip() == clean_cap_guid:
                     self.logger.info(
-                        "[send_attachment] delayed caption confirmed in chat.db after ok=False reason=%s chat=%s tempGuid=%s rowid=%s",
+                        "[send_attachment] delayed caption confirmed in chat.db after uncertain helper outcome reason=%s chat=%s tempGuid=%s guid=%s rowid=%s",
                         reason,
                         chat_guid,
                         temp_guid,
+                        clean_cap_guid,
                         db_cap.get("originalROWID"),
                     )
                     with self._pending_caption_lock:
@@ -3698,61 +3736,90 @@ class BluePillEngine:
             )
             return False
 
+        def _apply_upload_correlation(cand_msg: Dict[str, Any]) -> bool:
+            msg_guid = str(cand_msg.get("guid") or "").strip()
+            guid_matches = bool(helper_guid and msg_guid and msg_guid == helper_guid.strip())
+            atts = cand_msg.get("attachments") or []
+            msg_correlated = guid_matches
+            matched_atts: List[Tuple[str, str]] = []
+            with self._pending_caption_lock:
+                peer_metas = [
+                    other.get("matchMeta") or {}
+                    for other_key, other in self._pending_captions.items()
+                    if other_key != caption_key
+                    and other.get("chatGuid") == chat_guid
+                    and not other.get("dispatched")
+                ]
+            for att in atts:
+                if guid_matches:
+                    att_correlated = True
+                else:
+                    att_correlated = _att_matches_meta(att, match_meta) and not any(
+                        _att_matches_meta(att, pm) for pm in peer_metas
+                    )
+                if not att_correlated:
+                    continue
+                ag = str(att.get("guid") or "")
+                if ag:
+                    existing = self._outbound_attachments.get(ag)
+                    if existing is not None and existing[0] != helper_file_path:
+                        continue
+                    matched_atts.append((ag, str(att.get("originalGuid") or "")))
+                msg_correlated = True
+            if not msg_correlated:
+                return False
+            for ag, orig_g in matched_atts:
+                self._outbound_attachments[ag] = (helper_file_path, mime_type)
+                if preserve_wav_metrics and measured_bars and measured_dur > 0:
+                    self._cache_audio_metrics(
+                        [ag, orig_g, helper_file_path],
+                        measured_bars,
+                        measured_dur,
+                    )
+            if temp_guid and msg_guid:
+                self.temp_guid_by_guid[msg_guid] = temp_guid
+            return True
+
         def _waiter() -> None:
             try:
                 wait_s = max(0.05, float(getattr(self, "_delayed_caption_wait_s", 4.0)))
+                deadline = time.monotonic() + wait_s
+                local_cursor = pre_max_rowid
                 confirmed_msg: Optional[Dict[str, Any]] = None
-                if os.path.exists(self.db_path) and not self._stop_event.is_set():
-                    confirmed_msg = self._poll_sent_message_from_db(
-                        pre_max_rowid=pre_max_rowid,
+                seen_uncorrelated: set[Tuple[int, str]] = set()
+                while os.path.exists(self.db_path) and not self._stop_event.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    cand_msg = self._poll_sent_message_from_db(
+                        pre_max_rowid=local_cursor,
                         chat_guid=chat_guid,
                         temp_guid="",
                         helper_guid=helper_guid,
                         require_attachment=True,
-                        timeout_s=wait_s,
+                        timeout_s=remaining,
                         advance_rowid=False,
                     )
+                    if self._stop_event.is_set() or cand_msg is None:
+                        break
+                    cand_rowid = int(cand_msg.get("originalROWID") or 0)
+                    cand_guid = str(cand_msg.get("guid") or "").strip()
+                    if cand_rowid > local_cursor:
+                        local_cursor = cand_rowid
+                    if _apply_upload_correlation(cand_msg):
+                        confirmed_msg = cand_msg
+                        break
+                    cand_key = (cand_rowid, cand_guid)
+                    if cand_key in seen_uncorrelated or cand_rowid <= 0:
+                        sleep_left = deadline - time.monotonic()
+                        if sleep_left <= 0 or self._stop_event.wait(min(0.06, sleep_left)):
+                            break
+                    else:
+                        seen_uncorrelated.add(cand_key)
                 if self._stop_event.is_set():
                     with self._pending_caption_lock:
                         self._pending_captions.pop(caption_key, None)
                     return
-                if confirmed_msg is not None:
-                    msg_guid = str(confirmed_msg.get("guid") or "").strip()
-                    guid_matches = bool(helper_guid and msg_guid and msg_guid == helper_guid.strip())
-                    atts = confirmed_msg.get("attachments") or []
-                    msg_correlated = guid_matches
-                    with self._pending_caption_lock:
-                        peer_metas = [
-                            other.get("matchMeta") or {}
-                            for other_key, other in self._pending_captions.items()
-                            if other_key != caption_key
-                            and other.get("chatGuid") == chat_guid
-                            and not other.get("dispatched")
-                        ]
-                    for att in atts:
-                        if guid_matches:
-                            att_correlated = True
-                        else:
-                            att_correlated = _att_matches_meta(att, match_meta) and not any(
-                                _att_matches_meta(att, pm) for pm in peer_metas
-                            )
-                        if not att_correlated:
-                            continue
-                        msg_correlated = True
-                        ag = str(att.get("guid") or "")
-                        if ag:
-                            existing = self._outbound_attachments.get(ag)
-                            if existing is not None and existing[0] != helper_file_path:
-                                continue
-                            self._outbound_attachments[ag] = (helper_file_path, mime_type)
-                            if preserve_wav_metrics and measured_bars and measured_dur > 0:
-                                self._cache_audio_metrics(
-                                    [ag, str(att.get("originalGuid") or ""), helper_file_path],
-                                    measured_bars,
-                                    measured_dur,
-                                )
-                    if msg_correlated and temp_guid and msg_guid:
-                        self.temp_guid_by_guid[msg_guid] = temp_guid
 
                 reason = "db_confirmed" if confirmed_msg is not None else "grace_timeout"
                 sent_ok = _dispatch_once(reason)
@@ -6988,7 +7055,25 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       return m ? m[1] : '';
     }
 
+    function isTrustedPasswordTransport() {
+      const loc = (typeof window !== 'undefined' && window.location) ? window.location : null;
+      const proto = (loc && loc.protocol ? loc.protocol : '').toLowerCase();
+      if (proto === 'https:') return true;
+      const host = (loc && loc.hostname ? loc.hostname : '').toLowerCase();
+      return (
+        host === 'localhost' ||
+        host === '127.0.0.1' ||
+        host === '::1' ||
+        host === '[::1]' ||
+        host.startsWith('127.')
+      );
+    }
+
     function apiUrl(path) {
+      if (!apiKey) return path;
+      if (!isTrustedPasswordTransport()) {
+        throw new Error('HTTPS Required for Remote Password');
+      }
       const sep = path.includes('?') ? '&' : '?';
       return `${path}${sep}password=${encodeURIComponent(apiKey)}`;
     }
@@ -6996,6 +7081,12 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     async function connectRelay() {
       apiKey = document.getElementById('apiKeyInput').value.trim();
       localStorage.setItem('bluepill_key', apiKey);
+      if (apiKey && !isTrustedPasswordTransport()) {
+        stopChatSocketIo();
+        if (typeof stopPhotosSocketIo === 'function') stopPhotosSocketIo();
+        document.getElementById('serverBadge').textContent = 'HTTPS Required for Remote Password';
+        return;
+      }
       try {
         const res = await fetch(apiUrl('/api/v1/server/info'));
         const j = await res.json();
@@ -7070,7 +7161,12 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
     async function deleteActiveChat() {
       if (!activeChatGuid) return;
-      await fetch(apiUrl(`/api/v1/chat/${encodeURIComponent(activeChatGuid)}`), { method: 'DELETE' });
+      const deletedGuid = activeChatGuid;
+      await fetch(apiUrl(`/api/v1/chat/${encodeURIComponent(deletedGuid)}`), { method: 'DELETE' });
+      clearPendingReconcile();
+      delete pendingMessagesByChat[deletedGuid];
+      delete liveMsgsByChat[deletedGuid];
+      delete knownConfirmedGuidsByChat[deletedGuid];
       activeChatGuid = '';
       document.getElementById('chatHeaderTitle').textContent = 'Select a conversation';
       document.getElementById('deleteChatBtn').style.display = 'none';
@@ -7080,9 +7176,14 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
 
     const pendingMessagesByChat = {};
+    const liveMsgsByChat = {};
+    const knownConfirmedGuidsByChat = {};
+    let liveMsgSeq = 0;
     let pendingReconcileTimer = null;
+    let pendingReconcileToken = 0;
     let pendingReconcileChat = '';
     let pendingReconcileRemaining = 0;
+    let unknownChatRefreshTimer = null;
     let selectChatSeq = 0;
     let chatSioSid = '';
     let chatSioLoopActive = false;
@@ -7094,17 +7195,29 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       if (a.guid && b.guid && a.guid === b.guid) return true;
       if (a.tempGuid && (b.tempGuid === a.tempGuid || b.guid === a.tempGuid)) return true;
       if (b.tempGuid && a.guid === b.tempGuid) return true;
-      if (!a._hasRealGuid && a.isFromMe && b.isFromMe) {
-        const at = (a.text || '').trim();
-        const bt = (b.text || '').trim();
-        if (at && at === bt && (b.dateCreated || 0) >= (a.dateCreated || 0) - 5000) {
-          return true;
-        }
-      }
       return false;
     }
 
+    function recordConfirmedGuids(chatGuid, msgs) {
+      if (!chatGuid || !Array.isArray(msgs) || !msgs.length) return;
+      let known = knownConfirmedGuidsByChat[chatGuid];
+      if (!known) {
+        known = new Set();
+        knownConfirmedGuidsByChat[chatGuid] = known;
+      }
+      for (const m of msgs) {
+        if (m && !m.pending && m.guid) {
+          known.add(m.guid);
+        }
+      }
+      if (known.size > 500) {
+        const arr = Array.from(known);
+        knownConfirmedGuidsByChat[chatGuid] = new Set(arr.slice(arr.length - 400));
+      }
+    }
+
     function clearPendingReconcile() {
+      pendingReconcileToken += 1;
       if (pendingReconcileTimer) {
         clearTimeout(pendingReconcileTimer);
         pendingReconcileTimer = null;
@@ -7115,8 +7228,50 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
     function reconcilePendingForChat(chatGuid, serverMsgs) {
       const list = pendingMessagesByChat[chatGuid];
-      if (!list || !list.length) return;
-      const remaining = list.filter(pm => !serverMsgs.some(sm => msgMatches(pm, sm)));
+      if (!list || !list.length || !Array.isArray(serverMsgs) || !serverMsgs.length) return [];
+      const consumed = new Array(list.length).fill(false);
+      const matchedServer = new Array(serverMsgs.length).fill(false);
+      const consumedEntries = [];
+      const known = knownConfirmedGuidsByChat[chatGuid];
+
+      for (let sIdx = 0; sIdx < serverMsgs.length; sIdx++) {
+        const sm = serverMsgs[sIdx];
+        if (!sm) continue;
+        for (let pIdx = 0; pIdx < list.length; pIdx++) {
+          if (!consumed[pIdx] && msgMatches(list[pIdx], sm)) {
+            consumed[pIdx] = true;
+            matchedServer[sIdx] = true;
+            consumedEntries.push(list[pIdx]);
+          }
+        }
+      }
+
+      for (let sIdx = 0; sIdx < serverMsgs.length; sIdx++) {
+        if (matchedServer[sIdx]) continue;
+        const sm = serverMsgs[sIdx];
+        if (!sm || sm.pending || !sm.isFromMe) continue;
+        if (sm.guid && known && known.has(sm.guid)) continue;
+        const bt = (sm.text || '').trim();
+        if (!bt) continue;
+        for (let pIdx = 0; pIdx < list.length; pIdx++) {
+          if (consumed[pIdx]) continue;
+          const pm = list[pIdx];
+          if (!pm || pm._hasRealGuid || !pm.isFromMe) continue;
+          if (sm.tempGuid && pm.tempGuid && sm.tempGuid !== pm.tempGuid) continue;
+          const at = (pm.text || '').trim();
+          if (at && at === bt && (sm.dateCreated || 0) >= (pm.dateCreated || 0) - 5000) {
+            consumed[pIdx] = true;
+            matchedServer[sIdx] = true;
+            consumedEntries.push(pm);
+            if (sm.guid) {
+              recordConfirmedGuids(chatGuid, [sm]);
+            }
+            break;
+          }
+        }
+      }
+
+      const remaining = list.filter((_, idx) => !consumed[idx]);
       if (remaining.length) {
         pendingMessagesByChat[chatGuid] = remaining;
       } else {
@@ -7125,19 +7280,27 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           clearPendingReconcile();
         }
       }
+      return consumedEntries;
     }
 
     function schedulePendingReconcile(chatGuid) {
       clearPendingReconcile();
       if (!chatGuid || !(pendingMessagesByChat[chatGuid] && pendingMessagesByChat[chatGuid].length)) return;
+      const myToken = ++pendingReconcileToken;
       pendingReconcileChat = chatGuid;
       pendingReconcileRemaining = 2;
       const scheduleNext = (delayMs) => {
-        if (pendingReconcileRemaining <= 0 || pendingReconcileChat !== chatGuid || activeChatGuid !== chatGuid) {
-          clearPendingReconcile();
+        if (
+          myToken !== pendingReconcileToken ||
+          pendingReconcileRemaining <= 0 ||
+          pendingReconcileChat !== chatGuid ||
+          activeChatGuid !== chatGuid
+        ) {
+          if (myToken === pendingReconcileToken) clearPendingReconcile();
           return;
         }
         pendingReconcileTimer = setTimeout(async () => {
+          if (myToken !== pendingReconcileToken) return;
           pendingReconcileTimer = null;
           if (pendingReconcileChat !== chatGuid || activeChatGuid !== chatGuid) {
             clearPendingReconcile();
@@ -7154,6 +7317,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           } catch (e) {
             console.warn('Pending reconcile refresh failed:', e);
           }
+          if (myToken !== pendingReconcileToken) return;
           if (
             pendingReconcileRemaining > 0 &&
             pendingReconcileChat === chatGuid &&
@@ -7163,6 +7327,15 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           ) {
             scheduleNext(2000);
           } else {
+            if (pendingReconcileRemaining <= 0 && pendingMessagesByChat[chatGuid] && pendingMessagesByChat[chatGuid].length) {
+              pendingMessagesByChat[chatGuid].forEach(pm => {
+                pm.pending = false;
+                pm.unconfirmed = true;
+                if (activeChatGuid === chatGuid) {
+                  upsertMessageInPane(pm, chatGuid);
+                }
+              });
+            }
             clearPendingReconcile();
           }
         }, delayMs);
@@ -7176,7 +7349,8 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       d.className = 'msg' + (m.isFromMe ? ' me' : '') + (isSms ? ' sms' : '');
       d.dataset.guid = m.guid || '';
       d.dataset.tempGuid = m.tempGuid || '';
-      d.dataset.pending = m.pending ? '1' : '0';
+      d.dataset.pending = (m.pending || m.unconfirmed) ? '1' : '0';
+      if (m.unconfirmed) d.dataset.unconfirmed = '1';
       if (m.text) {
         const t = document.createElement('div');
         t.textContent = m.text;
@@ -7213,7 +7387,8 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       meta.className = 'msg-meta';
       const dt = m.dateCreated ? new Date(m.dateCreated).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
       let badge = dt;
-      if (m.pending && !(m.error > 0)) badge += ' · Sending…';
+      if (m.unconfirmed && !(m.error > 0)) badge += ' · Unconfirmed';
+      else if (m.pending && !(m.error > 0)) badge += ' · Sending…';
       if (m.dateEdited > 0) badge += ' · Edited';
       if (m.error > 0) badge += ' · ⚠ Not Delivered';
       meta.textContent = badge;
@@ -7221,7 +7396,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       return d;
     }
 
-    function upsertMessageInPane(m, chatGuid) {
+    function upsertMessageInPane(m, chatGuid, matchedTempGuid = '') {
       if (!m || chatGuid !== activeChatGuid) return;
       if (m.associatedMessageType && m.associatedMessageType >= 2000) return;
       const hasAtt = m.attachments && m.attachments.length > 0;
@@ -7239,9 +7414,12 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         if (et && m.guid && et === m.guid) return true;
         return false;
       });
-      if (!existing && !m.pending && m.isFromMe && m.text) {
-        const mt = m.text.trim();
-        existing = children.find(el => el.dataset.pending === '1' && (el.firstChild && el.firstChild.textContent || '').trim() === mt);
+      if (!existing && matchedTempGuid) {
+        existing = children.find(el => {
+          const eg = el.dataset.guid || '';
+          const et = el.dataset.tempGuid || '';
+          return el.dataset.pending === '1' && (et === matchedTempGuid || eg === matchedTempGuid);
+        });
       }
       if (existing) {
         pane.replaceChild(bubble, existing);
@@ -7253,16 +7431,43 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       }
     }
 
+    function scheduleUnknownChatRefresh() {
+      if (!activeChatGuid || unknownChatRefreshTimer) return;
+      const targetChat = activeChatGuid;
+      unknownChatRefreshTimer = setTimeout(() => {
+        unknownChatRefreshTimer = null;
+        if (activeChatGuid === targetChat) {
+          selectChat(targetChat, document.getElementById('chatHeaderTitle').textContent).catch(() => {});
+        }
+      }, 250);
+    }
+
     function handleIncomingSocketMessage(evMsg) {
       if (!evMsg || typeof evMsg !== 'object') return;
       const chatGuids = (evMsg.chats || []).map(c => c && c.guid).filter(Boolean);
-      const targets = chatGuids.length ? chatGuids : (activeChatGuid ? [activeChatGuid] : []);
-      for (const cg of targets) {
-        if (pendingMessagesByChat[cg]) {
-          reconcilePendingForChat(cg, [evMsg]);
+      if (!chatGuids.length) {
+        if (activeChatGuid) {
+          scheduleUnknownChatRefresh();
         }
+        return;
+      }
+      for (const cg of chatGuids) {
+        if (!evMsg.pending) {
+          const liveList = liveMsgsByChat[cg] || (liveMsgsByChat[cg] = []);
+          const copy = Object.assign({}, evMsg, { _liveSeq: ++liveMsgSeq });
+          const idx = liveList.findIndex(lm => msgMatches(lm, copy));
+          if (idx >= 0) liveList[idx] = copy;
+          else liveList.push(copy);
+          if (liveList.length > 100) liveList.splice(0, liveList.length - 100);
+        }
+        let matchedPending = [];
+        if (pendingMessagesByChat[cg]) {
+          matchedPending = reconcilePendingForChat(cg, [evMsg]);
+        }
+        recordConfirmedGuids(cg, [evMsg]);
         if (cg === activeChatGuid) {
-          upsertMessageInPane(evMsg, cg);
+          const matchedTempGuid = matchedPending.length ? (matchedPending[0].tempGuid || matchedPending[0].guid || '') : '';
+          upsertMessageInPane(evMsg, cg, matchedTempGuid);
         }
       }
     }
@@ -7279,7 +7484,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
     function startChatSocketIo() {
       stopChatSocketIo();
-      if (!apiKey) return;
+      if (!apiKey || !isTrustedPasswordTransport()) return;
       chatSioLoopActive = true;
       const myGen = ++chatSioGen;
       (async () => {
@@ -7358,6 +7563,10 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const isSwitch = (guid !== activeChatGuid);
       if (isSwitch) {
         clearPendingReconcile();
+        if (unknownChatRefreshTimer) {
+          clearTimeout(unknownChatRefreshTimer);
+          unknownChatRefreshTimer = null;
+        }
       }
       activeChatGuid = guid;
       const reqSeq = ++selectChatSeq;
@@ -7367,13 +7576,32 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       if (isSwitch) {
         pane.innerHTML = '';
       }
+      const liveSeqAtFetchStart = liveMsgSeq;
       const res = await fetch(apiUrl(`/api/v1/chat/${encodeURIComponent(guid)}/message?limit=100&sort=DESC`));
       const j = await res.json();
       if (reqSeq !== selectChatSeq || activeChatGuid !== guid) return;
       const msgs = (j.data || []).slice().reverse();
-      reconcilePendingForChat(guid, msgs);
-      const pendingLeft = (pendingMessagesByChat[guid] || []).filter(pm => !msgs.some(sm => msgMatches(pm, sm)));
-      const combined = msgs.concat(pendingLeft);
+      const liveList = liveMsgsByChat[guid] || [];
+      const extraLive = [];
+      for (const lm of liveList) {
+        const idx = msgs.findIndex(sm => msgMatches(lm, sm));
+        if (idx >= 0) {
+          if ((lm._liveSeq || 0) > liveSeqAtFetchStart) {
+            msgs[idx] = lm;
+          }
+        } else if ((lm._liveSeq || 0) > liveSeqAtFetchStart) {
+          extraLive.push(lm);
+        }
+      }
+      const mergedMsgs = msgs.concat(extraLive);
+      if (liveList.length) {
+        liveMsgsByChat[guid] = liveList.filter(lm => (lm._liveSeq || 0) > liveSeqAtFetchStart);
+        if (!liveMsgsByChat[guid].length) delete liveMsgsByChat[guid];
+      }
+      reconcilePendingForChat(guid, mergedMsgs);
+      recordConfirmedGuids(guid, mergedMsgs);
+      const pendingLeft = (pendingMessagesByChat[guid] || []).filter(pm => !mergedMsgs.some(sm => msgMatches(pm, sm)));
+      const combined = mergedMsgs.concat(pendingLeft);
       const frag = document.createDocumentFragment();
       combined.forEach(m => {
         if (m.associatedMessageType && m.associatedMessageType >= 2000) return;
@@ -8086,6 +8314,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
     function startPhotosSocketIo() {
       if (photosSioLoopActive) return;
+      if (apiKey && !isTrustedPasswordTransport()) return;
       photosSioLoopActive = true;
       const myGen = ++photosSioGen;
       (async () => {
@@ -9971,8 +10200,228 @@ def run_selftest(engine: BluePillEngine) -> int:
             with db_eng._pending_caption_lock:
                 assert len(db_eng._pending_captions) == 0, f"Pending captions leaked after retry exhaustion: {db_eng._pending_captions}"
 
-            # Verify Web UI includes pending text reconciliation & Socket.IO deduplication helpers
-            for ui_marker in ("pendingMessagesByChat", "schedulePendingReconcile", "reconcilePendingForChat", "startChatSocketIo", "dataset.pending"):
+            # REV4 #1: _last_max_rowid None sentinel & empty chat.db (_last_max_rowid=0) must broadcast ROWID=1
+            empty_db_fd, empty_db_path = tempfile.mkstemp(prefix="bp_empty_wal_", suffix=".db")
+            os.close(empty_db_fd)
+            try:
+                econn = sqlite3.connect(empty_db_path)
+                econn.executescript(
+                    """
+                    CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, style INTEGER, display_name TEXT, group_id TEXT, original_group_id TEXT, service_name TEXT, is_archived INTEGER, last_read_message_timestamp INTEGER, properties BLOB);
+                    CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT, country TEXT);
+                    CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB, subject TEXT, handle_id INTEGER, error INTEGER, date INTEGER, date_read INTEGER, date_delivered INTEGER, is_from_me INTEGER, is_read INTEGER, is_delivered INTEGER, is_sent INTEGER, item_type INTEGER, service TEXT, date_edited INTEGER, date_retracted INTEGER, expressive_send_style_id TEXT, associated_message_guid TEXT, associated_message_type INTEGER, associated_message_emoji TEXT, reply_to_guid TEXT, thread_originator_guid TEXT, thread_originator_part TEXT, was_delivered_quietly INTEGER, did_notify_recipient INTEGER, has_dd_results INTEGER, is_audio_message INTEGER, is_archive INTEGER, other_handle INTEGER, group_title TEXT, group_action_type INTEGER, cache_roomnames TEXT, cache_has_attachments INTEGER);
+                    CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER, message_date INTEGER);
+                    CREATE TABLE attachment (ROWID INTEGER PRIMARY KEY, guid TEXT, original_guid TEXT, created_date INTEGER, uti TEXT, mime_type TEXT, transfer_name TEXT, total_bytes INTEGER, transfer_state INTEGER, is_outgoing INTEGER, hide_attachment INTEGER, is_sticker INTEGER, filename TEXT);
+                    CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+                    INSERT INTO chat VALUES (1, 'iMessage;-;+14155550199', '+14155550199', 45, '', '', '', 'iMessage', 0, 0, NULL);
+                    """
+                )
+                econn.commit()
+                econn.close()
+                empty_eng = BluePillEngine(db_path=empty_db_path, password="p", enable_background_daemons=False)
+                assert empty_eng._last_max_rowid is None, f"Expected initial _last_max_rowid=None, got {empty_eng._last_max_rowid}"
+                wal_bcast: List[Tuple[str, Any]] = []
+                empty_eng.broadcast_socketio = lambda ev, pl: wal_bcast.append((ev, pl))
+                assert empty_eng._poll_wal_once() == 0
+                assert empty_eng._last_max_rowid == 0, f"Expected empty chat.db baseline 0, got {empty_eng._last_max_rowid}"
+                econn2 = sqlite3.connect(empty_db_path)
+                econn2.executescript(
+                    """
+                    INSERT INTO message VALUES (1, 'msg-first-empty-db', 'first message', NULL, '', 0, 0, 700000005000000000, 0, 0, 0, 0, 1, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);
+                    INSERT INTO chat_message_join VALUES (1, 1, 700000005000000000);
+                    """
+                )
+                econn2.commit()
+                econn2.close()
+                assert empty_eng._poll_wal_once() == 1, f"Empty DB startup skipped ROWID=1: {wal_bcast}"
+                assert empty_eng._last_max_rowid == 1
+                assert any(ev == "new-message" and pl.get("guid") == "msg-first-empty-db" for ev, pl in wal_bcast)
+
+                # None sentinel must establish non-zero baseline without re-broadcasting history, then broadcast newer row
+                empty_eng._last_max_rowid = None
+                wal_bcast.clear()
+                assert empty_eng._poll_wal_once() == 0 and empty_eng._last_max_rowid == 1
+                assert wal_bcast == [], f"None sentinel baseline wrongly broadcast history: {wal_bcast}"
+                econn3 = sqlite3.connect(empty_db_path)
+                econn3.executescript(
+                    """
+                    INSERT INTO message VALUES (2, 'msg-second-after-none', 'second message', NULL, '', 0, 0, 700000006000000000, 0, 0, 0, 0, 1, 1, 0, 'iMessage', 0, 0, '', '', 0, '', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);
+                    INSERT INTO chat_message_join VALUES (1, 2, 700000006000000000);
+                    """
+                )
+                econn3.commit()
+                econn3.close()
+                assert empty_eng._poll_wal_once() == 1 and empty_eng._last_max_rowid == 2
+                assert any(ev == "new-message" and pl.get("guid") == "msg-second-after-none" for ev, pl in wal_bcast)
+            finally:
+                if os.path.exists(empty_db_path):
+                    os.remove(empty_db_path)
+
+            # REV4 #2: definite caption dispatch failure must NOT be dropped by concurrent identical text in chat.db
+            db_eng._delayed_caption_wait_s = 0.06
+            db_eng._delayed_caption_retry_delay_s = 0.02
+            db_eng._send_via_applescript = lambda *a, **kw: False
+            conc_actions: List[Tuple[str, Dict[str, Any]]] = []
+
+            def _conc_poll(**kw: Any) -> Optional[Dict[str, Any]]:
+                if kw.get("require_attachment"):
+                    return None
+                return {
+                    "originalROWID": 999,
+                    "guid": "msg-concurrent-other-sender",
+                    "text": "Concurrent same text",
+                    "isFromMe": True,
+                    "chats": [{"guid": "iMessage;-;+14155550148"}],
+                }
+
+            def _conc_helper_tx(act: str, data: Dict[str, Any], wait_timeout: float = 0.8) -> Tuple[bool, str]:
+                conc_actions.append((act, dict(data)))
+                if act == "send-message":
+                    db_eng._tx_local.last_state = "disconnected"
+                    return False, ""
+                return True, ""
+
+            db_eng._poll_sent_message_from_db = _conc_poll
+            db_eng._send_helper_payload_with_tx = _conc_helper_tx
+            db_eng.send_attachment({
+                "chatGuid": "iMessage;-;+14155550148",
+                "tempGuid": "temp-conc-fail-1",
+                "name": "conc.png",
+                "message": "Concurrent same text",
+                "attachment_bytes": png_bytes,
+            })
+            wt_conc = db_eng._last_delayed_caption_thread
+            assert wt_conc is not None
+            wt_conc.join(timeout=2.0)
+            conc_msgs = [a for a in conc_actions if a[0] == "send-message"]
+            assert len(conc_msgs) == 3, f"Definite failure dropped by concurrent matching text: {conc_msgs}"
+
+            # REV4 #3: conflicting attachment alias rejection must NOT set msg_correlated=True or reassign temp_guid_by_guid
+            db_eng._outbound_attachments["att-conflict-alias"] = ("/tmp/other-owner.png", "image/png")
+            db_eng.temp_guid_by_guid.pop("msg-alias-conflict", None)
+            db_eng._delayed_caption_wait_s = 0.08
+            alias_calls = 0
+
+            def _alias_conflict_poll(**kw: Any) -> Optional[Dict[str, Any]]:
+                nonlocal alias_calls
+                if not kw.get("require_attachment"):
+                    return None
+                alias_calls += 1
+                if alias_calls == 1:
+                    return None
+                return {
+                    "originalROWID": 301,
+                    "guid": "msg-alias-conflict",
+                    "isFromMe": True,
+                    "chats": [{"guid": "iMessage;-;+14155550149"}],
+                    "attachments": [{
+                        "guid": "att-conflict-alias",
+                        "mimeType": "image/png",
+                        "transferName": "conflict_check.png",
+                        "totalBytes": len(png_bytes),
+                    }],
+                }
+
+            db_eng._poll_sent_message_from_db = _alias_conflict_poll
+            caption_sent_ev.clear()
+            db_eng._send_helper_payload_with_tx = _record_helper_tx
+            db_eng.send_attachment({
+                "chatGuid": "iMessage;-;+14155550149",
+                "tempGuid": "temp-alias-reject-1",
+                "name": "conflict_check.png",
+                "message": "Alias reject caption",
+                "attachment_bytes": png_bytes,
+            })
+            wt_alias = db_eng._last_delayed_caption_thread
+            assert caption_sent_ev.wait(timeout=2.0)
+            assert wt_alias is not None
+            wt_alias.join(timeout=2.0)
+            assert "msg-alias-conflict" not in db_eng.temp_guid_by_guid, (
+                f"Rejected alias still assigned temp_guid_by_guid: {db_eng.temp_guid_by_guid}"
+            )
+            assert db_eng._outbound_attachments["att-conflict-alias"] == ("/tmp/other-owner.png", "image/png")
+
+            # REV4 #4: uncorrelated candidate row must advance local_cursor and keep polling until correlated row arrives before deadline
+            db_eng._last_max_rowid = 12
+            db_eng._delayed_caption_wait_s = 0.5
+            db_eng.temp_guid_by_guid.pop("msg-correlated-202", None)
+            db_eng._outbound_attachments.pop("att-correlated-202", None)
+            uncorr_qm_stage = 0
+
+            def _staged_uncorr_then_corr(qb: Dict[str, Any]) -> List[Dict[str, Any]]:
+                nonlocal uncorr_qm_stage
+                uncorr_qm_stage += 1
+                rows = [{
+                    "originalROWID": 201,
+                    "guid": "msg-unrelated-201",
+                    "isFromMe": True,
+                    "chats": [{"guid": "iMessage;-;+14155550150"}],
+                    "attachments": [{
+                        "guid": "att-unrelated-201",
+                        "mimeType": "image/png",
+                        "transferName": "unrelated_other.png",
+                        "totalBytes": 123,
+                    }],
+                }]
+                if uncorr_qm_stage >= 2:
+                    rows.insert(0, {
+                        "originalROWID": 202,
+                        "guid": "msg-correlated-202",
+                        "isFromMe": True,
+                        "chats": [{"guid": "iMessage;-;+14155550150"}],
+                        "attachments": [{
+                            "guid": "att-correlated-202",
+                            "mimeType": "image/png",
+                            "transferName": "target_wait.png",
+                            "totalBytes": len(png_bytes),
+                        }],
+                    })
+                return rows
+
+            first_send_poll = True
+
+            def _mixed_poll(**kw: Any) -> Optional[Dict[str, Any]]:
+                nonlocal first_send_poll
+                if first_send_poll:
+                    first_send_poll = False
+                    return None
+                return real_poll(**kw)
+
+            db_eng.query_messages = _staged_uncorr_then_corr
+            db_eng._poll_sent_message_from_db = _mixed_poll
+            caption_sent_ev.clear()
+            try:
+                db_eng.send_attachment({
+                    "chatGuid": "iMessage;-;+14155550150",
+                    "tempGuid": "temp-uncorr-continue-1",
+                    "name": "target_wait.png",
+                    "message": "Continue after uncorrelated row",
+                    "attachment_bytes": png_bytes,
+                })
+                wt_uncorr = db_eng._last_delayed_caption_thread
+                assert caption_sent_ev.wait(timeout=2.0), "Waiter failed to dispatch after finding correlated row"
+                assert wt_uncorr is not None
+                wt_uncorr.join(timeout=2.0)
+                assert "att-correlated-202" in db_eng._outbound_attachments, "Waiter stopped on uncorrelated row instead of finding correlated row"
+                assert db_eng.temp_guid_by_guid.get("msg-correlated-202") == "temp-uncorr-continue-1"
+                assert db_eng._last_max_rowid == 12, f"Waiter mutated _last_max_rowid: {db_eng._last_max_rowid}"
+            finally:
+                db_eng.query_messages = orig_qm_db
+
+            # Verify Web UI includes pending text reconciliation, REV4 security/state guards & Socket.IO deduplication helpers
+            for ui_marker in (
+                "pendingMessagesByChat",
+                "schedulePendingReconcile",
+                "reconcilePendingForChat",
+                "startChatSocketIo",
+                "dataset.pending",
+                "isTrustedPasswordTransport",
+                "HTTPS Required for Remote Password",
+                "pendingReconcileToken",
+                "liveMsgsByChat",
+                "scheduleUnknownChatRefresh",
+                "Unconfirmed",
+            ):
                 assert ui_marker in WEB_UI_HTML, f"Missing Web UI pending-text marker: {ui_marker}"
         finally:
             if os.path.exists(tmp_db_path):

@@ -571,9 +571,11 @@ private:
     void bumpServerEndpointGeneration();
     void dispatchPendingDeliverySingleQueries(const QStringList &guids, quint64 genAtDispatch,
                                               const QString &endpointAtDispatch,
-                                              const QHash<QString, quint64> &observedSeqAtDispatch);
+                                              const QHash<QString, quint64> &observedSeqAtDispatch,
+                                              quint64 reconcileSeqAtDispatch);
     bool filterPendingDeliveryResponseItems(const QJsonArray &arr, const QSet<QString> &batchSet,
                                             const QHash<QString, quint64> &observedSeqAtDispatch,
+                                            quint64 reconcileSeqAtDispatch,
                                             QJsonArray *outNonStale, int *outMatchedCount) const;
     void stopAudioPlaybackProcess();
     bool startLocalAudioProcess(const QString &localFile, quint64 playbackGen);
@@ -670,9 +672,11 @@ private:
     QSet<QString> m_inFlightDeliveryCheckGuids;
     quint64 m_pendingDeliveryCheckCompletedCountForTest = 0;
     quint64 m_deliveryObservationCounter = 0;
+    quint64 m_historyReconcileSeq = 0;
     quint64 m_serverEndpointGeneration = 1;
     bool m_supportsBatchMessageGuidInQuery = true;
     QHash<QString, quint64> m_messageObservationSeq;
+    QHash<QString, quint64> m_reconcileRemovedSeqByGuid;
     int m_pendingDeliveryRotationCursor = 0;
     QStringList m_lastPendingDeliveryBatchForTest;
     QHash<QString, QString> m_attachmentPaths;
