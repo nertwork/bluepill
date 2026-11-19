@@ -20,6 +20,11 @@ Example `~/.config/bluepill/config.json`:
 }
 ```
 
+### Apple Account, Relay & Local Privacy
+- **macOS Relay Endpoint:** On your Mac signed into `Messages.app` with your Apple Account, run `bluepill-server init` and `brew services start bluepill`. Your relay listens locally on port `1235` (or custom `--port`) and stores its configuration in `~/.config/bluepill/server.json` (`0600`).
+- **Local Database Privacy:** `bluepill-server` accesses `~/Library/Messages/chat.db` and `AddressBook` strictly in read-only SQLite WAL mode (`?mode=ro`). On Linux, your desktop client caches recent threads locally in `~/.cache/imsg/` and optionally stores your relay password in the Freedesktop Secret Service keyring (`libsecret` / `secret-tool`).
+- **Transport Security:** All HTTPS and Socket.IO connections enforce `QSslSocket::VerifyPeer`, and Direct SSH (`ssh://user@mac-host`) tunnels all traffic over standard OpenSSH with zero open ports.
+
 ### Environment Variables
 | Variable | Legacy Alias | Description |
 | :--- | :--- | :--- |

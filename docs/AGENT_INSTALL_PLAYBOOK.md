@@ -24,7 +24,7 @@ This playbook allows an AI agent to reliably inspect the host environment, insta
 When executing this playbook, the agent MUST adhere to these strict execution rules:
 1. **Non-Interactive Execution:** Every command that could prompt for user input or block on stdin must append `</dev/null` and use non-interactive flags (e.g. `yay --noconfirm`, `brew install --quiet`).
 2. **Explicit Timeouts:** Network or build commands must include explicit command-level timeouts (e.g. `timeout 60s curl ...`, `timeout 180s cmake ...`).
-3. **No Secrets / Tokens in Logs:** Never echo plaintext passwords, authentication tokens, or personal identifiers (PII) to stdout. Use dummy/placeholder formats in logs (e.g., `CHANGE_ME_TO_A_SECURE_TOKEN`).
+3. **No Secrets / Tokens in Logs:** Never echo plaintext passwords, authentication tokens, or personal contact details to stdout. Use placeholder formats in examples and logs (e.g., `CHANGE_ME_TO_A_SECURE_TOKEN`).
 4. **Idempotence:** Every check and mutation must be safe to re-run multiple times without corrupting existing configuration files or services.
 
 ---

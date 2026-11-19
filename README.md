@@ -109,6 +109,20 @@ bluepill --webui
 
 ---
 
+## Configuring Your Endpoint, Apple Account & Relay Settings
+
+1. **Sign into Apple Messages on your Mac:** Open `Messages.app`, sign in with your Apple Account, and (optionally, for SMS/RCS) enable **Settings → Apps → Messages → Text Message Forwarding** on your iPhone.
+2. **Grant Full Disk Access & Start the Relay:** Enable **Full Disk Access** for your terminal / Python under **System Settings → Privacy & Security → Full Disk Access**, then run `bluepill-server init` and `brew services start bluepill` (config stored in `~/.config/bluepill/server.json`).
+3. **Connect Your Linux Desktop Client:** Launch `bluepill` and press **`Ctrl+,`** (or click **`⚙ Settings`**) to enter your **Primary Server URL** (`http://<mac-ip>:1235`, `https://your-relay.example.com`, or Direct SSH `ssh://user@mac-host`), optional **Failover URL**, and **API Password**, or pre-configure `~/.config/bluepill/config.json` (`0600`) or environment variables (`BLUEPILL_SERVER_URL`, `BLUEPILL_PASSWORD`).
+
+### Local Database & Credential Privacy
+
+- **Your Data Stays on Your Hardware:** `bluepill-server` reads `~/Library/Messages/chat.db` and `AddressBook` directly on your own Mac in read-only SQLite WAL mode (`?mode=ro`) with zero third-party cloud relays or Firebase push dependencies.
+- **Owner-Only Credentials & Keyring Support:** On Linux, `~/.config/bluepill/config.json` enforces `0600` (`-rw-------`) permissions, Freedesktop Secret Service (`libsecret` / `secret-tool`) integration is built in, local message caching resides solely in `~/.cache/imsg/`, and all HTTPS/Socket.IO requests enforce `QSslSocket::VerifyPeer`.
+- **Safe Diagnostics:** `bluepill status --json` and `bluepill doctor` automatically mask passwords and session tokens.
+
+---
+
 ## Platform Compatibility Matrix
 
 `BluePill` is developed, continuously tested in CI, and verified across the following OS and architecture targets:
@@ -124,12 +138,23 @@ bluepill --webui
 ## Documentation & Guides
 
 - **[Complete Installation & Operations Guide](docs/INSTALLATION_AND_OPERATIONS_GUIDE.md)** — Production installation on Arch Linux, Omarchy, Debian, Ubuntu, Fedora, NixOS, macOS Relay, Web UI, and full REST & RPC API specification.
-- **[AI Agent Installation Playbook](docs/AGENT_INSTALL_PLAYBOOK.md)** — Non-interactive, copy-pasteable autonomous agent workflows with explicit timeouts, non-blocking commands, and zero PII.
+- **[AI Agent Installation Playbook](docs/AGENT_INSTALL_PLAYBOOK.md)** — Non-interactive, copy-pasteable autonomous agent workflows with explicit timeouts and automated verification.
 - **[Autonomous Agent Instructions (AGENTS.md)](AGENTS.md)** — Canonical operational prompts and autonomous execution rules for Claude Code, OpenCode, Gemini CLI, Codex, Cursor, and Antigravity.
 - **[macOS Relay & BlueBubbles Setup Guide](docs/BLUEBUBBLES_SETUP_GUIDE.md)** — Installing `bluepill-server` via Homebrew on macOS, using the Built-In Web UI, or connecting to a legacy BlueBubbles Server.
 - **[Configuration, Transports & CLI Reference](docs/CONFIGURATION_AND_CLI.md)** — Configuring HTTPS, Failover URLs, Direct SSH (`ssh://`), Linux Secret Service (`libsecret`), and JSON CLI automation.
 - **[Architecture & Internals](docs/ARCHITECTURE.md)** — How the C++20/Qt6 client, SQLite WAL `bluepill-server` daemon, `IMCore` TCP bridge, and Socket.IO v4 push pipeline work under the hood.
 - **[Contributing Guide](CONTRIBUTING.md)** — Building from source, running the 66 offscreen unit tests (`./bin/test`), and submitting Pull Requests reviewed by `@coderabbitai` and Arch Linux CI.
+
+---
+
+## CI/CD & Automated Verification
+
+Every commit and Pull Request on `nertwork/bluepill` is verified by GitHub Actions across Linux and packaging targets:
+
+- **`Lint, Syntax & Security Audit`:** Validates linked issue metadata, runs the **Security & Configuration Hygiene** credential/placeholder scan, compiles and runs `python3 server/bluepill_server.py --selftest`, and syntax-checks `bin/build`, `bin/test`, and `Formula/bluepill.rb`.
+- **`Arch Linux Build, Unit Tests & Package`:** Builds `bluepill` (C++20 / Qt6) inside `archlinux:latest`, runs the full offscreen QtTest suite (`QT_QPA_PLATFORM=offscreen ./bin/test`), verifies offscreen `--demo-screenshot` rendering, and builds the Arch Linux package with `makepkg`.
+- **`Static Analysis (cppcheck / qmllint) & CodeRabbit-Style AI Review`:** Runs `cppcheck --library=qt` and Qt6 `qmllint` on every PR and posts a detailed walkthrough.
+- **`Documentation Sync (gh-pages)` & `Release`:** Automatically publishes updated docs to [GitHub Pages](https://nertwork.github.io/bluepill/) on `main`, and builds Arch `.pkg.tar.zst` archives plus Homebrew universal bottles (`bluepill-*.all.bottle.tar.gz`) on version tags (`v*`).
 
 ---
 

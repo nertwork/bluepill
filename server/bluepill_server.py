@@ -12862,7 +12862,7 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
         else:
             assert nudge_skip.get("nudged") is False and nudge_skip.get("skippedReason") == "non_darwin", f"Unexpected non-darwin nudge result: {nudge_skip}"
 
-        # REV7 #1, #3, #4, #5, #6 selftests (Zero-PII synthetic data)
+        # REV7 #1, #3, #4, #5, #6 selftests (synthetic test fixtures)
         r7_db_fd, r7_db_path = tempfile.mkstemp(prefix="bp_rev7_", suffix=".db")
         os.close(r7_db_fd)
         try:

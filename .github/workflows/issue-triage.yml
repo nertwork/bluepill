@@ -66,11 +66,11 @@ jobs:
           if os.environ.get("EVENT_ACTION") == "opened" and "bug" in labels and "serverversion" not in text and "imsg status" not in text:
               comment = (
                   "👋 Thanks for filing this bug report on **`imsg`**!\n\n"
-                  "To help us reproduce and triage this quickly, please share the sanitized output of:\n"
+                  "To help us reproduce and triage this quickly, please share the output of:\n"
                   "```bash\n"
-                  "imsg status --json\n"
+                  "bluepill status --json\n"
                   "```\n"
-                  "*(Note: `imsg status --json` automatically omits passwords/tokens; please ensure any custom private domains or phone numbers are redacted.)*"
+                  "*(Note: `bluepill status --json` automatically masks passwords and tokens; please replace any private server domains or phone numbers with placeholders before posting.)*"
               )
               req_c = urllib.request.Request(
                   f"https://api.github.com/repos/{repo}/issues/{num}/comments",

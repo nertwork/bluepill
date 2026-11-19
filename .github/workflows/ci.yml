@@ -78,7 +78,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Zero-PII & Secret Sanitization Audit
+      - name: Security & Configuration Hygiene
         run: |
           python3 -c '
           import os, re, sys
@@ -100,9 +100,9 @@ jobs:
                           if rx.search(line):
                               hits.append(f"{p}:{i}: {line.strip()}")
           if hits:
-              print("Forbidden PII/internal strings found:\n" + "\n".join(hits))
+              print("Hardcoded credentials or non-example configuration strings found:\n" + "\n".join(hits))
               sys.exit(1)
-          print("Zero-PII audit passed across all repository files.")
+          print("Security & configuration hygiene scan passed across all repository files.")
           '
 
       - name: Python Relay Server Compilation & Self-Test
@@ -130,7 +130,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Zero-PII & Secret Sanitization Audit
+      - name: Security & Configuration Hygiene
         run: |
           python3 -c '
           import os, re, sys
@@ -152,9 +152,9 @@ jobs:
                           if rx.search(line):
                               hits.append(f"{p}:{i}: {line.strip()}")
           if hits:
-              print("Forbidden PII/internal strings found:\n" + "\n".join(hits))
+              print("Hardcoded credentials or non-example configuration strings found:\n" + "\n".join(hits))
               sys.exit(1)
-          print("Zero-PII audit passed across all repository files.")
+          print("Security & configuration hygiene scan passed across all repository files.")
           '
 
       - name: Compile imsg (C++20 / Qt6)

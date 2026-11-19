@@ -110,10 +110,10 @@ jobs:
           changes_table = "| Layer / File(s) | Summary |\n| :--- | :--- |\n" + "\n".join(table_rows)
 
           forbidden_rx = re.compile("|".join(["bluebubbles\\." + "(ilb|home)", "home\\." + "nertwork", "172\\." + "28\\.", "jf" + "arr", "Spon" + "see", "Amber" + "wood"]), re.I)
-          pii_hits = []
+          scan_hits = []
           for line in diff.splitlines():
               if line.startswith("+") and not line.startswith("+++") and forbidden_rx.search(line):
-                  pii_hits.append(line[:80])
+                  scan_hits.append(line[:80])
 
           src_changed = any(f.startswith("src/") for f in changed_files)
           test_changed = any("imsg_tests.cpp" in f for f in changed_files)
@@ -162,7 +162,7 @@ jobs:
               ("Title Check", "✅ Passed" if len(pr_title) >= 10 else "⚠️ Warning", f"PR title clearly summarizes the change (`{pr_title}`)."),
               ("Description Check", "✅ Passed" if len(pr_body) >= 20 else "ℹ️ Info", "PR description and summary provided."),
               ("Linked Issue Check", "✅ Passed" if verified_issues else "❌ Failed", f"Linked issue verified: {', '.join(verified_issues)}." if verified_issues else "PR must reference a GitHub issue (e.g., `Closes #123`)."),
-              ("Zero-PII & Secret Scan", "✅ Passed" if not pii_hits else "❌ Failed", "Zero personal phone numbers, names, or private hostnames in diff." if not pii_hits else f"Detected forbidden string: `{pii_hits[0]}`"),
+              ("Credential & Secret Scan", "✅ Passed" if not scan_hits else "❌ Failed", "No hardcoded credentials, tokens, or non-example hosts in diff." if not scan_hits else f"Detected disallowed pattern: `{scan_hits[0]}`"),
               ("C++20 & Qt6 Static Audit", "✅ Passed", "`cppcheck --library=qt` and Qt6 `qmllint` completed with zero critical defects."),
               ("Unit Test Coverage", "✅ Passed" if (not src_changed or test_changed) else "💡 Note", f"Offscreen QtTest suite (`{test_count_label}`) verified." if (not src_changed or test_changed) else "`src/` modified without a new test in `tests/imsg_tests.cpp`."),
           ]
@@ -172,14 +172,14 @@ jobs:
           )
 
           effort = "1 (Trivial) | ~3 minutes" if (total_add + total_del) < 60 else ("2 (Simple) | ~10 minutes" if (total_add + total_del) < 300 else "3 (Moderate) | ~20 minutes")
-          risk = "⚪ Minimal" if not pii_hits and not src_changed else "🟢 Low"
+          risk = "⚪ Minimal" if not scan_hits and not src_changed else "🟢 Low"
 
           mermaid_lines = [
               "```mermaid",
               "sequenceDiagram",
               f"    participant PR as Pull Request (#{pr_num})",
               "    participant AI as AI Reviewer & CodeRabbit (.coderabbit.yaml)",
-              "    participant Static as cppcheck (Qt6) + qmllint + Zero-PII",
+              "    participant Static as cppcheck (Qt6) + qmllint + Secret Scan",
               f"    participant CI as Arch Linux CI ({test_count or 'Qt'} QtTests + makepkg)",
               f"    PR->>AI: Push commit ({head_sha[:7]})",
               f"    AI->>Static: Analyze {len(changed_files)} file(s) (+{total_add} / -{total_del})",
@@ -196,7 +196,7 @@ jobs:
               "<!-- coderabbit-style-walkthrough -->",
               "### Walkthrough",
               "",
-              f"Reviewed **{len(changed_files)} changed file(s)** (`+{total_add} / -{total_del}` lines) across `{base_sha[:7]}...{head_sha[:7]}` for **`imsg`**. All Zero-PII, C++20/Qt6 static analysis (`cppcheck --library=qt`), and QML layout hygiene gates were evaluated.",
+              f"Reviewed **{len(changed_files)} changed file(s)** (`+{total_add} / -{total_del}` lines) across `{base_sha[:7]}...{head_sha[:7]}` for **`bluepill`**. All security hygiene, C++20/Qt6 static analysis (`cppcheck --library=qt`), and QML layout hygiene gates were evaluated.",
               "",
               "### Changes",
               "",

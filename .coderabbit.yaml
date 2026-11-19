@@ -35,7 +35,7 @@ reviews:
     - label: "aur-packaging"
       instructions: "Apply when pkgbuild/PKGBUILD, pkgbuild/PKGBUILD.aur, pkgbuild/.SRCINFO, or pkgbuild/imsg.service are modified."
     - label: "security"
-      instructions: "Apply when TLS verification, 0600 file permissions, libsecret keyring lookup, or Zero-PII rules are touched."
+      instructions: "Apply when TLS verification, 0600 file permissions, libsecret keyring lookup, or security hygiene rules are touched."
     - label: "documentation"
       instructions: "Apply when README.md, CONTRIBUTING.md, CHANGELOG.md, or docs/** are modified."
     - label: "ci/cd"
@@ -48,7 +48,7 @@ reviews:
         1. QNetworkReply lifecycle safety (always ensure reply->deleteLater() on all code paths).
         2. Multi-channel QNetworkAccessManager isolation (m_sendNam for outbound messages/reactions, m_mediaNam for attachments, m_socketNam for Socket.IO v4).
         3. Strict TLS verification (QSslSocket::VerifyPeer) and 0600 permissions on ~/.config/imsg/config.json.
-        4. Zero hardcoded personal phone numbers, names, or private server hostnames.
+        4. Use placeholder test handles and example domains in fixtures; never hardcode secrets or personal contact details.
     - path: "src/**/*.qml"
       instructions: |
         Review QtQuick / QML code for:

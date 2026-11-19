@@ -25,6 +25,8 @@ def convert_and_embed_html(md_path: str, html_path: str) -> bool:
     with open(md_path, encoding="utf-8") as f:
         md_text = f.read()
 
+    md_text = re.sub(r"\A---\r?\n[\s\S]*?\r?\n---\r?\n*", "", md_text)
+
     md = markdown.Markdown(extensions=["toc", "fenced_code", "tables"])
     body_html = md.convert(md_text)
     toc_html = md.toc
@@ -38,7 +40,7 @@ def convert_and_embed_html(md_path: str, html_path: str) -> bool:
         html_page = re.sub(aside_regex, lambda m: m.group(1) + toc_html + m.group(2), html_page)
 
     # Update body in <main class="doc-content">
-    main_regex = r"(<main class=\"doc-content\">\s*<div class=\"doc-banner\">[\s\S]*?</div>\s*)<h1 id=[\s\S]*?(</main>)"
+    main_regex = r"(<main class=\"doc-content\">\s*<div class=\"doc-banner\">[\s\S]*?</div>\s*)[\s\S]*?(</main>)"
     if re.search(main_regex, html_page):
         html_page = re.sub(main_regex, lambda m: m.group(1) + body_html + "\n        " + m.group(2), html_page)
 

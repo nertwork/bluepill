@@ -94,16 +94,15 @@ QT_QPA_PLATFORM=offscreen ./build/imsg --demo-screenshot /tmp/ci-demo.png
 
 ---
 
-## 4. Strict Zero-PII & Security Hygiene Policy
+## 4. Security, Privacy & Configuration Hygiene
 
-1. **Zero Personal Data (PII):**
-   - Never commit real phone numbers, email addresses, personal contact names, chat GUIDs, API keys, or private internal hostnames/IPs in source code, unit tests, screenshots, or commit messages.
-   - Always use fictional personas (`Alex Rivera`, `Elena Vance`, `Marcus Chen`, `Alpine Trail Crew`), North American `555` test numbers (`+14155550142`), and RFC 2606 domains (`example.com`) in `tests/imsg_tests.cpp` and `Backend::loadDemoData()`.
+1. **Synthetic Test Fixtures & Placeholder Configs:**
+   - Always use fictional personas (`Alex Rivera`, `Elena Vance`, `Marcus Chen`, `Alpine Trail Crew`), North American `555` test numbers (`+14155550142`), and RFC 2606 domains (`example.com`) in `tests/imsg_tests.cpp`, screenshots, and documentation examples—never real phone numbers, email addresses, API keys, or private server hostnames.
 2. **Credential Storage & TLS:**
-   - Any file containing credentials (`~/.config/bluepill/config.json`) must enforce `0600` (`QFileDevice::ReadOwner | QFileDevice::WriteOwner`) permissions.
-   - All network requests must enforce `QSslSocket::VerifyPeer`.
-3. **Automated Zero-PII Audit:**
-   - CI rejects any commits containing internal network addresses or developer PII.
+   - Configuration files containing relay passwords (`~/.config/bluepill/config.json`) must enforce `0600` (`QFileDevice::ReadOwner | QFileDevice::WriteOwner`) permissions.
+   - All outbound HTTPS and WebSocket requests must enforce `QSslSocket::VerifyPeer`.
+3. **Automated CI/CD Quality & Security Gates:**
+   - Every Pull Request is validated by GitHub Actions across `Lint, Syntax & Security Audit` (including the **Security & Configuration Hygiene** scan) and `Arch Linux Build, Unit Tests & Package`, alongside `cppcheck` and `qmllint` static analysis.
 
 ---
 
@@ -119,6 +118,6 @@ QT_QPA_PLATFORM=offscreen ./build/imsg --demo-screenshot /tmp/ci-demo.png
    - Include regression tests in `tests/imsg_tests.cpp` for any bug fixes.
 3. **Open a Pull Request:**
    - Follow `.github/PULL_REQUEST_TEMPLATE.md`.
-   - CI runs linting, Zero-PII audit, Python self-test, Arch Linux compilation, test suite, and package build.
+   - CI runs credential & configuration hygiene checks, Python relay self-tests, shell/Homebrew formula validation, Arch Linux C++20/Qt6 compilation, offscreen QtTest suite, and Arch package verification.
 4. **Merge:**
    - Once all required status checks pass and reviews are resolved, maintainers merge the PR into `main`.

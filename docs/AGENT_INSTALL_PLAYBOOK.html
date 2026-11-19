@@ -458,8 +458,13 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#phase-4-end-to-end-verification-checklist">Phase 4: End-to-End Verification Checklist</a></li>
 </ul>
 </li>
+<li><a href="#5-icloud-hub-preflight-optional-module-configuration">5. iCloud Hub Preflight &amp; Optional Module Configuration</a></li>
+<li><a href="#optional-module-toggles-all-enabled-by-default">Optional module toggles (all enabled by default):</a></li>
+<li><a href="#bluepill-server-enable-notes-enable-calendar-enable-photos-preflight-no-fix">bluepill-server --enable-notes --enable-calendar --enable-photos preflight --no-fix</a></li>
 </ul>
 </div>
+
+
 
             </div>
         </aside>
@@ -471,19 +476,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
-                </div>
-                <a href="index.html">← Home</a>
-            </div>
-
-            <hr />
-<p>layout: default
-title: BluePill Autonomous AI Agent Install Playbook
-permalink: /AGENT_INSTALL_PLAYBOOK.html
-redirect_from:
-  - /AGENT_INSTALL_PLAYBOOK.html
-  - /AGENT_INSTALL_PLAYBOOK</p>
-<hr />
-<blockquote>
+                <blockquote>
 <p>[!TIP]
 <strong>Interactive Documentation Portal:</strong> View the formatted dark-mode documentation with one-click copy buttons and live sidebar navigation at:<br />
 <a href="https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html"><strong>https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html</strong></a></p>
@@ -496,30 +489,29 @@ redirect_from:
 <p>When executing this playbook, the agent MUST adhere to these strict execution rules:
 1. <strong>Non-Interactive Execution:</strong> Every command that could prompt for user input or block on stdin must append <code>&lt;/dev/null</code> and use non-interactive flags (e.g. <code>yay --noconfirm</code>, <code>brew install --quiet</code>).
 2. <strong>Explicit Timeouts:</strong> Network or build commands must include explicit command-level timeouts (e.g. <code>timeout 60s curl ...</code>, <code>timeout 180s cmake ...</code>).
-3. <strong>No Secrets / Tokens in Logs:</strong> Never echo plaintext passwords, authentication tokens, or personal identifiers (PII) to stdout. Use dummy/placeholder formats in logs (e.g., <code>CHANGE_ME_TO_A_SECURE_TOKEN</code>).
+3. <strong>No Secrets / Tokens in Logs:</strong> Never echo plaintext passwords, authentication tokens, or personal contact details to stdout. Use placeholder formats in examples and logs (e.g., <code>CHANGE_ME_TO_A_SECURE_TOKEN</code>).
 4. <strong>Idempotence:</strong> Every check and mutation must be safe to re-run multiple times without corrupting existing configuration files or services.</p>
 <hr />
 <h2 id="phase-1-environment-architecture-discovery">Phase 1: Environment &amp; Architecture Discovery</h2>
 <p>Detect operating system, hardware architecture, and determine whether the current host is a <strong>macOS Relay Host</strong>, a <strong>Linux Desktop Client</strong>, or a <strong>Dual-Role Host</strong>.</p>
-<div class="codehilite"><pre><span></span><code><span class="c1"># 1.1 Detect OS and Architecture</span>
-<span class="nv">OS_TYPE</span><span class="o">=</span><span class="k">$(</span>uname<span class="w"> </span>-s<span class="k">)</span>
-<span class="nv">ARCH_TYPE</span><span class="o">=</span><span class="k">$(</span>uname<span class="w"> </span>-m<span class="k">)</span>
-<span class="nb">echo</span><span class="w"> </span><span class="s2">"Detected OS: </span><span class="si">${</span><span class="nv">OS_TYPE</span><span class="si">}</span><span class="s2">, Architecture: </span><span class="si">${</span><span class="nv">ARCH_TYPE</span><span class="si">}</span><span class="s2">"</span>
+<pre><code class="language-bash"># 1.1 Detect OS and Architecture
+OS_TYPE=$(uname -s)
+ARCH_TYPE=$(uname -m)
+echo &quot;Detected OS: ${OS_TYPE}, Architecture: ${ARCH_TYPE}&quot;
 
-<span class="c1"># 1.2 Inspect Available Package Managers</span>
-<span class="nv">HAS_BREW</span><span class="o">=</span><span class="nb">false</span>
-<span class="nv">HAS_YAY</span><span class="o">=</span><span class="nb">false</span>
-<span class="nv">HAS_APT</span><span class="o">=</span><span class="nb">false</span>
-<span class="nv">HAS_DNF</span><span class="o">=</span><span class="nb">false</span>
+# 1.2 Inspect Available Package Managers
+HAS_BREW=false
+HAS_YAY=false
+HAS_APT=false
+HAS_DNF=false
 
-<span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>brew<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nv">HAS_BREW</span><span class="o">=</span><span class="nb">true</span>
-<span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>yay<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nv">HAS_YAY</span><span class="o">=</span><span class="nb">true</span>
-<span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>apt-get<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nv">HAS_APT</span><span class="o">=</span><span class="nb">true</span>
-<span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>dnf<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nv">HAS_DNF</span><span class="o">=</span><span class="nb">true</span>
+command -v brew &gt;/dev/null 2&gt;&amp;1 &amp;&amp; HAS_BREW=true
+command -v yay &gt;/dev/null 2&gt;&amp;1 &amp;&amp; HAS_YAY=true
+command -v apt-get &gt;/dev/null 2&gt;&amp;1 &amp;&amp; HAS_APT=true
+command -v dnf &gt;/dev/null 2&gt;&amp;1 &amp;&amp; HAS_DNF=true
 
-<span class="nb">echo</span><span class="w"> </span><span class="s2">"Package managers: brew=</span><span class="si">${</span><span class="nv">HAS_BREW</span><span class="si">}</span><span class="s2">, yay=</span><span class="si">${</span><span class="nv">HAS_YAY</span><span class="si">}</span><span class="s2">, apt=</span><span class="si">${</span><span class="nv">HAS_APT</span><span class="si">}</span><span class="s2">, dnf=</span><span class="si">${</span><span class="nv">HAS_DNF</span><span class="si">}</span><span class="s2">"</span>
-</code></pre></div>
-
+echo &quot;Package managers: brew=${HAS_BREW}, yay=${HAS_YAY}, apt=${HAS_APT}, dnf=${HAS_DNF}&quot;
+</code></pre>
 <h3 id="decision-matrix">Decision Matrix:</h3>
 <ul>
 <li>If <code>OS_TYPE == "Darwin"</code>: Proceed to <strong>Phase 2 (macOS Relay Setup)</strong>.</li>
@@ -530,9 +522,8 @@ redirect_from:
 <p><em>(Execute only when <code>OS_TYPE == "Darwin"</code>)</em></p>
 <h3 id="step-21-verify-macos-permissions-full-disk-access">Step 2.1: Verify macOS Permissions (Full Disk Access)</h3>
 <p>Before installing packages, verify that the active terminal process has permission to read the Messages database:</p>
-<div class="codehilite"><pre><span></span><code>timeout<span class="w"> </span>10s<span class="w"> </span>sqlite3<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/Library/Messages/chat.db"</span><span class="w"> </span><span class="s2">"SELECT count(*) FROM chat;"</span><span class="w"> </span>&lt;/dev/null
-</code></pre></div>
-
+<pre><code class="language-bash">timeout 10s sqlite3 &quot;${HOME}/Library/Messages/chat.db&quot; &quot;SELECT count(*) FROM chat;&quot; &lt;/dev/null
+</code></pre>
 <ul>
 <li><strong>Expected Result:</strong> A non-negative integer (e.g., <code>12</code>).</li>
 <li><strong>Failure Recovery:</strong> If the command fails with <code>Operation not permitted</code>:<blockquote>
@@ -541,227 +532,222 @@ redirect_from:
 </li>
 </ul>
 <h3 id="step-22-install-bluepill-server-via-homebrew">Step 2.2: Install <code>bluepill-server</code> via Homebrew</h3>
-<div class="codehilite"><pre><span></span><code><span class="c1"># Add tap and install formula</span>
-timeout<span class="w"> </span>120s<span class="w"> </span>brew<span class="w"> </span>tap<span class="w"> </span>nertwork/tap<span class="w"> </span>&lt;/dev/null
-timeout<span class="w"> </span>120s<span class="w"> </span>brew<span class="w"> </span>install<span class="w"> </span>nertwork/tap/bluepill<span class="w"> </span>&lt;/dev/null
+<pre><code class="language-bash"># Add tap and install formula
+timeout 120s brew tap nertwork/tap &lt;/dev/null
+timeout 120s brew install nertwork/tap/bluepill &lt;/dev/null
 
-<span class="c1"># Verify installed binary</span>
-timeout<span class="w"> </span>5s<span class="w"> </span>bluepill-server<span class="w"> </span>--version<span class="w"> </span>&lt;/dev/null
-</code></pre></div>
-
+# Verify installed binary
+timeout 5s bluepill-server --version &lt;/dev/null
+</code></pre>
 <h3 id="step-23-generate-secure-server-configuration">Step 2.3: Generate Secure Server Configuration</h3>
 <p>Generate a strong random password if none is provided:</p>
-<div class="codehilite"><pre><span></span><code><span class="nv">CONFIG_DIR</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/.config/bluepill"</span>
-mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_DIR</span><span class="si">}</span><span class="s2">"</span>
-chmod<span class="w"> </span><span class="m">700</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_DIR</span><span class="si">}</span><span class="s2">"</span>
+<pre><code class="language-bash">CONFIG_DIR=&quot;${HOME}/.config/bluepill&quot;
+mkdir -p &quot;${CONFIG_DIR}&quot;
+chmod 700 &quot;${CONFIG_DIR}&quot;
 
-<span class="nv">CONFIG_FILE</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_DIR</span><span class="si">}</span><span class="s2">/server.json"</span>
-<span class="k">if</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span>!<span class="w"> </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$CONFIG_FILE</span><span class="s2">"</span><span class="w"> </span><span class="o">]]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
-<span class="w">    </span><span class="nv">GENERATED_KEY</span><span class="o">=</span><span class="k">$(</span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s2">"import secrets; print(secrets.token_hex(16))"</span><span class="k">)</span>
-<span class="w">    </span>cat<span class="w"> </span><span class="s">&lt;&lt; EOF_CFG &gt; "${CONFIG_FILE}"</span>
-<span class="s">{</span>
-<span class="s">  "host": "0.0.0.0",</span>
-<span class="s">  "port": 1234,</span>
-<span class="s">  "password": "${GENERATED_KEY}",</span>
-<span class="s">  "helperPort": 45670,</span>
-<span class="s">  "enableBackgroundDaemons": true</span>
-<span class="s">}</span>
-<span class="s">EOF_CFG</span>
-<span class="w">    </span>chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_FILE</span><span class="si">}</span><span class="s2">"</span>
-<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"Generated server configuration at </span><span class="si">${</span><span class="nv">CONFIG_FILE</span><span class="si">}</span><span class="s2"> (mode 0600)"</span>
-<span class="k">else</span>
-<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"Configuration already exists at </span><span class="si">${</span><span class="nv">CONFIG_FILE</span><span class="si">}</span><span class="s2">"</span>
-<span class="k">fi</span>
-</code></pre></div>
-
+CONFIG_FILE=&quot;${CONFIG_DIR}/server.json&quot;
+if [[ ! -f &quot;$CONFIG_FILE&quot; ]]; then
+    GENERATED_KEY=$(python3 -c &quot;import secrets; print(secrets.token_hex(16))&quot;)
+    cat &lt;&lt; EOF_CFG &gt; &quot;${CONFIG_FILE}&quot;
+{
+  &quot;host&quot;: &quot;0.0.0.0&quot;,
+  &quot;port&quot;: 1234,
+  &quot;password&quot;: &quot;${GENERATED_KEY}&quot;,
+  &quot;helperPort&quot;: 45670,
+  &quot;enableBackgroundDaemons&quot;: true
+}
+EOF_CFG
+    chmod 600 &quot;${CONFIG_FILE}&quot;
+    echo &quot;Generated server configuration at ${CONFIG_FILE} (mode 0600)&quot;
+else
+    echo &quot;Configuration already exists at ${CONFIG_FILE}&quot;
+fi
+</code></pre>
 <h3 id="step-24-execute-built-in-self-test">Step 2.4: Execute Built-In Self-Test</h3>
 <p>Verify that typedstream serialization and database engines pass all assertions:</p>
-<div class="codehilite"><pre><span></span><code>timeout<span class="w"> </span>15s<span class="w"> </span>bluepill-server<span class="w"> </span>--selftest<span class="w"> </span>&lt;/dev/null
-</code></pre></div>
-
+<pre><code class="language-bash">timeout 15s bluepill-server --selftest &lt;/dev/null
+</code></pre>
 <h3 id="step-25-deploy-and-start-launchagent">Step 2.5: Deploy and Start LaunchAgent</h3>
 <p>Configure automatic startup on user login:</p>
-<div class="codehilite"><pre><span></span><code><span class="nv">PLIST_PATH</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/Library/LaunchAgents/com.nertwork.bluepill-server.plist"</span>
-<span class="nv">BINARY_PATH</span><span class="o">=</span><span class="s2">"</span><span class="k">$(</span>which<span class="w"> </span>bluepill-server<span class="k">)</span><span class="s2">"</span>
-<span class="nv">SERVER_PORT</span><span class="o">=</span><span class="k">$(</span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.port // 1234'</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_FILE</span><span class="si">}</span><span class="s2">"</span><span class="k">)</span>
-<span class="nv">SERVER_PWD</span><span class="o">=</span><span class="k">$(</span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.password // ""'</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CONFIG_FILE</span><span class="si">}</span><span class="s2">"</span><span class="k">)</span>
+<pre><code class="language-bash">PLIST_PATH=&quot;${HOME}/Library/LaunchAgents/com.nertwork.bluepill-server.plist&quot;
+BINARY_PATH=&quot;$(which bluepill-server)&quot;
+SERVER_PORT=$(jq -r '.port // 1234' &quot;${CONFIG_FILE}&quot;)
+SERVER_PWD=$(jq -r '.password // &quot;&quot;' &quot;${CONFIG_FILE}&quot;)
 
-mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/Library/LaunchAgents"</span>
-cat<span class="w"> </span><span class="s">&lt;&lt; EOF_PL &gt; "${PLIST_PATH}"</span>
-<span class="s">&lt;?xml version="1.0" encoding="UTF-8"?&gt;</span>
-<span class="s">&lt;!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"&gt;</span>
-<span class="s">&lt;plist version="1.0"&gt;</span>
-<span class="s">&lt;dict&gt;</span>
-<span class="s">    &lt;key&gt;Label&lt;/key&gt;</span>
-<span class="s">    &lt;string&gt;com.nertwork.bluepill-server&lt;/string&gt;</span>
-<span class="s">    &lt;key&gt;ProgramArguments&lt;/key&gt;</span>
-<span class="s">    &lt;array&gt;</span>
-<span class="s">        &lt;string&gt;${BINARY_PATH}&lt;/string&gt;</span>
-<span class="s">        &lt;string&gt;serve&lt;/string&gt;</span>
-<span class="s">        &lt;string&gt;--port&lt;/string&gt;</span>
-<span class="s">        &lt;string&gt;${SERVER_PORT}&lt;/string&gt;</span>
-<span class="s">        &lt;string&gt;--password&lt;/string&gt;</span>
-<span class="s">        &lt;string&gt;${SERVER_PWD}&lt;/string&gt;</span>
-<span class="s">    &lt;/array&gt;</span>
-<span class="s">    &lt;key&gt;RunAtLoad&lt;/key&gt;</span>
-<span class="s">    &lt;true/&gt;</span>
-<span class="s">    &lt;key&gt;KeepAlive&lt;/key&gt;</span>
-<span class="s">    &lt;true/&gt;</span>
-<span class="s">    &lt;key&gt;StandardOutPath&lt;/key&gt;</span>
-<span class="s">    &lt;string&gt;/tmp/bluepill-server.log&lt;/string&gt;</span>
-<span class="s">    &lt;key&gt;StandardErrorPath&lt;/key&gt;</span>
-<span class="s">    &lt;string&gt;/tmp/bluepill-server.err&lt;/string&gt;</span>
-<span class="s">    &lt;key&gt;ProcessType&lt;/key&gt;</span>
-<span class="s">    &lt;string&gt;Interactive&lt;/string&gt;</span>
-<span class="s">&lt;/dict&gt;</span>
-<span class="s">&lt;/plist&gt;</span>
-<span class="s">EOF_PL</span>
+mkdir -p &quot;${HOME}/Library/LaunchAgents&quot;
+cat &lt;&lt; EOF_PL &gt; &quot;${PLIST_PATH}&quot;
+&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;
+&lt;!DOCTYPE plist PUBLIC &quot;-//Apple//DTD PLIST 1.0//EN&quot; &quot;http://www.apple.com/DTDs/PropertyList-1.0.dtd&quot;&gt;
+&lt;plist version=&quot;1.0&quot;&gt;
+&lt;dict&gt;
+    &lt;key&gt;Label&lt;/key&gt;
+    &lt;string&gt;com.nertwork.bluepill-server&lt;/string&gt;
+    &lt;key&gt;ProgramArguments&lt;/key&gt;
+    &lt;array&gt;
+        &lt;string&gt;${BINARY_PATH}&lt;/string&gt;
+        &lt;string&gt;serve&lt;/string&gt;
+        &lt;string&gt;--port&lt;/string&gt;
+        &lt;string&gt;${SERVER_PORT}&lt;/string&gt;
+        &lt;string&gt;--password&lt;/string&gt;
+        &lt;string&gt;${SERVER_PWD}&lt;/string&gt;
+    &lt;/array&gt;
+    &lt;key&gt;RunAtLoad&lt;/key&gt;
+    &lt;true/&gt;
+    &lt;key&gt;KeepAlive&lt;/key&gt;
+    &lt;true/&gt;
+    &lt;key&gt;StandardOutPath&lt;/key&gt;
+    &lt;string&gt;/tmp/bluepill-server.log&lt;/string&gt;
+    &lt;key&gt;StandardErrorPath&lt;/key&gt;
+    &lt;string&gt;/tmp/bluepill-server.err&lt;/string&gt;
+    &lt;key&gt;ProcessType&lt;/key&gt;
+    &lt;string&gt;Interactive&lt;/string&gt;
+&lt;/dict&gt;
+&lt;/plist&gt;
+EOF_PL
 
-<span class="c1"># Unload previous instance if present, then bootstrap</span>
-launchctl<span class="w"> </span>bootout<span class="w"> </span><span class="s2">"gui/</span><span class="k">$(</span>id<span class="w"> </span>-u<span class="k">)</span><span class="s2">/com.nertwork.bluepill-server"</span><span class="w"> </span><span class="m">2</span>&gt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">true</span>
-timeout<span class="w"> </span>10s<span class="w"> </span>launchctl<span class="w"> </span>bootstrap<span class="w"> </span><span class="s2">"gui/</span><span class="k">$(</span>id<span class="w"> </span>-u<span class="k">)</span><span class="s2">"</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">PLIST_PATH</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span>&lt;/dev/null
+# Unload previous instance if present, then bootstrap
+launchctl bootout &quot;gui/$(id -u)/com.nertwork.bluepill-server&quot; 2&gt;/dev/null || true
+timeout 10s launchctl bootstrap &quot;gui/$(id -u)&quot; &quot;${PLIST_PATH}&quot; &lt;/dev/null
 
-<span class="c1"># Allow 2 seconds for daemon to bind port</span>
-sleep<span class="w"> </span><span class="m">2</span>
+# Allow 2 seconds for daemon to bind port
+sleep 2
 
-<span class="c1"># Verify local REST heartbeat</span>
-timeout<span class="w"> </span>5s<span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-f<span class="w"> </span><span class="s2">"http://127.0.0.1:</span><span class="si">${</span><span class="nv">SERVER_PORT</span><span class="si">}</span><span class="s2">/api/v1/ping?password=</span><span class="si">${</span><span class="nv">SERVER_PWD</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span>&lt;/dev/null
-</code></pre></div>
-
+# Verify local REST heartbeat
+timeout 5s curl -s -f &quot;http://127.0.0.1:${SERVER_PORT}/api/v1/ping?password=${SERVER_PWD}&quot; &lt;/dev/null
+</code></pre>
 <hr />
 <h2 id="phase-3-linux-desktop-client-installation-configuration">Phase 3: Linux Desktop Client Installation &amp; Configuration</h2>
 <p><em>(Execute only when <code>OS_TYPE == "Linux"</code>)</em></p>
 <h3 id="step-31-install-desktop-client-package">Step 3.1: Install Desktop Client Package</h3>
 <h4 id="option-a-arch-linux-omarchy-via-aur">Option A: Arch Linux / Omarchy via AUR</h4>
-<div class="codehilite"><pre><span></span><code><span class="k">if</span><span class="w"> </span><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>yay<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
-<span class="w">    </span>timeout<span class="w"> </span>300s<span class="w"> </span>yay<span class="w"> </span>-S<span class="w"> </span>--noconfirm<span class="w"> </span>bluepill<span class="w"> </span>&lt;/dev/null
-<span class="k">elif</span><span class="w"> </span><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>paru<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
-<span class="w">    </span>timeout<span class="w"> </span>300s<span class="w"> </span>paru<span class="w"> </span>-S<span class="w"> </span>--noconfirm<span class="w"> </span>bluepill<span class="w"> </span>&lt;/dev/null
-<span class="k">else</span>
-<span class="w">    </span><span class="c1"># Fallback: clone and makepkg</span>
-<span class="w">    </span><span class="nv">BUILD_TMP</span><span class="o">=</span><span class="k">$(</span>mktemp<span class="w"> </span>-d<span class="w"> </span>/tmp/bluepill-build-XXXXXX<span class="k">)</span>
-<span class="w">    </span>git<span class="w"> </span>clone<span class="w"> </span>https://aur.archlinux.org/bluepill.git<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
-<span class="w">    </span><span class="nb">cd</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
-<span class="w">    </span>timeout<span class="w"> </span>300s<span class="w"> </span>makepkg<span class="w"> </span>-si<span class="w"> </span>--noconfirm<span class="w"> </span>&lt;/dev/null
-<span class="w">    </span>rm<span class="w"> </span>-rf<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
-<span class="k">fi</span>
-</code></pre></div>
-
+<pre><code class="language-bash">if command -v yay &gt;/dev/null 2&gt;&amp;1; then
+    timeout 300s yay -S --noconfirm bluepill &lt;/dev/null
+elif command -v paru &gt;/dev/null 2&gt;&amp;1; then
+    timeout 300s paru -S --noconfirm bluepill &lt;/dev/null
+else
+    # Fallback: clone and makepkg
+    BUILD_TMP=$(mktemp -d /tmp/bluepill-build-XXXXXX)
+    git clone https://aur.archlinux.org/bluepill.git &quot;${BUILD_TMP}&quot;
+    cd &quot;${BUILD_TMP}&quot;
+    timeout 300s makepkg -si --noconfirm &lt;/dev/null
+    rm -rf &quot;${BUILD_TMP}&quot;
+fi
+</code></pre>
 <h4 id="option-b-debian-ubuntu-build-from-source">Option B: Debian / Ubuntu Build from Source</h4>
-<div class="codehilite"><pre><span></span><code><span class="k">if</span><span class="w"> </span><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>apt-get<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
-<span class="w">    </span>sudo<span class="w"> </span>apt-get<span class="w"> </span>update
-<span class="w">    </span>sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>build-essential<span class="w"> </span>cmake<span class="w"> </span>ninja-build<span class="w"> </span>qt6-base-dev<span class="w"> </span>qt6-declarative-dev<span class="w"> </span>qt6-quickcontrols2-5-dev<span class="w"> </span>qt6-svg-dev<span class="w"> </span>qt6-wayland-dev<span class="w"> </span>libsecret-1-dev<span class="w"> </span>libnotify-dev<span class="w"> </span>ffmpeg
-<span class="w">    </span><span class="nv">BUILD_TMP</span><span class="o">=</span><span class="k">$(</span>mktemp<span class="w"> </span>-d<span class="w"> </span>/tmp/bluepill-src-XXXXXX<span class="k">)</span>
-<span class="w">    </span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/nertwork/bluepill.git<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
-<span class="w">    </span><span class="nb">cd</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
-<span class="w">    </span>cmake<span class="w"> </span>-B<span class="w"> </span>build<span class="w"> </span>-DCMAKE_BUILD_TYPE<span class="o">=</span>Release<span class="w"> </span>-GNinja
-<span class="w">    </span>cmake<span class="w"> </span>--build<span class="w"> </span>build<span class="w"> </span>-j<span class="k">$(</span>nproc<span class="k">)</span>
-<span class="w">    </span>sudo<span class="w"> </span>cmake<span class="w"> </span>--install<span class="w"> </span>build
-<span class="w">    </span>sudo<span class="w"> </span>ln<span class="w"> </span>-sf<span class="w"> </span>/usr/local/bin/bluepill<span class="w"> </span>/usr/local/bin/imsg
-<span class="w">    </span>rm<span class="w"> </span>-rf<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">BUILD_TMP</span><span class="si">}</span><span class="s2">"</span>
-<span class="k">fi</span>
-</code></pre></div>
-
+<pre><code class="language-bash">if command -v apt-get &gt;/dev/null 2&gt;&amp;1; then
+    sudo apt-get update
+    sudo apt-get install -y build-essential cmake ninja-build qt6-base-dev qt6-declarative-dev qt6-quickcontrols2-5-dev qt6-svg-dev qt6-wayland-dev libsecret-1-dev libnotify-dev ffmpeg
+    BUILD_TMP=$(mktemp -d /tmp/bluepill-src-XXXXXX)
+    git clone https://github.com/nertwork/bluepill.git &quot;${BUILD_TMP}&quot;
+    cd &quot;${BUILD_TMP}&quot;
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -GNinja
+    cmake --build build -j$(nproc)
+    sudo cmake --install build
+    sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
+    rm -rf &quot;${BUILD_TMP}&quot;
+fi
+</code></pre>
 <h3 id="step-32-provision-client-state-and-keyring-credentials">Step 3.2: Provision Client State and Keyring Credentials</h3>
-<div class="codehilite"><pre><span></span><code><span class="nv">CLIENT_CONFIG_DIR</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/.config/bluepill"</span>
-mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CLIENT_CONFIG_DIR</span><span class="si">}</span><span class="s2">"</span>
-chmod<span class="w"> </span><span class="m">700</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CLIENT_CONFIG_DIR</span><span class="si">}</span><span class="s2">"</span>
+<pre><code class="language-bash">CLIENT_CONFIG_DIR=&quot;${HOME}/.config/bluepill&quot;
+mkdir -p &quot;${CLIENT_CONFIG_DIR}&quot;
+chmod 700 &quot;${CLIENT_CONFIG_DIR}&quot;
 
-<span class="nv">CLIENT_CONFIG</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">CLIENT_CONFIG_DIR</span><span class="si">}</span><span class="s2">/config.json"</span>
-<span class="nv">RELAY_URL</span><span class="o">=</span><span class="s2">"http://127.0.0.1:1234"</span><span class="w"> </span><span class="c1"># Or ssh://user@mac-host / https://relay.example.com</span>
-<span class="nv">RELAY_PWD</span><span class="o">=</span><span class="s2">"CHANGE_ME_TO_A_SECURE_TOKEN"</span>
+CLIENT_CONFIG=&quot;${CLIENT_CONFIG_DIR}/config.json&quot;
+RELAY_URL=&quot;http://127.0.0.1:1234&quot; # Or ssh://user@mac-host / https://relay.example.com
+RELAY_PWD=&quot;CHANGE_ME_TO_A_SECURE_TOKEN&quot;
 
-cat<span class="w"> </span><span class="s">&lt;&lt; EOF_CLI &gt; "${CLIENT_CONFIG}"</span>
-<span class="s">{</span>
-<span class="s">  "serverUrl": "${RELAY_URL}",</span>
-<span class="s">  "secondaryServerUrl": "",</span>
-<span class="s">  "password": "${RELAY_PWD}",</span>
-<span class="s">  "authMethod": "tls-apikey",</span>
-<span class="s">  "syncDays": 90</span>
-<span class="s">}</span>
-<span class="s">EOF_CLI</span>
-chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">CLIENT_CONFIG</span><span class="si">}</span><span class="s2">"</span>
+cat &lt;&lt; EOF_CLI &gt; &quot;${CLIENT_CONFIG}&quot;
+{
+  &quot;serverUrl&quot;: &quot;${RELAY_URL}&quot;,
+  &quot;secondaryServerUrl&quot;: &quot;&quot;,
+  &quot;password&quot;: &quot;${RELAY_PWD}&quot;,
+  &quot;authMethod&quot;: &quot;tls-apikey&quot;,
+  &quot;syncDays&quot;: 90
+}
+EOF_CLI
+chmod 600 &quot;${CLIENT_CONFIG}&quot;
 
-<span class="c1"># Optional: Store securely in Secret Service Keyring if secret-tool is present</span>
-<span class="k">if</span><span class="w"> </span><span class="nb">command</span><span class="w"> </span>-v<span class="w"> </span>secret-tool<span class="w"> </span>&gt;/dev/null<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
-<span class="w">    </span><span class="nb">printf</span><span class="w"> </span><span class="s2">"%s"</span><span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">RELAY_PWD</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>secret-tool<span class="w"> </span>store<span class="w"> </span>--label<span class="o">=</span><span class="s2">"BluePill Relay Password"</span><span class="w"> </span>service<span class="w"> </span>bluepill<span class="w"> </span>username<span class="w"> </span>relay
-<span class="k">fi</span>
-</code></pre></div>
-
+# Optional: Store securely in Secret Service Keyring if secret-tool is present
+if command -v secret-tool &gt;/dev/null 2&gt;&amp;1; then
+    printf &quot;%s&quot; &quot;${RELAY_PWD}&quot; | secret-tool store --label=&quot;BluePill Relay Password&quot; service bluepill username relay
+fi
+</code></pre>
 <h3 id="step-33-deploy-waybar-notification-integration">Step 3.3: Deploy Waybar Notification Integration</h3>
-<div class="codehilite"><pre><span></span><code><span class="nv">WAYBAR_BIN</span><span class="o">=</span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/.local/bin/bluepill-waybar"</span>
-mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/.local/bin"</span>
+<pre><code class="language-bash">WAYBAR_BIN=&quot;${HOME}/.local/bin/bluepill-waybar&quot;
+mkdir -p &quot;${HOME}/.local/bin&quot;
 
-cat<span class="w"> </span><span class="s">&lt;&lt; 'EOF_WB' &gt; "${WAYBAR_BIN}"</span>
-<span class="s">#!/usr/bin/env bash</span>
-<span class="s">set -euo pipefail</span>
-<span class="s">STATE_FILE="${HOME}/.config/imsg/state.json"</span>
-<span class="s">[[ -f "${HOME}/.config/bluepill/state.json" ]] &amp;&amp; STATE_FILE="${HOME}/.config/bluepill/state.json"</span>
-<span class="s">if [[ ! -f "$STATE_FILE" ]]; then</span>
-<span class="s">    echo '{"text": "", "alt": "disconnected", "tooltip": "BluePill: Disconnected", "class": "disconnected"}'</span>
-<span class="s">    exit 0</span>
-<span class="s">fi</span>
-<span class="s">UNREAD=$(jq -r '.unreadCount // 0' "$STATE_FILE" 2&gt;/dev/null || echo 0)</span>
-<span class="s">CONNECTED=$(jq -r '.connected // false' "$STATE_FILE" 2&gt;/dev/null || echo false)</span>
-<span class="s">if [[ "$CONNECTED" != "true" ]]; then</span>
-<span class="s">    echo '{"text": "󰍡 !", "alt": "offline", "tooltip": "BluePill: Offline", "class": "offline"}'</span>
-<span class="s">elif [[ "$UNREAD" -gt 0 ]]; then</span>
-<span class="s">    echo "{\"text\": \"󰍡 ${UNREAD}\", \"alt\": \"unread\", \"tooltip\": \"${UNREAD} unread message(s)\", \"class\": \"unread\", \"count\": ${UNREAD}}"</span>
-<span class="s">else</span>
-<span class="s">    echo '{"text": "󰍡", "alt": "read", "tooltip": "BluePill: Connected", "class": "read"}'</span>
-<span class="s">fi</span>
-<span class="s">EOF_WB</span>
-chmod<span class="w"> </span>+x<span class="w"> </span><span class="s2">"</span><span class="si">${</span><span class="nv">WAYBAR_BIN</span><span class="si">}</span><span class="s2">"</span>
-</code></pre></div>
-
+cat &lt;&lt; 'EOF_WB' &gt; &quot;${WAYBAR_BIN}&quot;
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_FILE=&quot;${HOME}/.config/imsg/state.json&quot;
+[[ -f &quot;${HOME}/.config/bluepill/state.json&quot; ]] &amp;&amp; STATE_FILE=&quot;${HOME}/.config/bluepill/state.json&quot;
+if [[ ! -f &quot;$STATE_FILE&quot; ]]; then
+    echo '{&quot;text&quot;: &quot;&quot;, &quot;alt&quot;: &quot;disconnected&quot;, &quot;tooltip&quot;: &quot;BluePill: Disconnected&quot;, &quot;class&quot;: &quot;disconnected&quot;}'
+    exit 0
+fi
+UNREAD=$(jq -r '.unreadCount // 0' &quot;$STATE_FILE&quot; 2&gt;/dev/null || echo 0)
+CONNECTED=$(jq -r '.connected // false' &quot;$STATE_FILE&quot; 2&gt;/dev/null || echo false)
+if [[ &quot;$CONNECTED&quot; != &quot;true&quot; ]]; then
+    echo '{&quot;text&quot;: &quot;󰍡 !&quot;, &quot;alt&quot;: &quot;offline&quot;, &quot;tooltip&quot;: &quot;BluePill: Offline&quot;, &quot;class&quot;: &quot;offline&quot;}'
+elif [[ &quot;$UNREAD&quot; -gt 0 ]]; then
+    echo &quot;{\&quot;text\&quot;: \&quot;󰍡 ${UNREAD}\&quot;, \&quot;alt\&quot;: \&quot;unread\&quot;, \&quot;tooltip\&quot;: \&quot;${UNREAD} unread message(s)\&quot;, \&quot;class\&quot;: \&quot;unread\&quot;, \&quot;count\&quot;: ${UNREAD}}&quot;
+else
+    echo '{&quot;text&quot;: &quot;󰍡&quot;, &quot;alt&quot;: &quot;read&quot;, &quot;tooltip&quot;: &quot;BluePill: Connected&quot;, &quot;class&quot;: &quot;read&quot;}'
+fi
+EOF_WB
+chmod +x &quot;${WAYBAR_BIN}&quot;
+</code></pre>
 <h3 id="step-34-verify-client-test-suite-if-source-tree-present">Step 3.4: Verify Client Test Suite (If Source Tree Present)</h3>
 <p>If operating inside a BluePill source repository:</p>
-<div class="codehilite"><pre><span></span><code><span class="k">if</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span>-f<span class="w"> </span><span class="s2">"./bin/test"</span><span class="w"> </span><span class="o">]]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
-<span class="w">    </span>timeout<span class="w"> </span>60s<span class="w"> </span><span class="nv">QT_QPA_PLATFORM</span><span class="o">=</span>offscreen<span class="w"> </span>./bin/test<span class="w"> </span>&lt;/dev/null
-<span class="k">fi</span>
-</code></pre></div>
-
+<pre><code class="language-bash">if [[ -f &quot;./bin/test&quot; ]]; then
+    timeout 60s QT_QPA_PLATFORM=offscreen ./bin/test &lt;/dev/null
+fi
+</code></pre>
 <hr />
 <h2 id="phase-4-end-to-end-verification-checklist">Phase 4: End-to-End Verification Checklist</h2>
 <p>Run this non-interactive verification script to validate complete connectivity across all components:</p>
-<div class="codehilite"><pre><span></span><code><span class="nv">RELAY_HOST</span><span class="o">=</span><span class="s2">"127.0.0.1:1234"</span><span class="w"> </span><span class="c1"># Or your configured relay address</span>
-<span class="nv">RELAY_PWD</span><span class="o">=</span><span class="s2">"CHANGE_ME_TO_A_SECURE_TOKEN"</span>
+<pre><code class="language-bash">RELAY_HOST=&quot;127.0.0.1:1234&quot; # Or your configured relay address
+RELAY_PWD=&quot;CHANGE_ME_TO_A_SECURE_TOKEN&quot;
 
-<span class="nb">echo</span><span class="w"> </span><span class="s2">"=== BluePill End-to-End Validation ==="</span>
+echo &quot;=== BluePill End-to-End Validation ===&quot;
 
-<span class="c1"># 1. Ping Check</span>
-<span class="nv">PING_RESP</span><span class="o">=</span><span class="k">$(</span>timeout<span class="w"> </span>5s<span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-f<span class="w"> </span><span class="s2">"http://</span><span class="si">${</span><span class="nv">RELAY_HOST</span><span class="si">}</span><span class="s2">/api/v1/ping?password=</span><span class="si">${</span><span class="nv">RELAY_PWD</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span>&lt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"FAILED"</span><span class="k">)</span>
-<span class="k">if</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span><span class="s2">"</span><span class="nv">$PING_RESP</span><span class="s2">"</span><span class="w"> </span><span class="o">==</span><span class="w"> </span>*<span class="s2">"pong"</span>*<span class="w"> </span><span class="o">]]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
-<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✓] REST Ping: OK"</span>
-<span class="k">else</span>
-<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✗] REST Ping: FAILED (</span><span class="si">${</span><span class="nv">PING_RESP</span><span class="si">}</span><span class="s2">)"</span>
-<span class="k">fi</span>
+# 1. Ping Check
+PING_RESP=$(timeout 5s curl -s -f &quot;http://${RELAY_HOST}/api/v1/ping?password=${RELAY_PWD}&quot; &lt;/dev/null || echo &quot;FAILED&quot;)
+if [[ &quot;$PING_RESP&quot; == *&quot;pong&quot;* ]]; then
+    echo &quot;[✓] REST Ping: OK&quot;
+else
+    echo &quot;[✗] REST Ping: FAILED (${PING_RESP})&quot;
+fi
 
-<span class="c1"># 2. Server Info &amp; Private API Check</span>
-<span class="nv">INFO_RESP</span><span class="o">=</span><span class="k">$(</span>timeout<span class="w"> </span>5s<span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-f<span class="w"> </span><span class="s2">"http://</span><span class="si">${</span><span class="nv">RELAY_HOST</span><span class="si">}</span><span class="s2">/api/v1/server/info?password=</span><span class="si">${</span><span class="nv">RELAY_PWD</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span>&lt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"{}"</span><span class="k">)</span>
-<span class="nv">OS_VER</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span><span class="s2">"</span><span class="nv">$INFO_RESP</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.data.os_version // "Unknown"'</span><span class="k">)</span>
-<span class="nv">PRIV_API</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span><span class="s2">"</span><span class="nv">$INFO_RESP</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.data.private_api // false'</span><span class="k">)</span>
-<span class="nb">echo</span><span class="w"> </span><span class="s2">"[✓] Server OS: </span><span class="si">${</span><span class="nv">OS_VER</span><span class="si">}</span><span class="s2">, Private API Active: </span><span class="si">${</span><span class="nv">PRIV_API</span><span class="si">}</span><span class="s2">"</span>
+# 2. Server Info &amp; Private API Check
+INFO_RESP=$(timeout 5s curl -s -f &quot;http://${RELAY_HOST}/api/v1/server/info?password=${RELAY_PWD}&quot; &lt;/dev/null || echo &quot;{}&quot;)
+OS_VER=$(echo &quot;$INFO_RESP&quot; | jq -r '.data.os_version // &quot;Unknown&quot;')
+PRIV_API=$(echo &quot;$INFO_RESP&quot; | jq -r '.data.private_api // false')
+echo &quot;[✓] Server OS: ${OS_VER}, Private API Active: ${PRIV_API}&quot;
 
-<span class="c1"># 3. Web UI Accessibility Check</span>
-<span class="nv">WEB_CODE</span><span class="o">=</span><span class="k">$(</span>timeout<span class="w"> </span>5s<span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-o<span class="w"> </span>/dev/null<span class="w"> </span>-w<span class="w"> </span><span class="s2">"%{http_code}"</span><span class="w"> </span><span class="s2">"http://</span><span class="si">${</span><span class="nv">RELAY_HOST</span><span class="si">}</span><span class="s2">/web"</span><span class="w"> </span>&lt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"000"</span><span class="k">)</span>
-<span class="k">if</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span><span class="s2">"</span><span class="nv">$WEB_CODE</span><span class="s2">"</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s2">"200"</span><span class="w"> </span><span class="o">]]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
-<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✓] Embedded Web UI: OK (HTTP 200)"</span>
-<span class="k">else</span>
-<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✗] Embedded Web UI: FAILED (HTTP </span><span class="si">${</span><span class="nv">WEB_CODE</span><span class="si">}</span><span class="s2">)"</span>
-<span class="k">fi</span>
+# 3. Web UI Accessibility Check
+WEB_CODE=$(timeout 5s curl -s -o /dev/null -w &quot;%{http_code}&quot; &quot;http://${RELAY_HOST}/web&quot; &lt;/dev/null || echo &quot;000&quot;)
+if [[ &quot;$WEB_CODE&quot; == &quot;200&quot; ]]; then
+    echo &quot;[✓] Embedded Web UI: OK (HTTP 200)&quot;
+else
+    echo &quot;[✗] Embedded Web UI: FAILED (HTTP ${WEB_CODE})&quot;
+fi
 
-<span class="c1"># 4. Chat Query Check</span>
-<span class="nv">CHAT_RESP</span><span class="o">=</span><span class="k">$(</span>timeout<span class="w"> </span>5s<span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-f<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="s2">"http://</span><span class="si">${</span><span class="nv">RELAY_HOST</span><span class="si">}</span><span class="s2">/api/v1/chat/query?password=</span><span class="si">${</span><span class="nv">RELAY_PWD</span><span class="si">}</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span>-d<span class="w"> </span><span class="s1">'{"limit": 5, "offset": 0}'</span><span class="w"> </span>&lt;/dev/null<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"FAILED"</span><span class="k">)</span>
-<span class="k">if</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span><span class="s2">"</span><span class="nv">$CHAT_RESP</span><span class="s2">"</span><span class="w"> </span><span class="o">==</span><span class="w"> </span>*<span class="s2">"\"status\":200"</span>*<span class="w"> </span><span class="o">]]</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="o">[[</span><span class="w"> </span><span class="s2">"</span><span class="nv">$CHAT_RESP</span><span class="s2">"</span><span class="w"> </span><span class="o">==</span><span class="w"> </span>*<span class="s2">"\"data\":"</span>*<span class="w"> </span><span class="o">]]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
-<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✓] Chat Database Query: OK"</span>
-<span class="k">else</span>
-<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"[✗] Chat Database Query: FAILED"</span>
-<span class="k">fi</span>
+# 4. Chat Query Check
+CHAT_RESP=$(timeout 5s curl -s -f -X POST &quot;http://${RELAY_HOST}/api/v1/chat/query?password=${RELAY_PWD}&quot; \
+    -H &quot;Content-Type: application/json&quot; -d '{&quot;limit&quot;: 5, &quot;offset&quot;: 0}' &lt;/dev/null || echo &quot;FAILED&quot;)
+if [[ &quot;$CHAT_RESP&quot; == *&quot;\&quot;status\&quot;:200&quot;* ]] || [[ &quot;$CHAT_RESP&quot; == *&quot;\&quot;data\&quot;:&quot;* ]]; then
+    echo &quot;[✓] Chat Database Query: OK&quot;
+else
+    echo &quot;[✗] Chat Database Query: FAILED&quot;
+fi
 
-<span class="nb">echo</span><span class="w"> </span><span class="s2">"=== Verification Completed ==="</span>
-</code></pre></div>
+echo &quot;=== Verification Completed ===&quot;
+</code></pre>
+<h1 id="5-icloud-hub-preflight-optional-module-configuration">5. iCloud Hub Preflight &amp; Optional Module Configuration</h1>
+<p>timeout 10s bluepill-server preflight --json &lt;/dev/null</p>
+<h1 id="optional-module-toggles-all-enabled-by-default">Optional module toggles (all enabled by default):</h1>
+<h1 id="bluepill-server-enable-notes-enable-calendar-enable-photos-preflight-no-fix">bluepill-server --enable-notes --enable-calendar --enable-photos preflight --no-fix</h1>
         </main>
     </div>
 

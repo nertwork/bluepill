@@ -23,7 +23,7 @@ A clear and concise description of what you expected to happen.
 - **Wayland Compositor / Desktop:** e.g. Hyprland / KDE Plasma / GNOME
 - **Qt6 Version:** `qmake6 -v` or `pacman -Q qt6-base`
 
-### Zero-PII Sanitized Logs or Terminal Output
+### Diagnostic Logs & Terminal Output
 ```
-(Paste terminal output here. Please redact any personal handles, private numbers, and API passwords!)
+(Paste terminal output here. Please replace any personal phone numbers, server addresses, or API passwords with placeholders.)
 ```

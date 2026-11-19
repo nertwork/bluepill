@@ -522,12 +522,15 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#runbook-2-fixing-macos-sleep-standby-disconnections">Runbook 2: Fixing macOS Sleep / Standby Disconnections</a></li>
 <li><a href="#runbook-3-diagnosing-private-api-45670-unavailability">Runbook 3: Diagnosing Private API (:45670) Unavailability</a></li>
 <li><a href="#runbook-4-verifying-full-disk-access-after-macos-upgrades">Runbook 4: Verifying Full Disk Access After macOS Upgrades</a></li>
+<li><a href="#runbook-5-icloud-hub-preflight-optional-module-toggles-notes-calendar-photos">Runbook 5: iCloud Hub Preflight &amp; Optional Module Toggles (Notes, Calendar, Photos)</a></li>
 </ul>
 </li>
 </ul>
 </li>
 </ul>
 </div>
+
+
 
             </div>
         </aside>
@@ -539,19 +542,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
-                </div>
-                <a href="index.html">← Home</a>
-            </div>
-
-            <hr />
-<p>layout: default
-title: BluePill Installation &amp; Operations Guide
-permalink: /INSTALLATION_AND_OPERATIONS_GUIDE.html
-redirect_from:
-  - /INSTALLATION_AND_OPERATIONS_GUIDE.html
-  - /INSTALLATION_AND_OPERATIONS_GUIDE</p>
-<hr />
-<blockquote>
+                <blockquote>
 <p>[!TIP]
 <strong>Interactive Documentation Portal:</strong> View the formatted dark-mode documentation with one-click copy buttons and live sidebar navigation at:<br />
 <a href="https://nertwork.github.io/bluepill/INSTALLATION_AND_OPERATIONS_GUIDE.html"><strong>https://nertwork.github.io/bluepill/INSTALLATION_AND_OPERATIONS_GUIDE.html</strong></a></p>
@@ -562,24 +553,24 @@ redirect_from:
 <h2 id="table-of-contents">Table of Contents</h2>
 <ol>
 <li><a href="#1-architecture--ecosystem-overview">Architecture &amp; Ecosystem Overview</a></li>
-<li><a href="#2-linux-desktop-installation--configuration">Linux Desktop Installation &amp; Configuration</a>
-   - <a href="#arch-linux--omarchy-x86_64--apple-silicon-arm64">Arch Linux &amp; Omarchy (x86_64 &amp; Apple Silicon ARM64)</a>
-   - <a href="#waybar-module-integration">Waybar Module Integration</a>
-   - <a href="#hyprland-window-rules--keybindings">Hyprland Window Rules &amp; Keybindings</a>
-   - <a href="#secret-service-keyring-integration">Secret Service Keyring Integration</a>
-   - <a href="#pipewire--voice-memo-support">PipeWire &amp; Voice Memo Support</a>
-   - <a href="#debian--ubuntu">Debian &amp; Ubuntu</a>
-   - <a href="#fedora--rhel">Fedora &amp; RHEL</a>
-   - <a href="#nixos--generic-linux">NixOS &amp; Generic Linux</a></li>
-<li><a href="#3-macos-relay-server-bluepill-server-setup">macOS Relay Server (<code>bluepill-server</code>) Setup</a>
-   - <a href="#prerequisites--supported-versions">Prerequisites &amp; Supported Versions</a>
-   - <a href="#homebrew-installation">Homebrew Installation</a>
-   - <a href="#full-disk-access--permissions">Full Disk Access &amp; Permissions</a>
-   - <a href="#configuration--self-test">Configuration &amp; Self-Test</a>
-   - <a href="#macos-launchagent-daemon">macOS LaunchAgent Daemon</a>
-   - <a href="#imcore-private-api-helper-45670">IMCore Private API Helper (:45670)</a>
-   - <a href="#direct-ssh-vs-httprest-transports">Direct SSH vs HTTP/REST Transports</a>
-   - <a href="#reverse-proxy--tls-termination">Reverse Proxy &amp; TLS Termination</a></li>
+<li><a href="#2-linux-desktop-installation--configuration">Linux Desktop Installation &amp; Configuration</a></li>
+<li><a href="#arch-linux--omarchy-x86_64--apple-silicon-arm64">Arch Linux &amp; Omarchy (x86_64 &amp; Apple Silicon ARM64)</a></li>
+<li><a href="#waybar-module-integration">Waybar Module Integration</a></li>
+<li><a href="#hyprland-window-rules--keybindings">Hyprland Window Rules &amp; Keybindings</a></li>
+<li><a href="#secret-service-keyring-integration">Secret Service Keyring Integration</a></li>
+<li><a href="#pipewire--voice-memo-support">PipeWire &amp; Voice Memo Support</a></li>
+<li><a href="#debian--ubuntu">Debian &amp; Ubuntu</a></li>
+<li><a href="#fedora--rhel">Fedora &amp; RHEL</a></li>
+<li><a href="#nixos--generic-linux">NixOS &amp; Generic Linux</a></li>
+<li><a href="#3-macos-relay-server-bluepill-server-setup">macOS Relay Server (<code>bluepill-server</code>) Setup</a></li>
+<li><a href="#prerequisites--supported-versions">Prerequisites &amp; Supported Versions</a></li>
+<li><a href="#homebrew-installation">Homebrew Installation</a></li>
+<li><a href="#full-disk-access--permissions">Full Disk Access &amp; Permissions</a></li>
+<li><a href="#configuration--self-test">Configuration &amp; Self-Test</a></li>
+<li><a href="#macos-launchagent-daemon">macOS LaunchAgent Daemon</a></li>
+<li><a href="#imcore-private-api-helper-45670">IMCore Private API Helper (:45670)</a></li>
+<li><a href="#direct-ssh-vs-httprest-transports">Direct SSH vs HTTP/REST Transports</a></li>
+<li><a href="#reverse-proxy--tls-termination">Reverse Proxy &amp; TLS Termination</a></li>
 <li><a href="#4-built-in-web-ui-operations-web">Built-In Web UI Operations (<code>/web</code>)</a></li>
 <li><a href="#5-complete-rest--rpc-api-reference">Complete REST &amp; RPC API Reference</a></li>
 <li><a href="#6-operational-runbooks--troubleshooting">Operational Runbooks &amp; Troubleshooting</a></li>
@@ -587,103 +578,106 @@ redirect_from:
 <hr />
 <h2 id="1-architecture-ecosystem-overview">1. Architecture &amp; Ecosystem Overview</h2>
 <p>BluePill decouples the Apple Messages ecosystem into high-performance, native components tailored for modern Linux desktops and headless macOS hosts without Electron, Flutter, or Node.js bloat:</p>
-<div class="codehilite"><pre><span></span><code><span class="n">flowchart</span><span class="w"> </span><span class="n">TD</span>
-<span class="w">    </span><span class="n">subgraph</span><span class="w"> </span><span class="n">Linux</span><span class="p">[</span><span class="s2">"Linux Workstation (x86_64 / aarch64)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">GUI</span><span class="p">[</span><span class="s2">"BluePill Qt6/QML Desktop Client</span><span class="se">\n</span><span class="s2">(~48 MB RSS · C++20 · Wayland/X11)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">CLI</span><span class="p">[</span><span class="s2">"Headless CLI &amp; Scripting</span><span class="se">\n</span><span class="s2">(bluepill send / status / query)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">CACHE</span><span class="p">[(</span><span class="s2">"Local SQLite WAL Cache</span><span class="se">\n</span><span class="s2">(~/.config/bluepill/ + ~/.cache/imsg/)"</span><span class="p">)]</span>
-<span class="w">        </span><span class="n">KEYRING</span><span class="p">[</span><span class="s2">"Secret Service Keyring</span><span class="se">\n</span><span class="s2">(secret-tool / libsecret)"</span><span class="p">]</span>
-<span class="w">    </span><span class="n">end</span>
+<pre><code class="language-mermaid">flowchart TD
+    subgraph Linux[&quot;Linux Workstation (x86_64 / aarch64)&quot;]
+        GUI[&quot;BluePill Qt6/QML Desktop Client\n(~48 MB RSS · C++20 · Wayland/X11)&quot;]
+        CLI[&quot;Headless CLI &amp; Scripting\n(bluepill send / status / query)&quot;]
+        CACHE[(&quot;Local SQLite WAL Cache\n(~/.config/bluepill/ + ~/.cache/imsg/)&quot;)]
+        KEYRING[&quot;Secret Service Keyring\n(secret-tool / libsecret)&quot;]
+    end
 
-<span class="w">    </span><span class="n">subgraph</span><span class="w"> </span><span class="n">Browser</span><span class="p">[</span><span class="s2">"Universal Web Access"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">WEB</span><span class="p">[</span><span class="s2">"BluePill Embedded Web UI</span><span class="se">\n</span><span class="s2">(http://&lt;relay&gt;:1234/web)"</span><span class="p">]</span>
-<span class="w">    </span><span class="n">end</span>
+    subgraph Browser[&quot;Universal Web Access&quot;]
+        WEB[&quot;BluePill Embedded Web UI\n(http://&lt;relay&gt;:1234/web)&quot;]
+    end
 
-<span class="w">    </span><span class="n">subgraph</span><span class="w"> </span><span class="n">Mac</span><span class="p">[</span><span class="s2">"macOS Relay Host (Intel / Apple Silicon / KVM)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">RELAY</span><span class="p">[</span><span class="s2">"bluepill-server Daemon</span><span class="se">\n</span><span class="s2">(~18 MB RSS · Python 3 stdlib)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">HELPER</span><span class="p">[</span><span class="s2">"IMCore Helper Daemon</span><span class="se">\n</span><span class="s2">(127.0.0.1:45670)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">CHATDB</span><span class="p">[(</span><span class="s2">"~/Library/Messages/chat.db</span><span class="se">\n</span><span class="s2">(SQLite WAL &lt;2ms)"</span><span class="p">)]</span>
-<span class="w">        </span><span class="n">ATTACH</span><span class="p">[(</span><span class="s2">"~/Library/Messages/Attachments"</span><span class="p">)]</span>
-<span class="w">        </span><span class="n">CONTACTS</span><span class="p">[(</span><span class="s2">"AddressBook-v22.abcddb</span><span class="se">\n</span><span class="s2">(macOS Contacts &lt;5ms)"</span><span class="p">)]</span>
-<span class="w">        </span><span class="n">PINNED</span><span class="p">[</span><span class="s2">"com.apple.messages.pinning.plist"</span><span class="p">]</span>
-<span class="w">    </span><span class="n">end</span>
+    subgraph Mac[&quot;macOS Relay Host (Intel / Apple Silicon / KVM)&quot;]
+        RELAY[&quot;bluepill-server Daemon\n(~18 MB RSS · Python 3 stdlib)&quot;]
+        HELPER[&quot;IMCore Helper Daemon\n(127.0.0.1:45670)&quot;]
+        CHATDB[(&quot;~/Library/Messages/chat.db\n(SQLite WAL &lt;2ms)&quot;)]
+        ATTACH[(&quot;~/Library/Messages/Attachments&quot;)]
+        CONTACTS[(&quot;AddressBook-v22.abcddb\n(macOS Contacts &lt;5ms)&quot;)]
+        PINNED[&quot;com.apple.messages.pinning.plist&quot;]
+    end
 
-<span class="w">    </span><span class="n">GUI</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s2">"Primary: HTTPS REST + Socket.IO v4</span><span class="se">\n</span><span class="s2">Failover: Direct SSH (ssh://)"</span><span class="o">|</span><span class="w"> </span><span class="n">RELAY</span>
-<span class="w">    </span><span class="n">CLI</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s2">"HTTPS REST / Direct SSH JSON-RPC"</span><span class="o">|</span><span class="w"> </span><span class="n">RELAY</span>
-<span class="w">    </span><span class="n">WEB</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s2">"HTTP REST + SSE / WebSockets"</span><span class="o">|</span><span class="w"> </span><span class="n">RELAY</span>
-<span class="w">    </span><span class="n">GUI</span><span class="w"> </span><span class="o">---</span><span class="w"> </span><span class="n">CACHE</span>
-<span class="w">    </span><span class="n">GUI</span><span class="w"> </span><span class="o">---</span><span class="w"> </span><span class="n">KEYRING</span>
-<span class="w">    </span><span class="n">RELAY</span><span class="w"> </span><span class="o">--&gt;|</span><span class="s2">"Read-only WAL query"</span><span class="o">|</span><span class="w"> </span><span class="n">CHATDB</span>
-<span class="w">    </span><span class="n">RELAY</span><span class="w"> </span><span class="o">--&gt;|</span><span class="s2">"Path resolution &amp; thumbnailing"</span><span class="o">|</span><span class="w"> </span><span class="n">ATTACH</span>
-<span class="w">    </span><span class="n">RELAY</span><span class="w"> </span><span class="o">--&gt;|</span><span class="s2">"Contact resolution"</span><span class="o">|</span><span class="w"> </span><span class="n">CONTACTS</span>
-<span class="w">    </span><span class="n">RELAY</span><span class="w"> </span><span class="o">--&gt;|</span><span class="s2">"Pinned chats sync"</span><span class="o">|</span><span class="w"> </span><span class="n">PINNED</span>
-<span class="w">    </span><span class="n">RELAY</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s2">"Private API calls"</span><span class="o">|</span><span class="w"> </span><span class="n">HELPER</span>
-<span class="w">    </span><span class="n">HELPER</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s2">"AppKit / IMCore Injection"</span><span class="o">|</span><span class="w"> </span><span class="n">MessagesApp</span><span class="p">[</span><span class="s2">"Messages.app"</span><span class="p">]</span>
-</code></pre></div>
-
+    GUI &lt;--&gt;|&quot;Primary: HTTPS REST + Socket.IO v4\nFailover: Direct SSH (ssh://)&quot;| RELAY
+    CLI &lt;--&gt;|&quot;HTTPS REST / Direct SSH JSON-RPC&quot;| RELAY
+    WEB &lt;--&gt;|&quot;HTTP REST + SSE / WebSockets&quot;| RELAY
+    GUI --- CACHE
+    GUI --- KEYRING
+    RELAY --&gt;|&quot;Read-only WAL query&quot;| CHATDB
+    RELAY --&gt;|&quot;Path resolution &amp; thumbnailing&quot;| ATTACH
+    RELAY --&gt;|&quot;Contact resolution&quot;| CONTACTS
+    RELAY --&gt;|&quot;Pinned chats sync&quot;| PINNED
+    RELAY &lt;--&gt;|&quot;Private API calls&quot;| HELPER
+    HELPER &lt;--&gt;|&quot;AppKit / IMCore Injection&quot;| MessagesApp[&quot;Messages.app&quot;]
+</code></pre>
 <h3 id="core-components">Core Components</h3>
 <ol>
+<li><strong>Native Linux Desktop Client (<code>bluepill</code>):</strong></li>
+<li><strong>Engine:</strong> C++20 compiled binary with Qt 6.4+ / QML.</li>
+<li><strong>Footprint:</strong> ~48 MB RSS memory usage under active load.</li>
+<li><strong>Display:</strong> Wayland native (Hyprland, Sway, KDE Plasma, GNOME) and X11 fallback.</li>
+<li><strong>Latency:</strong> Instant 0ms startup using local SQLite WAL thread cache and asynchronous background delta synchronization.</li>
+<li><strong>Push Transport:</strong> Real-time push notifications over Engine.IO v4 / Socket.IO v4 WebSocket connections.</li>
 <li>
-<p><strong>Native Linux Desktop Client (<code>bluepill</code>):</strong>
-   - <strong>Engine:</strong> C++20 compiled binary with Qt 6.4+ / QML.
-   - <strong>Footprint:</strong> ~48 MB RSS memory usage under active load.
-   - <strong>Display:</strong> Wayland native (Hyprland, Sway, KDE Plasma, GNOME) and X11 fallback.
-   - <strong>Latency:</strong> Instant 0ms startup using local SQLite WAL thread cache and asynchronous background delta synchronization.
-   - <strong>Push Transport:</strong> Real-time push notifications over Engine.IO v4 / Socket.IO v4 WebSocket connections.
-   - <strong>Features:</strong> Pinned conversations avatar bar, 1-click 2FA OTP copy pill, inline photo viewer lightbox, multi-photo attachments gallery, <code>Ctrl+V</code> clipboard image pasting, theme hot-reloading (Omarchy / Catppuccin / Tokyo Night / Solarized).</p>
+<p><strong>Features:</strong> Pinned conversations avatar bar, 1-click 2FA OTP copy pill, inline photo viewer lightbox, multi-photo attachments gallery, <code>Ctrl+V</code> clipboard image pasting, theme hot-reloading (Omarchy / Catppuccin / Tokyo Night / Solarized).</p>
 </li>
 <li>
-<p><strong>Headless macOS Relay Server (<code>bluepill-server</code>):</strong>
-   - <strong>Engine:</strong> Zero-Electron, single-file Python 3 standard library daemon (<code>sqlite3</code>, <code>plistlib</code>, <code>http.server</code>, <code>threading</code>).
-   - <strong>Footprint:</strong> ~18 MB RSS memory usage.
-   - <strong>Database Access:</strong> Direct read-only SQLite WAL access to <code>~/Library/Messages/chat.db</code> with query execution times consistently <code>&lt;2ms</code>.
-   - <strong>Contact Resolution:</strong> Direct queries against <code>AddressBook-v22.abcddb</code> with phone number and email normalization in <code>&lt;5ms</code>.
-   - <strong>Backward Compatibility:</strong> 100% drop-in compatible with the legacy BlueBubbles Server (<code>1.9.x</code>) REST API and Socket.IO protocol.</p>
+<p><strong>Headless macOS Relay Server (<code>bluepill-server</code>):</strong></p>
+</li>
+<li><strong>Engine:</strong> Zero-Electron, single-file Python 3 standard library daemon (<code>sqlite3</code>, <code>plistlib</code>, <code>http.server</code>, <code>threading</code>).</li>
+<li><strong>Footprint:</strong> ~18 MB RSS memory usage.</li>
+<li><strong>Database Access:</strong> Direct read-only SQLite WAL access to <code>~/Library/Messages/chat.db</code> with query execution times consistently <code>&lt;2ms</code>.</li>
+<li><strong>Contact Resolution:</strong> Direct queries against <code>AddressBook-v22.abcddb</code> with phone number and email normalization in <code>&lt;5ms</code>.</li>
+<li>
+<p><strong>Backward Compatibility:</strong> 100% drop-in compatible with the legacy BlueBubbles Server (<code>1.9.x</code>) REST API and Socket.IO protocol.</p>
 </li>
 <li>
-<p><strong>IMCore Private API Helper (<code>:45670</code>):</strong>
-   - Lightweight companion agent listening on <code>127.0.0.1:45670</code>.
-   - Interacts with macOS internal <code>IMCore</code> frameworks to unlock advanced iMessage capabilities:</p>
-<ul>
+<p><strong>IMCore Private API Helper (<code>:45670</code>):</strong></p>
+</li>
+<li>Lightweight companion agent listening on <code>127.0.0.1:45670</code>.</li>
+<li>Interacts with macOS <code>IMCore</code> frameworks to unlock advanced iMessage capabilities:<ul>
 <li>Real-time Tapback reactions (Love, Like, Dislike, Laugh, Emphasize, Question).</li>
 <li>Native inline thread replies and parent message association.</li>
 <li>Message editing and unsend capabilities (macOS Ventura+).</li>
 <li>Expressive send effects (Confetti, Slam, Lasers, Invisible Ink, Echo, etc.).</li>
 <li>Live typing indicators and background read receipts.</li>
 <li>Group chat participant additions and removals.</li>
-<li>If the helper is not active, <code>bluepill-server</code> automatically falls back to Zero-SIP AppleScript (<code>osascript</code>) sending mode.</li>
 </ul>
 </li>
 <li>
-<p><strong>Embedded Web UI (<code>/web</code>):</strong>
-   - Built directly into <code>bluepill-server</code> with zero external dependencies.
-   - Provides full browser access at <code>http://&lt;relay-host&gt;:1234/web</code> on any desktop, laptop, tablet, or phone.
-   - Features inline 28-bar voice memo waveform players, browser audio recording (<code>🎙</code>), Expressive Send pickers, Send Later scheduled messaging, attachment drag-and-drop, global search, Find My tracking, and live server logs.</p>
+<p>If the helper is not active, <code>bluepill-server</code> automatically falls back to Zero-SIP AppleScript (<code>osascript</code>) sending mode.</p>
 </li>
 <li>
-<p><strong>Direct SSH Transport (<code>ssh://</code>):</strong>
-   - Enables secure, firewall-bypassing communication without exposing HTTP/HTTPS ports to the public Internet.
-   - Spawns <code>bluepill-server stdio</code> on the remote Mac over standard OpenSSH tunnels and exchanges line-delimited JSON-RPC messages.</p>
+<p><strong>Embedded Web UI (<code>/web</code>):</strong></p>
 </li>
+<li>Built directly into <code>bluepill-server</code> with zero external dependencies.</li>
+<li>Provides full browser access at <code>http://&lt;relay-host&gt;:1234/web</code> on any desktop, laptop, tablet, or phone.</li>
+<li>
+<p>Features inline 28-bar voice memo waveform players, browser audio recording (<code>🎙</code>), Expressive Send pickers, Send Later scheduled messaging, attachment drag-and-drop, global search, Find My tracking, and live server logs.</p>
+</li>
+<li>
+<p><strong>Direct SSH Transport (<code>ssh://</code>):</strong></p>
+</li>
+<li>Enables secure, firewall-bypassing communication without exposing HTTP/HTTPS ports to the public Internet.</li>
+<li>Spawns <code>bluepill-server stdio</code> on the remote Mac over standard OpenSSH tunnels and exchanges line-delimited JSON-RPC messages.</li>
 </ol>
 <hr />
 <h2 id="2-linux-desktop-installation-configuration">2. Linux Desktop Installation &amp; Configuration</h2>
 <h3 id="arch-linux-omarchy-x86_64-apple-silicon-arm64">Arch Linux &amp; Omarchy (x86_64 &amp; Apple Silicon ARM64)</h3>
 <p>The official package is distributed via the Arch User Repository (AUR) as <code>bluepill</code>.</p>
 <h4 id="1-installation-via-aur-helper">1. Installation via AUR Helper</h4>
-<div class="codehilite"><pre><span></span><code><span class="c1"># Using yay</span>
-yay<span class="w"> </span>-S<span class="w"> </span>bluepill
+<pre><code class="language-bash"># Using yay
+yay -S bluepill
 
-<span class="c1"># Using paru</span>
-paru<span class="w"> </span>-S<span class="w"> </span>bluepill
-</code></pre></div>
-
+# Using paru
+paru -S bluepill
+</code></pre>
 <h4 id="2-manual-pkgbuild-compilation">2. Manual PKGBUILD Compilation</h4>
-<div class="codehilite"><pre><span></span><code>git<span class="w"> </span>clone<span class="w"> </span>https://aur.archlinux.org/bluepill.git<span class="w"> </span>/tmp/bluepill-aur
-<span class="nb">cd</span><span class="w"> </span>/tmp/bluepill-aur
-makepkg<span class="w"> </span>-si
-</code></pre></div>
-
+<pre><code class="language-bash">git clone https://aur.archlinux.org/bluepill.git /tmp/bluepill-aur
+cd /tmp/bluepill-aur
+makepkg -si
+</code></pre>
 <h4 id="3-verified-system-packages-installed">3. Verified System Packages Installed</h4>
 <ul>
 <li>Binary: <code>/usr/bin/bluepill</code></li>
@@ -695,192 +689,177 @@ makepkg<span class="w"> </span>-si
 </ul>
 <h4 id="4-background-service-activation">4. Background Service Activation</h4>
 <p>To launch BluePill automatically on graphical login:</p>
-<div class="codehilite"><pre><span></span><code>systemctl<span class="w"> </span>--user<span class="w"> </span>daemon-reload
-systemctl<span class="w"> </span>--user<span class="w"> </span><span class="nb">enable</span><span class="w"> </span>--now<span class="w"> </span>bluepill.service
-</code></pre></div>
-
+<pre><code class="language-bash">systemctl --user daemon-reload
+systemctl --user enable --now bluepill.service
+</code></pre>
 <hr />
 <h3 id="waybar-module-integration">Waybar Module Integration</h3>
 <p>For tiling Wayland setups (Hyprland / Sway / Omarchy), BluePill includes an unread notification count script for Waybar.</p>
 <h4 id="1-helper-script-localbinbluepill-waybar">1. Helper Script (<code>~/.local/bin/bluepill-waybar</code>)</h4>
-<div class="codehilite"><pre><span></span><code>cat<span class="w"> </span><span class="s">&lt;&lt; 'EOF_WAYBAR' &gt; ~/.local/bin/bluepill-waybar</span>
-<span class="s">#!/usr/bin/env bash</span>
-<span class="s">set -euo pipefail</span>
+<pre><code class="language-bash">cat &lt;&lt; 'EOF_WAYBAR' &gt; ~/.local/bin/bluepill-waybar
+#!/usr/bin/env bash
+set -euo pipefail
 
-<span class="s">STATE_FILE="${HOME}/.config/imsg/state.json"</span>
-<span class="s">[[ -f "${HOME}/.config/bluepill/state.json" ]] &amp;&amp; STATE_FILE="${HOME}/.config/bluepill/state.json"</span>
+STATE_FILE=&quot;${HOME}/.config/imsg/state.json&quot;
+[[ -f &quot;${HOME}/.config/bluepill/state.json&quot; ]] &amp;&amp; STATE_FILE=&quot;${HOME}/.config/bluepill/state.json&quot;
 
-<span class="s">if [[ ! -f "$STATE_FILE" ]]; then</span>
-<span class="s">    echo '{"text": "", "alt": "disconnected", "tooltip": "BluePill: Disconnected", "class": "disconnected"}'</span>
-<span class="s">    exit 0</span>
-<span class="s">fi</span>
+if [[ ! -f &quot;$STATE_FILE&quot; ]]; then
+    echo '{&quot;text&quot;: &quot;&quot;, &quot;alt&quot;: &quot;disconnected&quot;, &quot;tooltip&quot;: &quot;BluePill: Disconnected&quot;, &quot;class&quot;: &quot;disconnected&quot;}'
+    exit 0
+fi
 
-<span class="s">UNREAD=$(jq -r '.unreadCount // 0' "$STATE_FILE" 2&gt;/dev/null || echo 0)</span>
-<span class="s">CONNECTED=$(jq -r '.connected // false' "$STATE_FILE" 2&gt;/dev/null || echo false)</span>
+UNREAD=$(jq -r '.unreadCount // 0' &quot;$STATE_FILE&quot; 2&gt;/dev/null || echo 0)
+CONNECTED=$(jq -r '.connected // false' &quot;$STATE_FILE&quot; 2&gt;/dev/null || echo false)
 
-<span class="s">if [[ "$CONNECTED" != "true" ]]; then</span>
-<span class="s">    echo '{"text": "󰍡 !", "alt": "offline", "tooltip": "BluePill: Relay Offline", "class": "offline"}'</span>
-<span class="s">elif [[ "$UNREAD" -gt 0 ]]; then</span>
-<span class="s">    echo "{\"text\": \"󰍡 ${UNREAD}\", \"alt\": \"unread\", \"tooltip\": \"${UNREAD} unread message(s)\", \"class\": \"unread\", \"count\": ${UNREAD}}"</span>
-<span class="s">else</span>
-<span class="s">    echo '{"text": "󰍡", "alt": "read", "tooltip": "BluePill: Connected", "class": "read"}'</span>
-<span class="s">fi</span>
-<span class="s">EOF_WAYBAR</span>
-chmod<span class="w"> </span>+x<span class="w"> </span>~/.local/bin/bluepill-waybar
-</code></pre></div>
-
+if [[ &quot;$CONNECTED&quot; != &quot;true&quot; ]]; then
+    echo '{&quot;text&quot;: &quot;󰍡 !&quot;, &quot;alt&quot;: &quot;offline&quot;, &quot;tooltip&quot;: &quot;BluePill: Relay Offline&quot;, &quot;class&quot;: &quot;offline&quot;}'
+elif [[ &quot;$UNREAD&quot; -gt 0 ]]; then
+    echo &quot;{\&quot;text\&quot;: \&quot;󰍡 ${UNREAD}\&quot;, \&quot;alt\&quot;: \&quot;unread\&quot;, \&quot;tooltip\&quot;: \&quot;${UNREAD} unread message(s)\&quot;, \&quot;class\&quot;: \&quot;unread\&quot;, \&quot;count\&quot;: ${UNREAD}}&quot;
+else
+    echo '{&quot;text&quot;: &quot;󰍡&quot;, &quot;alt&quot;: &quot;read&quot;, &quot;tooltip&quot;: &quot;BluePill: Connected&quot;, &quot;class&quot;: &quot;read&quot;}'
+fi
+EOF_WAYBAR
+chmod +x ~/.local/bin/bluepill-waybar
+</code></pre>
 <h4 id="2-waybar-configuration-configwaybarconfigjsonc">2. Waybar Configuration (<code>~/.config/waybar/config.jsonc</code>)</h4>
 <p>Add <code>"custom/bluepill"</code> to your modules list:</p>
-<div class="codehilite"><pre><span></span><code><span class="nt">"custom/bluepill"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="nt">"format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"{}"</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">"return-type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"json"</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">"exec"</span><span class="p">:</span><span class="w"> </span><span class="s2">"~/.local/bin/bluepill-waybar"</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">"interval"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">"on-click"</span><span class="p">:</span><span class="w"> </span><span class="s2">"bluepill"</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">"signal"</span><span class="p">:</span><span class="w"> </span><span class="mi">8</span>
-<span class="p">}</span>
-</code></pre></div>
-
+<pre><code class="language-json">&quot;custom/bluepill&quot;: {
+    &quot;format&quot;: &quot;{}&quot;,
+    &quot;return-type&quot;: &quot;json&quot;,
+    &quot;exec&quot;: &quot;~/.local/bin/bluepill-waybar&quot;,
+    &quot;interval&quot;: 2,
+    &quot;on-click&quot;: &quot;bluepill&quot;,
+    &quot;signal&quot;: 8
+}
+</code></pre>
 <h4 id="3-waybar-styling-configwaybarstylecss">3. Waybar Styling (<code>~/.config/waybar/style.css</code>)</h4>
-<div class="codehilite"><pre><span></span><code><span class="p">#</span><span class="nn">custom-bluepill</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">padding</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="mi">10</span><span class="kt">px</span><span class="p">;</span>
-<span class="w">    </span><span class="k">color</span><span class="p">:</span><span class="w"> </span><span class="mh">#e6edf3</span><span class="p">;</span>
-<span class="p">}</span>
+<pre><code class="language-css">#custom-bluepill {
+    padding: 0 10px;
+    color: #e6edf3;
+}
 
-<span class="p">#</span><span class="nn">custom-bluepill</span><span class="p">.</span><span class="nc">unread</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">color</span><span class="p">:</span><span class="w"> </span><span class="mh">#0a84ff</span><span class="p">;</span>
-<span class="w">    </span><span class="k">font-weight</span><span class="p">:</span><span class="w"> </span><span class="kc">bold</span><span class="p">;</span>
-<span class="w">    </span><span class="k">animation</span><span class="p">:</span><span class="w"> </span><span class="kc">blink</span><span class="w"> </span><span class="mi">1</span><span class="kt">s</span><span class="w"> </span><span class="kc">ease</span><span class="w"> </span><span class="kc">infinite</span><span class="w"> </span><span class="kc">alternate</span><span class="p">;</span>
-<span class="p">}</span>
+#custom-bluepill.unread {
+    color: #0a84ff;
+    font-weight: bold;
+    animation: blink 1s ease infinite alternate;
+}
 
-<span class="p">#</span><span class="nn">custom-bluepill</span><span class="p">.</span><span class="nc">offline</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">color</span><span class="p">:</span><span class="w"> </span><span class="mh">#f85149</span><span class="p">;</span>
-<span class="p">}</span>
-</code></pre></div>
-
+#custom-bluepill.offline {
+    color: #f85149;
+}
+</code></pre>
 <hr />
 <h3 id="hyprland-window-rules-keybindings">Hyprland Window Rules &amp; Keybindings</h3>
 <p>Add the following rules to <code>~/.config/hypr/hyprland.conf</code> for a dedicated scratchpad window experience:</p>
-<div class="codehilite"><pre><span></span><code><span class="c1"># Floating window behavior for BluePill</span>
-<span class="na">windowrulev2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">float, class:^(bluepill|imsg)$</span>
-<span class="na">windowrulev2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">size 1080 840, class:^(bluepill|imsg)$</span>
-<span class="na">windowrulev2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">center, class:^(bluepill|imsg)$</span>
-<span class="na">windowrulev2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">workspace special:imsg, class:^(bluepill|imsg)$</span>
+<pre><code class="language-ini"># Floating window behavior for BluePill
+windowrulev2 = float, class:^(bluepill|imsg)$
+windowrulev2 = size 1080 840, class:^(bluepill|imsg)$
+windowrulev2 = center, class:^(bluepill|imsg)$
+windowrulev2 = workspace special:imsg, class:^(bluepill|imsg)$
 
-<span class="c1"># Toggle scratchpad with Super + M</span>
-<span class="na">bind</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">$mainMod, M, togglespecialworkspace, imsg</span>
+# Toggle scratchpad with Super + M
+bind = $mainMod, M, togglespecialworkspace, imsg
 
-<span class="c1"># Launch or focus BluePill if not running</span>
-<span class="na">bind</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">$mainMod SHIFT, M, exec, bluepill</span>
-</code></pre></div>
-
+# Launch or focus BluePill if not running
+bind = $mainMod SHIFT, M, exec, bluepill
+</code></pre>
 <hr />
 <h3 id="secret-service-keyring-integration">Secret Service Keyring Integration</h3>
 <p>BluePill uses the Freedesktop Secret Service standard (<code>libsecret</code> / <code>secret-tool</code>) to securely store your relay password outside plaintext configuration files.</p>
 <h4 id="1-store-credentials-securely">1. Store Credentials Securely</h4>
-<div class="codehilite"><pre><span></span><code><span class="c1"># Store the relay password in the system keyring</span>
-secret-tool<span class="w"> </span>store<span class="w"> </span>--label<span class="o">=</span><span class="s2">"BluePill Relay Password"</span><span class="w"> </span>service<span class="w"> </span>bluepill<span class="w"> </span>username<span class="w"> </span>relay
-<span class="c1"># (Enter your password at the prompt)</span>
-</code></pre></div>
-
+<pre><code class="language-bash"># Store the relay password in the system keyring
+secret-tool store --label=&quot;BluePill Relay Password&quot; service bluepill username relay
+# (Enter your password at the prompt)
+</code></pre>
 <h4 id="2-verify-keyring-storage">2. Verify Keyring Storage</h4>
-<div class="codehilite"><pre><span></span><code>secret-tool<span class="w"> </span>lookup<span class="w"> </span>service<span class="w"> </span>bluepill<span class="w"> </span>username<span class="w"> </span>relay
-</code></pre></div>
-
+<pre><code class="language-bash">secret-tool lookup service bluepill username relay
+</code></pre>
 <p>If the keyring item is present, BluePill will automatically query <code>secret-tool</code> before reading credentials from <code>~/.config/bluepill/config.json</code>.</p>
 <hr />
 <h3 id="pipewire-voice-memo-support">PipeWire &amp; Voice Memo Support</h3>
 <p>BluePill natively renders 28-bar audio waveforms and plays incoming voice memos using PipeWire / PulseAudio.</p>
 <h4 id="required-audio-packages">Required Audio Packages:</h4>
-<div class="codehilite"><pre><span></span><code><span class="c1"># Arch Linux</span>
-sudo<span class="w"> </span>pacman<span class="w"> </span>-S<span class="w"> </span>pipewire<span class="w"> </span>pipewire-pulse<span class="w"> </span>pipewire-audio<span class="w"> </span>ffmpeg<span class="w"> </span>libnotify
+<pre><code class="language-bash"># Arch Linux
+sudo pacman -S pipewire pipewire-pulse pipewire-audio ffmpeg libnotify
 
-<span class="c1"># Debian / Ubuntu</span>
-sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>pipewire<span class="w"> </span>pipewire-pulse<span class="w"> </span>ffmpeg<span class="w"> </span>libnotify-bin
-</code></pre></div>
-
+# Debian / Ubuntu
+sudo apt-get install pipewire pipewire-pulse ffmpeg libnotify-bin
+</code></pre>
 <h4 id="playback-verification">Playback Verification:</h4>
-<div class="codehilite"><pre><span></span><code>paplay<span class="w"> </span>/usr/share/bluepill/imessage-notify.wav
-</code></pre></div>
-
+<pre><code class="language-bash">paplay /usr/share/bluepill/imessage-notify.wav
+</code></pre>
 <hr />
 <h3 id="debian-ubuntu">Debian &amp; Ubuntu</h3>
 <h4 id="1-install-build-dependencies">1. Install Build Dependencies</h4>
-<div class="codehilite"><pre><span></span><code>sudo<span class="w"> </span>apt-get<span class="w"> </span>update
-sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>build-essential<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>cmake<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>ninja-build<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>qt6-base-dev<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>qt6-declarative-dev<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>qt6-quickcontrols2-5-dev<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>qt6-svg-dev<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>qt6-wayland-dev<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>libsecret-1-dev<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>libnotify-dev<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>libheif-dev<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>ffmpeg
-</code></pre></div>
-
+<pre><code class="language-bash">sudo apt-get update
+sudo apt-get install -y \
+    build-essential \
+    cmake \
+    ninja-build \
+    qt6-base-dev \
+    qt6-declarative-dev \
+    qt6-quickcontrols2-5-dev \
+    qt6-svg-dev \
+    qt6-wayland-dev \
+    libsecret-1-dev \
+    libnotify-dev \
+    libheif-dev \
+    ffmpeg
+</code></pre>
 <h4 id="2-build-and-install-via-cmake">2. Build and Install via CMake</h4>
-<div class="codehilite"><pre><span></span><code>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/nertwork/bluepill.git<span class="w"> </span>/tmp/bluepill
-<span class="nb">cd</span><span class="w"> </span>/tmp/bluepill
-cmake<span class="w"> </span>-B<span class="w"> </span>build<span class="w"> </span>-DCMAKE_BUILD_TYPE<span class="o">=</span>Release<span class="w"> </span>-GNinja
-cmake<span class="w"> </span>--build<span class="w"> </span>build<span class="w"> </span>-j<span class="k">$(</span>nproc<span class="k">)</span>
-sudo<span class="w"> </span>cmake<span class="w"> </span>--install<span class="w"> </span>build
-sudo<span class="w"> </span>ln<span class="w"> </span>-sf<span class="w"> </span>/usr/local/bin/bluepill<span class="w"> </span>/usr/local/bin/imsg
-</code></pre></div>
-
+<pre><code class="language-bash">git clone https://github.com/nertwork/bluepill.git /tmp/bluepill
+cd /tmp/bluepill
+cmake -B build -DCMAKE_BUILD_TYPE=Release -GNinja
+cmake --build build -j$(nproc)
+sudo cmake --install build
+sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
+</code></pre>
 <hr />
 <h3 id="fedora-rhel">Fedora &amp; RHEL</h3>
 <h4 id="1-install-build-dependencies_1">1. Install Build Dependencies</h4>
-<div class="codehilite"><pre><span></span><code>sudo<span class="w"> </span>dnf<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>gcc-c++<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>cmake<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>ninja-build<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>qt6-qtbase-devel<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>qt6-qtdeclarative-devel<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>qt6-qtsvg-devel<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>qt6-qtwayland-devel<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>libsecret-devel<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>libnotify-devel<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>libheif-devel<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>ffmpeg
-</code></pre></div>
-
+<pre><code class="language-bash">sudo dnf install -y \
+    gcc-c++ \
+    cmake \
+    ninja-build \
+    qt6-qtbase-devel \
+    qt6-qtdeclarative-devel \
+    qt6-qtsvg-devel \
+    qt6-qtwayland-devel \
+    libsecret-devel \
+    libnotify-devel \
+    libheif-devel \
+    ffmpeg
+</code></pre>
 <h4 id="2-build-and-install">2. Build and Install</h4>
-<div class="codehilite"><pre><span></span><code>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/nertwork/bluepill.git<span class="w"> </span>/tmp/bluepill
-<span class="nb">cd</span><span class="w"> </span>/tmp/bluepill
-cmake<span class="w"> </span>-B<span class="w"> </span>build<span class="w"> </span>-DCMAKE_BUILD_TYPE<span class="o">=</span>Release<span class="w"> </span>-GNinja
-cmake<span class="w"> </span>--build<span class="w"> </span>build<span class="w"> </span>-j<span class="k">$(</span>nproc<span class="k">)</span>
-sudo<span class="w"> </span>cmake<span class="w"> </span>--install<span class="w"> </span>build
-sudo<span class="w"> </span>ln<span class="w"> </span>-sf<span class="w"> </span>/usr/local/bin/bluepill<span class="w"> </span>/usr/local/bin/imsg
-</code></pre></div>
-
+<pre><code class="language-bash">git clone https://github.com/nertwork/bluepill.git /tmp/bluepill
+cd /tmp/bluepill
+cmake -B build -DCMAKE_BUILD_TYPE=Release -GNinja
+cmake --build build -j$(nproc)
+sudo cmake --install build
+sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
+</code></pre>
 <hr />
 <h3 id="nixos-generic-linux">NixOS &amp; Generic Linux</h3>
 <p>Create a <code>shell.nix</code> in the repository root:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span> pkgs <span class="o">?</span> <span class="nb">import</span> <span class="l">&lt;nixpkgs&gt;</span> <span class="p">{}</span> <span class="p">}:</span>
+<pre><code class="language-nix">{ pkgs ? import &lt;nixpkgs&gt; {} }:
 
-pkgs<span class="o">.</span>mkShell <span class="p">{</span>
-  <span class="ss">buildInputs</span> <span class="o">=</span> <span class="k">with</span> pkgs<span class="p">;</span> <span class="p">[</span>
+pkgs.mkShell {
+  buildInputs = with pkgs; [
     cmake
     ninja
-    qt6<span class="o">.</span>qtbase
-    qt6<span class="o">.</span>qtdeclarative
-    qt6<span class="o">.</span>qtsvg
-    qt6<span class="o">.</span>qtwayland
+    qt6.qtbase
+    qt6.qtdeclarative
+    qt6.qtsvg
+    qt6.qtwayland
     libsecret
     libnotify
     ffmpeg
-  <span class="p">];</span>
-<span class="p">}</span>
-</code></pre></div>
-
+  ];
+}
+</code></pre>
 <p>Run inside the nix shell:</p>
-<div class="codehilite"><pre><span></span><code>nix-shell<span class="w"> </span>--run<span class="w"> </span><span class="s2">"cmake -B build -DCMAKE_BUILD_TYPE=Release &amp;&amp; cmake --build build -j &amp;&amp; sudo cmake --install build"</span>
-</code></pre></div>
-
+<pre><code class="language-bash">nix-shell --run &quot;cmake -B build -DCMAKE_BUILD_TYPE=Release &amp;&amp; cmake --build build -j &amp;&amp; sudo cmake --install build&quot;
+</code></pre>
 <hr />
 <h2 id="3-macos-relay-server-bluepill-server-setup">3. macOS Relay Server (<code>bluepill-server</code>) Setup</h2>
 <p><code>bluepill-server</code> is a zero-Electron, high-performance relay server designed to run directly on macOS with minimal resource consumption (~18 MB RSS).</p>
@@ -893,17 +872,16 @@ pkgs<span class="o">.</span>mkShell <span class="p">{</span>
 </ul>
 <hr />
 <h3 id="homebrew-installation">Homebrew Installation</h3>
-<div class="codehilite"><pre><span></span><code><span class="c1"># Add the official tap</span>
-brew<span class="w"> </span>tap<span class="w"> </span>nertwork/tap
+<pre><code class="language-bash"># Add the official tap
+brew tap nertwork/tap
 
-<span class="c1"># Install bluepill-server</span>
-brew<span class="w"> </span>install<span class="w"> </span>nertwork/tap/bluepill
+# Install bluepill-server
+brew install nertwork/tap/bluepill
 
-<span class="c1"># Verify binary installation</span>
-bluepill-server<span class="w"> </span>--version
-<span class="c1"># Output: bluepill-server 1.1.0</span>
-</code></pre></div>
-
+# Verify binary installation
+bluepill-server --version
+# Output: bluepill-server 1.1.0
+</code></pre>
 <hr />
 <h3 id="full-disk-access-permissions">Full Disk Access &amp; Permissions</h3>
 <p>macOS Privacy protections (TCC) protect <code>~/Library/Messages/chat.db</code> and Contacts databases. You must grant <strong>Full Disk Access</strong> to allow <code>bluepill-server</code> to read messages and resolve contacts.</p>
@@ -912,100 +890,92 @@ bluepill-server<span class="w"> </span>--version
 <li>Open <strong>System Settings</strong> (or <strong>System Preferences</strong> on older versions).</li>
 <li>Navigate to <strong>Privacy &amp; Security</strong> -&gt; <strong>Full Disk Access</strong>.</li>
 <li>Unlock the pane and click <strong>+</strong>.</li>
-<li>Add the following binaries:
-   - Your active terminal emulator (e.g., <code>Terminal.app</code>, <code>iTerm2</code>, or <code>Alacritty</code>).
-   - If running via SSH: <code>/usr/libexec/sshd-keygen-wrapper</code>.
-   - The Python 3 interpreter used by Homebrew (e.g., <code>/opt/homebrew/bin/python3</code> on Apple Silicon or <code>/usr/local/bin/python3</code> on Intel).
-   - The <code>bluepill-server</code> executable (run <code>which bluepill-server</code>).</li>
+<li>Add the following binaries:</li>
+<li>Your active terminal emulator (e.g., <code>Terminal.app</code>, <code>iTerm2</code>, or <code>Alacritty</code>).</li>
+<li>If running via SSH: <code>/usr/libexec/sshd-keygen-wrapper</code>.</li>
+<li>The Python 3 interpreter used by Homebrew (e.g., <code>/opt/homebrew/bin/python3</code> on Apple Silicon or <code>/usr/local/bin/python3</code> on Intel).</li>
+<li>The <code>bluepill-server</code> executable (run <code>which bluepill-server</code>).</li>
 </ol>
 <h4 id="granting-automation-permissions">Granting Automation Permissions:</h4>
 <p>Under <strong>Privacy &amp; Security</strong> -&gt; <strong>Automation</strong>, ensure your terminal / service has permission to control <strong>Messages.app</strong>.</p>
 <h4 id="verification-command">Verification Command:</h4>
 <p>Run this non-interactive check in your terminal:</p>
-<div class="codehilite"><pre><span></span><code>sqlite3<span class="w"> </span>~/Library/Messages/chat.db<span class="w"> </span><span class="s2">"SELECT count(*) FROM chat;"</span><span class="w"> </span>&lt;/dev/null
-</code></pre></div>
-
+<pre><code class="language-bash">sqlite3 ~/Library/Messages/chat.db &quot;SELECT count(*) FROM chat;&quot; &lt;/dev/null
+</code></pre>
 <p>If this prints an integer (e.g., <code>42</code>), Full Disk Access is working properly. If you receive <code>Error: unable to open database file: unable to open database file</code> or <code>Operation not permitted</code>, re-verify your Full Disk Access entries.</p>
 <hr />
 <h3 id="configuration-self-test">Configuration &amp; Self-Test</h3>
 <h4 id="1-generate-configuration-file">1. Generate Configuration File</h4>
 <p>Create <code>~/.config/bluepill/server.json</code> with strict <code>0600</code> permissions:</p>
-<div class="codehilite"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.config/bluepill
-cat<span class="w"> </span><span class="s">&lt;&lt; 'EOF_CONFIG' &gt; ~/.config/bluepill/server.json</span>
-<span class="s">{</span>
-<span class="s">  "host": "0.0.0.0",</span>
-<span class="s">  "port": 1234,</span>
-<span class="s">  "password": "CHANGE_ME_TO_A_SECURE_TOKEN",</span>
-<span class="s">  "helperPort": 45670,</span>
-<span class="s">  "enableBackgroundDaemons": true</span>
-<span class="s">}</span>
-<span class="s">EOF_CONFIG</span>
-chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span>~/.config/bluepill/server.json
-</code></pre></div>
-
+<pre><code class="language-bash">mkdir -p ~/.config/bluepill
+cat &lt;&lt; 'EOF_CONFIG' &gt; ~/.config/bluepill/server.json
+{
+  &quot;host&quot;: &quot;0.0.0.0&quot;,
+  &quot;port&quot;: 1234,
+  &quot;password&quot;: &quot;CHANGE_ME_TO_A_SECURE_TOKEN&quot;,
+  &quot;helperPort&quot;: 45670,
+  &quot;enableBackgroundDaemons&quot;: true
+}
+EOF_CONFIG
+chmod 600 ~/.config/bluepill/server.json
+</code></pre>
 <h4 id="2-run-built-in-self-test">2. Run Built-In Self-Test</h4>
 <p>Verify timestamp conversion, typedstream parsing, and database bindings:</p>
-<div class="codehilite"><pre><span></span><code>bluepill-server<span class="w"> </span>--selftest<span class="w"> </span>&lt;/dev/null
-</code></pre></div>
-
+<pre><code class="language-bash">bluepill-server --selftest &lt;/dev/null
+</code></pre>
 <p>Expected output:</p>
-<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">"status"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ok"</span><span class="p">,</span><span class="w"> </span><span class="nt">"selftest"</span><span class="p">:</span><span class="w"> </span><span class="s2">"passed"</span><span class="p">,</span><span class="w"> </span><span class="nt">"version"</span><span class="p">:</span><span class="w"> </span><span class="s2">"1.1.0"</span><span class="p">,</span><span class="w"> </span><span class="nt">"os_version"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Darwin-24.3.0"</span><span class="p">,</span><span class="w"> </span><span class="nt">"private_api"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">}</span>
-</code></pre></div>
-
+<pre><code class="language-json">{&quot;status&quot;: &quot;ok&quot;, &quot;selftest&quot;: &quot;passed&quot;, &quot;version&quot;: &quot;1.1.0&quot;, &quot;os_version&quot;: &quot;Darwin-24.3.0&quot;, &quot;private_api&quot;: true}
+</code></pre>
 <h4 id="3-inspect-live-diagnostics-status">3. Inspect Live Diagnostics &amp; Status</h4>
-<div class="codehilite"><pre><span></span><code><span class="c1"># Print current server configuration and database health</span>
-bluepill-server<span class="w"> </span>status
+<pre><code class="language-bash"># Print current server configuration and database health
+bluepill-server status
 
-<span class="c1"># Print recent log lines</span>
-bluepill-server<span class="w"> </span>logs<span class="w"> </span>-n<span class="w"> </span><span class="m">50</span>
-</code></pre></div>
-
+# Print recent log lines
+bluepill-server logs -n 50
+</code></pre>
 <hr />
 <h3 id="macos-launchagent-daemon">macOS LaunchAgent Daemon</h3>
 <p>To ensure <code>bluepill-server</code> starts automatically on user login and survives system reboots:</p>
 <h4 id="1-create-launchagent-plist">1. Create LaunchAgent Plist</h4>
-<div class="codehilite"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>~/Library/LaunchAgents
-cat<span class="w"> </span><span class="s">&lt;&lt; 'EOF_PLIST' &gt; ~/Library/LaunchAgents/com.nertwork.bluepill-server.plist</span>
-<span class="s">&lt;?xml version="1.0" encoding="UTF-8"?&gt;</span>
-<span class="s">&lt;!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"&gt;</span>
-<span class="s">&lt;plist version="1.0"&gt;</span>
-<span class="s">&lt;dict&gt;</span>
-<span class="s">    &lt;key&gt;Label&lt;/key&gt;</span>
-<span class="s">    &lt;string&gt;com.nertwork.bluepill-server&lt;/string&gt;</span>
-<span class="s">    &lt;key&gt;ProgramArguments&lt;/key&gt;</span>
-<span class="s">    &lt;array&gt;</span>
-<span class="s">        &lt;string&gt;/opt/homebrew/bin/bluepill-server&lt;/string&gt;</span>
-<span class="s">        &lt;string&gt;serve&lt;/string&gt;</span>
-<span class="s">        &lt;string&gt;--port&lt;/string&gt;</span>
-<span class="s">        &lt;string&gt;1234&lt;/string&gt;</span>
-<span class="s">        &lt;string&gt;--password&lt;/string&gt;</span>
-<span class="s">        &lt;string&gt;CHANGE_ME_TO_A_SECURE_TOKEN&lt;/string&gt;</span>
-<span class="s">    &lt;/array&gt;</span>
-<span class="s">    &lt;key&gt;RunAtLoad&lt;/key&gt;</span>
-<span class="s">    &lt;true/&gt;</span>
-<span class="s">    &lt;key&gt;KeepAlive&lt;/key&gt;</span>
-<span class="s">    &lt;true/&gt;</span>
-<span class="s">    &lt;key&gt;StandardOutPath&lt;/key&gt;</span>
-<span class="s">    &lt;string&gt;/tmp/bluepill-server.log&lt;/string&gt;</span>
-<span class="s">    &lt;key&gt;StandardErrorPath&lt;/key&gt;</span>
-<span class="s">    &lt;string&gt;/tmp/bluepill-server.err&lt;/string&gt;</span>
-<span class="s">    &lt;key&gt;ProcessType&lt;/key&gt;</span>
-<span class="s">    &lt;string&gt;Interactive&lt;/string&gt;</span>
-<span class="s">&lt;/dict&gt;</span>
-<span class="s">&lt;/plist&gt;</span>
-<span class="s">EOF_PLIST</span>
-</code></pre></div>
-
+<pre><code class="language-bash">mkdir -p ~/Library/LaunchAgents
+cat &lt;&lt; 'EOF_PLIST' &gt; ~/Library/LaunchAgents/com.nertwork.bluepill-server.plist
+&lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;
+&lt;!DOCTYPE plist PUBLIC &quot;-//Apple//DTD PLIST 1.0//EN&quot; &quot;http://www.apple.com/DTDs/PropertyList-1.0.dtd&quot;&gt;
+&lt;plist version=&quot;1.0&quot;&gt;
+&lt;dict&gt;
+    &lt;key&gt;Label&lt;/key&gt;
+    &lt;string&gt;com.nertwork.bluepill-server&lt;/string&gt;
+    &lt;key&gt;ProgramArguments&lt;/key&gt;
+    &lt;array&gt;
+        &lt;string&gt;/opt/homebrew/bin/bluepill-server&lt;/string&gt;
+        &lt;string&gt;serve&lt;/string&gt;
+        &lt;string&gt;--port&lt;/string&gt;
+        &lt;string&gt;1234&lt;/string&gt;
+        &lt;string&gt;--password&lt;/string&gt;
+        &lt;string&gt;CHANGE_ME_TO_A_SECURE_TOKEN&lt;/string&gt;
+    &lt;/array&gt;
+    &lt;key&gt;RunAtLoad&lt;/key&gt;
+    &lt;true/&gt;
+    &lt;key&gt;KeepAlive&lt;/key&gt;
+    &lt;true/&gt;
+    &lt;key&gt;StandardOutPath&lt;/key&gt;
+    &lt;string&gt;/tmp/bluepill-server.log&lt;/string&gt;
+    &lt;key&gt;StandardErrorPath&lt;/key&gt;
+    &lt;string&gt;/tmp/bluepill-server.err&lt;/string&gt;
+    &lt;key&gt;ProcessType&lt;/key&gt;
+    &lt;string&gt;Interactive&lt;/string&gt;
+&lt;/dict&gt;
+&lt;/plist&gt;
+EOF_PLIST
+</code></pre>
 <p><em>(Note: On Intel Macs, replace <code>/opt/homebrew/bin/bluepill-server</code> with <code>/usr/local/bin/bluepill-server</code>.)</em></p>
 <h4 id="2-load-and-bootstrap-the-daemon">2. Load and Bootstrap the Daemon</h4>
-<div class="codehilite"><pre><span></span><code>launchctl<span class="w"> </span>bootstrap<span class="w"> </span>gui/<span class="k">$(</span>id<span class="w"> </span>-u<span class="k">)</span><span class="w"> </span>~/Library/LaunchAgents/com.nertwork.bluepill-server.plist
-</code></pre></div>
-
+<pre><code class="language-bash">launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nertwork.bluepill-server.plist
+</code></pre>
 <h4 id="3-homebrew-services-alternative">3. Homebrew Services Alternative</h4>
 <p>If installed via Homebrew, you can also manage the daemon using:</p>
-<div class="codehilite"><pre><span></span><code>brew<span class="w"> </span>services<span class="w"> </span>start<span class="w"> </span>bluepill
-</code></pre></div>
-
+<pre><code class="language-bash">brew services start bluepill
+</code></pre>
 <hr />
 <h3 id="imcore-private-api-helper-45670">IMCore Private API Helper (:45670)</h3>
 <p>The <strong>IMCore Private API Helper</strong> (<code>BlueBubblesHelper</code>) connects directly to Apple's private <code>IMCore</code> runtime to enable features impossible via standard AppleScript:</p>
@@ -1068,7 +1038,7 @@ cat<span class="w"> </span><span class="s">&lt;&lt; 'EOF_PLIST' &gt; ~/Library/L
 <ul>
 <li>Connects over LAN, WireGuard, or Tailscale.</li>
 <li>Full two-way push event delivery via WebSockets.</li>
-<li>URL Format: <code>http://192.168.1.50:1234</code> or <code>https://bluepill.internal.net</code>.</li>
+<li>URL Format: <code>http://192.168.1.50:1235</code> or <code>https://bluepill.example.com</code>.</li>
 </ul>
 <h4 id="method-2-direct-ssh-transport-ssh">Method 2: Direct SSH Transport (<code>ssh://</code>)</h4>
 <ul>
@@ -1081,88 +1051,100 @@ cat<span class="w"> </span><span class="s">&lt;&lt; 'EOF_PLIST' &gt; ~/Library/L
 <h3 id="reverse-proxy-tls-termination">Reverse Proxy &amp; TLS Termination</h3>
 <p>To expose your relay over HTTPS with public or private TLS certificates:</p>
 <h4 id="caddy-configuration-etccaddycaddyfile">Caddy Configuration (<code>/etc/caddy/Caddyfile</code>)</h4>
-<div class="codehilite"><pre><span></span><code>bluepill.example.com<span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">reverse_proxy</span><span class="w"> </span>127.0.0.1:1234<span class="w"> </span><span class="p">{</span>
-<span class="w">        </span>header_up<span class="w"> </span>Host<span class="w"> </span><span class="nv">{host}</span>
-<span class="w">        </span>header_up<span class="w"> </span>X-Real-IP<span class="w"> </span><span class="nv">{remote_host}</span>
-<span class="w">    </span><span class="p">}</span>
-<span class="p">}</span>
-</code></pre></div>
-
+<pre><code class="language-caddy">bluepill.example.com {
+    reverse_proxy 127.0.0.1:1234 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+</code></pre>
 <h4 id="nginx-configuration">Nginx Configuration</h4>
-<div class="codehilite"><pre><span></span><code><span class="k">server</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="kn">listen</span><span class="w"> </span><span class="mi">443</span><span class="w"> </span><span class="s">ssl</span><span class="w"> </span><span class="s">http2</span><span class="p">;</span>
-<span class="w">    </span><span class="kn">server_name</span><span class="w"> </span><span class="s">bluepill.example.com</span><span class="p">;</span>
+<pre><code class="language-nginx">server {
+    listen 443 ssl http2;
+    server_name bluepill.example.com;
 
-<span class="w">    </span><span class="kn">ssl_certificate</span><span class="w"> </span><span class="s">/etc/letsencrypt/live/bluepill.example.com/fullchain.pem</span><span class="p">;</span>
-<span class="w">    </span><span class="kn">ssl_certificate_key</span><span class="w"> </span><span class="s">/etc/letsencrypt/live/bluepill.example.com/privkey.pem</span><span class="p">;</span>
+    ssl_certificate /etc/letsencrypt/live/bluepill.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bluepill.example.com/privkey.pem;
 
-<span class="w">    </span><span class="kn">location</span><span class="w"> </span><span class="s">/</span><span class="w"> </span><span class="p">{</span>
-<span class="w">        </span><span class="kn">proxy_pass</span><span class="w"> </span><span class="s">http://127.0.0.1:1234</span><span class="p">;</span>
-<span class="w">        </span><span class="kn">proxy_http_version</span><span class="w"> </span><span class="mi">1</span><span class="s">.1</span><span class="p">;</span>
-<span class="w">        </span><span class="kn">proxy_set_header</span><span class="w"> </span><span class="s">Upgrade</span><span class="w"> </span><span class="nv">$http_upgrade</span><span class="p">;</span>
-<span class="w">        </span><span class="kn">proxy_set_header</span><span class="w"> </span><span class="s">Connection</span><span class="w"> </span><span class="s">"upgrade"</span><span class="p">;</span>
-<span class="w">        </span><span class="kn">proxy_set_header</span><span class="w"> </span><span class="s">Host</span><span class="w"> </span><span class="nv">$host</span><span class="p">;</span>
-<span class="w">        </span><span class="kn">proxy_set_header</span><span class="w"> </span><span class="s">X-Real-IP</span><span class="w"> </span><span class="nv">$remote_addr</span><span class="p">;</span>
-<span class="w">        </span><span class="kn">proxy_read_timeout</span><span class="w"> </span><span class="s">86400s</span><span class="p">;</span>
-<span class="w">        </span><span class="kn">proxy_send_timeout</span><span class="w"> </span><span class="s">86400s</span><span class="p">;</span>
-<span class="w">    </span><span class="p">}</span>
-<span class="p">}</span>
-</code></pre></div>
-
+    location / {
+        proxy_pass http://127.0.0.1:1234;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection &quot;upgrade&quot;;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+}
+</code></pre>
 <h4 id="tailscale-serve">Tailscale Serve</h4>
 <p>If using Tailscale on your Mac, terminate TLS effortlessly:</p>
-<div class="codehilite"><pre><span></span><code>tailscale<span class="w"> </span>serve<span class="w"> </span>--bg<span class="w"> </span><span class="m">1234</span>
-</code></pre></div>
-
+<pre><code class="language-bash">tailscale serve --bg 1234
+</code></pre>
 <hr />
 <h2 id="4-built-in-web-ui-operations-web">4. Built-In Web UI Operations (<code>/web</code>)</h2>
 <p>Every instance of <code>bluepill-server</code> includes an embedded, dark-slate Web client accessible at:</p>
-<div class="codehilite"><pre><span></span><code>http://&lt;relay-host&gt;:1234/web
-</code></pre></div>
-
+<pre><code class="language-text">http://&lt;relay-host&gt;:1234/web
+</code></pre>
 <h3 id="key-capabilities-in-the-web-ui">Key Capabilities in the Web UI:</h3>
 <ol>
+<li><strong>Authentication:</strong></li>
+<li>Enter your relay password in the top-right authorization input or pass it in the query string: <code>http://&lt;host&gt;:1234/web?password=YOUR_PASSWORD</code>.</li>
 <li>
-<p><strong>Authentication:</strong>
-   - Enter your relay password in the top-right authorization input or pass it in the query string: <code>http://&lt;host&gt;:1234/web?password=YOUR_PASSWORD</code>.
-   - Credentials are saved in browser <code>localStorage</code>.</p>
+<p>Credentials are saved in browser <code>localStorage</code>.</p>
 </li>
 <li>
-<p><strong>Pinned Conversations Avatar Bar:</strong>
-   - Displays circular avatar shortcuts synchronized with macOS <code>com.apple.messages.pinning.plist</code>.
-   - Click any avatar to jump directly to the thread.</p>
+<p><strong>Pinned Conversations Avatar Bar:</strong></p>
+</li>
+<li>Displays circular avatar shortcuts synchronized with macOS <code>com.apple.messages.pinning.plist</code>.</li>
+<li>
+<p>Click any avatar to jump directly to the thread.</p>
 </li>
 <li>
-<p><strong>Inline 28-Bar Voice Memo Player &amp; <code>🎙</code> Recorder:</strong>
-   - Renders animated 28-bar audio waveforms for incoming audio clips.
-   - Click the <code>🎙</code> microphone icon to record voice memos in your browser and dispatch them as <code>.m4a</code> audio attachments.</p>
+<p><strong>Inline 28-Bar Voice Memo Player &amp; <code>🎙</code> Recorder:</strong></p>
+</li>
+<li>Renders animated 28-bar audio waveforms for incoming audio clips.</li>
+<li>
+<p>Click the <code>🎙</code> microphone icon to record voice memos in your browser and dispatch them as <code>.m4a</code> audio attachments.</p>
 </li>
 <li>
-<p><strong><code>✨</code> Expressive Send Effects:</strong>
-   - Select and apply screen effects: Confetti, Slam, Loud, Gentle, Echo, Spotlight, Lasers, Fireworks, Shooting Star, Celebration, or Invisible Ink.</p>
+<p><strong><code>✨</code> Expressive Send Effects:</strong></p>
 </li>
 <li>
-<p><strong><code>🕒 Send Later</code> Scheduled Messages:</strong>
-   - Schedule messages to be sent automatically at a future date and time.
-   - View, edit, or cancel pending scheduled messages from the scheduled queue.</p>
+<p>Select and apply screen effects: Confetti, Slam, Loud, Gentle, Echo, Spotlight, Lasers, Fireworks, Shooting Star, Celebration, or Invisible Ink.</p>
 </li>
 <li>
-<p><strong>Drag-and-Drop &amp; <code>Ctrl+V</code> File Uploads:</strong>
-   - Drag image or video files directly into the conversation window.
-   - Paste screenshots directly from your system clipboard (<code>Ctrl+V</code> / <code>Cmd+V</code>).</p>
+<p><strong><code>🕒 Send Later</code> Scheduled Messages:</strong></p>
+</li>
+<li>Schedule messages to be sent automatically at a future date and time.</li>
+<li>
+<p>View, edit, or cancel pending scheduled messages from the scheduled queue.</p>
 </li>
 <li>
-<p><strong>Message Actions:</strong>
-   - Hover over any message bubble to trigger Tapback reactions (Heart, Thumbs Up, Laugh, etc.), Inline Thread Replies, or Unsend / Edit.</p>
+<p><strong>Drag-and-Drop &amp; <code>Ctrl+V</code> File Uploads:</strong></p>
+</li>
+<li>Drag image or video files directly into the conversation window.</li>
+<li>
+<p>Paste screenshots directly from your system clipboard (<code>Ctrl+V</code> / <code>Cmd+V</code>).</p>
 </li>
 <li>
-<p><strong>1-Click 2FA OTP Copy Pill:</strong>
-   - Verification codes in incoming 2FA SMS and iMessages are automatically extracted and presented with an interactive <code>🔑 Copy &lt;code&gt;</code> button.</p>
+<p><strong>Message Actions:</strong></p>
 </li>
 <li>
-<p><strong>Global Full-Text Search:</strong>
-   - Search across historical messages, handles, and chat titles with instant matching.</p>
+<p>Hover over any message bubble to trigger Tapback reactions (Heart, Thumbs Up, Laugh, etc.), Inline Thread Replies, or Unsend / Edit.</p>
+</li>
+<li>
+<p><strong>1-Click 2FA OTP Copy Pill:</strong></p>
+</li>
+<li>
+<p>Verification codes in incoming 2FA SMS and iMessages are automatically extracted and presented with an interactive <code>🔑 Copy &lt;code&gt;</code> button.</p>
+</li>
+<li>
+<p><strong>Global Full-Text Search:</strong></p>
+</li>
+<li>
+<p>Search across historical messages, handles, and chat titles with instant matching.</p>
 </li>
 <li>
 <p><strong>Find My Devices &amp; Friends:</strong></p>
@@ -1415,23 +1397,21 @@ cat<span class="w"> </span><span class="s">&lt;&lt; 'EOF_PLIST' &gt; ~/Library/L
 <h2 id="6-operational-runbooks-troubleshooting">6. Operational Runbooks &amp; Troubleshooting</h2>
 <h3 id="runbook-1-resolving-sqlite-wal-lock-contention">Runbook 1: Resolving SQLite WAL Lock Contention</h3>
 <p>If <code>bluepill-server</code> reports <code>database is locked</code> during peak sync:</p>
-<div class="codehilite"><pre><span></span><code><span class="c1"># Check if another process holds an exclusive lock</span>
-lsof<span class="w"> </span>~/Library/Messages/chat.db
+<pre><code class="language-bash"># Check if another process holds an exclusive lock
+lsof ~/Library/Messages/chat.db
 
-<span class="c1"># Force a read-only checkpoint</span>
-sqlite3<span class="w"> </span>~/Library/Messages/chat.db<span class="w"> </span><span class="s2">"PRAGMA wal_checkpoint(PASSIVE);"</span><span class="w"> </span>&lt;/dev/null
-</code></pre></div>
-
+# Force a read-only checkpoint
+sqlite3 ~/Library/Messages/chat.db &quot;PRAGMA wal_checkpoint(PASSIVE);&quot; &lt;/dev/null
+</code></pre>
 <h3 id="runbook-2-fixing-macos-sleep-standby-disconnections">Runbook 2: Fixing macOS Sleep / Standby Disconnections</h3>
 <p>If the macOS host enters deep sleep and suspends network daemons:</p>
-<div class="codehilite"><pre><span></span><code><span class="c1"># Disable sleep while AC power is connected</span>
-sudo<span class="w"> </span>pmset<span class="w"> </span>-c<span class="w"> </span>sleep<span class="w"> </span><span class="m">0</span>
-sudo<span class="w"> </span>pmset<span class="w"> </span>-c<span class="w"> </span>disablesleep<span class="w"> </span><span class="m">1</span>
+<pre><code class="language-bash"># Disable sleep while AC power is connected
+sudo pmset -c sleep 0
+sudo pmset -c disablesleep 1
 
-<span class="c1"># Or run bluepill-server wrapped in caffeinate</span>
-caffeinate<span class="w"> </span>-s<span class="w"> </span>bluepill-server<span class="w"> </span>serve<span class="w"> </span>--port<span class="w"> </span><span class="m">1234</span>
-</code></pre></div>
-
+# Or run bluepill-server wrapped in caffeinate
+caffeinate -s bluepill-server serve --port 1234
+</code></pre>
 <h3 id="runbook-3-diagnosing-private-api-45670-unavailability">Runbook 3: Diagnosing Private API (:45670) Unavailability</h3>
 <p>If <code>/api/v1/server/info</code> reports <code>private_api: false</code>:
 1. Verify the helper daemon process is running:
@@ -1446,6 +1426,23 @@ caffeinate<span class="w"> </span>-s<span class="w"> </span>bluepill-server<span
 1. Re-open <strong>System Settings -&gt; Privacy &amp; Security -&gt; Full Disk Access</strong>.
 2. Toggle your terminal / Python / sshd-keygen-wrapper entry off and back on.
 3. Test using: <code>sqlite3 ~/Library/Messages/chat.db "SELECT count(*) FROM message;" &lt;/dev/null</code>.</p>
+<h3 id="runbook-5-icloud-hub-preflight-optional-module-toggles-notes-calendar-photos">Runbook 5: iCloud Hub Preflight &amp; Optional Module Toggles (Notes, Calendar, Photos)</h3>
+<p><code>bluepill-server</code> includes a built-in preflight engine that checks database readability (<code>NoteStore.sqlite</code>, <code>Calendar.sqlitedb</code>, <code>Photos.sqlite</code>) and automatically enables/kickstarts <code>com.apple.photolibraryd</code> and <code>com.apple.cloudphotod</code> on macOS when iCloud Photos is enabled:</p>
+<pre><code class="language-bash"># Run interactive preflight check (auto-enables photolibraryd &amp; cloudphotod on macOS)
+bluepill-server preflight
+
+# Inspect preflight status as JSON without modifying launchd daemons
+bluepill-server preflight --no-fix --json
+
+# Optionally enable or disable individual iCloud Hub modules on the relay (append preflight --no-fix for one-shot execution)
+# Configuration is saved to ~/.config/bluepill/server.json and takes effect on the running relay after restart:
+bluepill-server --enable-notes --enable-calendar --enable-photos preflight --no-fix
+bluepill-server --disable-photos preflight --no-fix
+# Restart the service to apply module changes:
+# macOS: brew services restart bluepill  OR  launchctl kickstart -k gui/$(id -u)/com.nertwork.bluepill-server
+# Linux: systemctl --user restart bluepill.service
+</code></pre>
+<p>On the Linux desktop client (<code>bluepill</code>), all three modules are enabled by default and can be toggled interactively in <strong>⚙ Server Configuration -&gt; iCloud Hub Modules (Optional)</strong> or via environment variables (<code>BLUEPILL_ENABLE_NOTES=0/1</code>, <code>BLUEPILL_ENABLE_CALENDAR=0/1</code>, <code>BLUEPILL_ENABLE_PHOTOS=0/1</code>).</p>
         </main>
     </div>
 
