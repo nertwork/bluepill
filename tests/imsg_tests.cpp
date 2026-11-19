@@ -7471,8 +7471,8 @@ private slots:
             const QJsonObject cachedSecond = b.cachedMessageForTest(chatGuid, secondTempGuid);
             QVERIFY(!cachedSecond.isEmpty());
             QCOMPARE(cachedSecond.value(QStringLiteral("pending")).toBool(), true);
-            QCOMPARE(cachedSecond.value(QStringLiteral("isSent")).toBool(), false);
-            QCOMPARE(cachedSecond.value(QStringLiteral("isDelivered")).toBool(), false);
+            QCOMPARE(cachedSecond.value(QStringLiteral("isSent")), QJsonValue(false));
+            QCOMPARE(cachedSecond.value(QStringLiteral("isDelivered")), QJsonValue(false));
             b.rebuildSelectedChatMessagesForTest();
             QCOMPARE(b.messages().size(), 2);
             QCOMPARE(b.messages().first().toMap().value(QStringLiteral("isFailed")).toBool(), true);
@@ -7712,8 +7712,8 @@ private slots:
             QVERIFY(!pendingTempGuid.isEmpty());
             const QJsonObject cachedPend = b.cachedMessageForTest(chatGuid, pendingTempGuid);
             QCOMPARE(cachedPend.value(QStringLiteral("pending")).toBool(), true);
-            QCOMPARE(cachedPend.value(QStringLiteral("isSent")).toBool(), false);
-            QCOMPARE(cachedPend.value(QStringLiteral("isDelivered")).toBool(), false);
+            QCOMPARE(cachedPend.value(QStringLiteral("isSent")), QJsonValue(false));
+            QCOMPARE(cachedPend.value(QStringLiteral("isDelivered")), QJsonValue(false));
             QCOMPARE(b.messages().last().toMap().value(QStringLiteral("isFailed")).toBool(), false);
             QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sending..."));
 
@@ -7729,6 +7729,583 @@ private slots:
             QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
             QCOMPARE(b.messages().last().toMap().value(QStringLiteral("isFailed")).toBool(), true);
             QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
+        }
+    }
+
+    void testRev6UploadCorrelationPendingNormalizationAndErrorFreshness() {
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+
+        // 1. Mismatched upload IDs with error=4 must NOT mark another upload failed or overwrite its optimistic row,
+        //    while correlated upload errors MUST still be accepted.
+        {
+            QTcpServer server;
+            QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+            const QString chatGuid = QStringLiteral("iMessage;-;+14155550191");
+            const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("REV6 Upload Err")}, {QStringLiteral("style"), 45}};
+
+            int uploadCall = 0;
+            QString tempA;
+            QString tempB;
+            QString tempC;
+            QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+                while (server.hasPendingConnections()) {
+                    QTcpSocket *sock = server.nextPendingConnection();
+                    auto buf = std::make_shared<QByteArray>();
+                    QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, buf, &uploadCall, &tempA, &tempB, &tempC, nowMs]() {
+                        buf->append(sock->readAll());
+                        const int hdrEnd = buf->indexOf("\r\n\r\n");
+                        if (hdrEnd < 0) return;
+                        const QByteArray hdr = buf->left(hdrEnd);
+                        int contentLen = 0;
+                        for (const QByteArray &line : hdr.split('\n')) {
+                            if (line.toLower().startsWith("content-length:")) contentLen = line.mid(15).trimmed().toInt();
+                        }
+                        if (buf->size() < hdrEnd + 4 + contentLen) return;
+                        const QByteArray body = buf->mid(hdrEnd + 4, contentLen);
+                        buf->remove(0, hdrEnd + 4 + contentLen);
+
+                        auto extractTemp = [&body]() -> QString {
+                            const int tgPos = body.indexOf("name=\"tempGuid\"\r\n\r\n");
+                            if (tgPos < 0) return QString();
+                            const int valStart = tgPos + 19;
+                            const int valEnd = body.indexOf("\r\n--", valStart);
+                            return (valEnd > valStart) ? QString::fromUtf8(body.mid(valStart, valEnd - valStart)) : QString();
+                        };
+
+                        if (hdr.startsWith("POST /api/v1/message/attachment")) {
+                            ++uploadCall;
+                            const QString tg = extractTemp();
+                            QJsonObject dataObj;
+                            if (uploadCall == 1) {
+                                tempA = tg;
+                                dataObj = QJsonObject{
+                                    {QStringLiteral("guid"), QStringLiteral("g-up-a")},
+                                    {QStringLiteral("tempGuid"), tempA},
+                                    {QStringLiteral("isFromMe"), true},
+                                    {QStringLiteral("isSent"), true},
+                                    {QStringLiteral("isDelivered"), false},
+                                    {QStringLiteral("dateCreated"), nowMs - 2000},
+                                    {QStringLiteral("attachments"), QJsonArray{QJsonObject{{QStringLiteral("guid"), QStringLiteral("att-a-1")}, {QStringLiteral("transferName"), QStringLiteral("up_a.png")}, {QStringLiteral("mimeType"), QStringLiteral("image/png")}}}}
+                                };
+                            } else if (uploadCall == 2) {
+                                tempB = tg;
+                                // Mismatched error naming upload A's guid and tempGuid
+                                dataObj = QJsonObject{
+                                    {QStringLiteral("guid"), QStringLiteral("g-up-a")},
+                                    {QStringLiteral("tempGuid"), tempA},
+                                    {QStringLiteral("error"), 4}
+                                };
+                            } else {
+                                tempC = tg;
+                                // Correlated error for upload C
+                                dataObj = QJsonObject{
+                                    {QStringLiteral("guid"), QStringLiteral("g-up-c")},
+                                    {QStringLiteral("tempGuid"), tempC},
+                                    {QStringLiteral("error"), 4},
+                                    {QStringLiteral("dateCreated"), nowMs}
+                                };
+                            }
+                            const QByteArray json = QJsonDocument(QJsonObject{{QStringLiteral("status"), 200}, {QStringLiteral("data"), dataObj}}).toJson(QJsonDocument::Compact);
+                            sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                            sock->disconnectFromHost();
+                            return;
+                        }
+                        const QByteArray json = R"({"status":200,"data":[]})";
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        sock->disconnectFromHost();
+                    });
+                }
+            });
+
+            QTemporaryDir tempDir;
+            QVERIFY(tempDir.isValid());
+            const QString imgA = tempDir.filePath(QStringLiteral("up_a.png"));
+            const QString imgB = tempDir.filePath(QStringLiteral("up_b.png"));
+            const QString imgC = tempDir.filePath(QStringLiteral("up_c.png"));
+            for (const QString &fp : {imgA, imgB, imgC}) {
+                QFile f(fp);
+                QVERIFY(f.open(QIODevice::WriteOnly));
+                f.write("PNG");
+                f.close();
+            }
+
+            Backend b(false);
+            b.setStateFilePath(tempDir.filePath(QStringLiteral("state_rev6_up.json")));
+            b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_rev6_up.json")));
+            b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()), QString(), QStringLiteral("pw"));
+            b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+            b.selectChat(chatGuid);
+
+            b.sendAttachment(chatGuid, imgA, QString());
+            QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            QCOMPARE(b.cachedMessageForTest(chatGuid, QStringLiteral("g-up-a")).value(QStringLiteral("error")).toInt(), 0);
+
+            b.sendAttachment(chatGuid, imgB, QString());
+            QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            QVERIFY(!tempB.isEmpty());
+            // Upload A must remain healthy; upload B's optimistic row must remain distinct (not overwritten with g-up-a) and marked failed
+            QCOMPARE(b.cachedMessageForTest(chatGuid, QStringLiteral("g-up-a")).value(QStringLiteral("error")).toInt(), 0);
+            QCOMPARE(b.messages().size(), 2);
+            QCOMPARE(b.messages().at(0).toMap().value(QStringLiteral("guid")).toString(), QStringLiteral("g-up-a"));
+            QCOMPARE(b.messages().at(0).toMap().value(QStringLiteral("isFailed")).toBool(), false);
+            QCOMPARE(b.messages().at(1).toMap().value(QStringLiteral("guid")).toString(), tempB);
+            QCOMPARE(b.messages().at(1).toMap().value(QStringLiteral("isFailed")).toBool(), true);
+            QCOMPARE(b.messages().at(1).toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
+
+            b.sendAttachment(chatGuid, imgC, QString());
+            QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            QCOMPARE(b.cachedMessageForTest(chatGuid, QStringLiteral("g-up-c")).value(QStringLiteral("error")).toInt(), 4);
+            QCOMPARE(b.messages().size(), 3);
+            QCOMPARE(b.messages().at(2).toMap().value(QStringLiteral("guid")).toString(), QStringLiteral("g-up-c"));
+            QCOMPARE(b.messages().at(2).toMap().value(QStringLiteral("isFailed")).toBool(), true);
+        }
+
+        // 2 & 4. Text ack tempGuid validation against sentTempGuid (AppleScript -as, /chat/new relay tempGuid, mismatch reject)
+        //        + partial pending text ack defaulting isSent=false independently of isDelivered while preserving explicit isSent=true.
+        {
+            QTcpServer server;
+            QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+            const QString chatGuid = QStringLiteral("iMessage;-;+14155550192");
+            const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("REV6 Text Ack")}, {QStringLiteral("style"), 45}};
+
+            QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+                while (server.hasPendingConnections()) {
+                    QTcpSocket *sock = server.nextPendingConnection();
+                    auto buf = std::make_shared<QByteArray>();
+                    QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, buf, chatGuid, nowMs]() {
+                        buf->append(sock->readAll());
+                        const int hdrEnd = buf->indexOf("\r\n\r\n");
+                        if (hdrEnd < 0) return;
+                        const QByteArray hdr = buf->left(hdrEnd);
+                        int contentLen = 0;
+                        for (const QByteArray &line : hdr.split('\n')) {
+                            if (line.toLower().startsWith("content-length:")) contentLen = line.mid(15).trimmed().toInt();
+                        }
+                        if (buf->size() < hdrEnd + 4 + contentLen) return;
+                        const QByteArray body = buf->mid(hdrEnd + 4, contentLen);
+                        buf->remove(0, hdrEnd + 4 + contentLen);
+
+                        if (hdr.startsWith("POST /api/v1/message/text")) {
+                            const QJsonObject reqObj = QJsonDocument::fromJson(body).object();
+                            const QString msg = reqObj.value(QStringLiteral("message")).toString();
+                            const QString method = reqObj.value(QStringLiteral("method")).toString();
+                            const QString tg = reqObj.value(QStringLiteral("tempGuid")).toString();
+
+                            if (msg == QStringLiteral("AS fallback msg")) {
+                                if (method == QStringLiteral("private-api")) {
+                                    const QByteArray errJson = R"({"status":500,"error":"Private API unavailable"})";
+                                    sock->write("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(errJson.size()) + "\r\nConnection: close\r\n\r\n" + errJson);
+                                    sock->disconnectFromHost();
+                                    return;
+                                }
+                                Q_ASSERT(tg.endsWith(QStringLiteral("-as")));
+                                const QByteArray json = QJsonDocument(QJsonObject{
+                                    {QStringLiteral("status"), 200},
+                                    {QStringLiteral("data"), QJsonObject{
+                                        {QStringLiteral("guid"), QStringLiteral("g-as-1")},
+                                        {QStringLiteral("tempGuid"), tg},
+                                        {QStringLiteral("isFromMe"), true},
+                                        {QStringLiteral("isSent"), true},
+                                        {QStringLiteral("isDelivered"), false},
+                                        {QStringLiteral("dateCreated"), nowMs - 5000}
+                                    }}
+                                }).toJson(QJsonDocument::Compact);
+                                sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                                sock->disconnectFromHost();
+                                return;
+                            }
+                            if (msg == QStringLiteral("New chat msg")) {
+                                const QByteArray errJson = R"({"status":404,"error":"Chat does not exist"})";
+                                sock->write("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(errJson.size()) + "\r\nConnection: close\r\n\r\n" + errJson);
+                                sock->disconnectFromHost();
+                                return;
+                            }
+                            if (msg == QStringLiteral("Wrong temp ack")) {
+                                const QByteArray json = QJsonDocument(QJsonObject{
+                                    {QStringLiteral("status"), 200},
+                                    {QStringLiteral("data"), QJsonObject{
+                                        {QStringLiteral("guid"), QStringLiteral("g-wrong-send")},
+                                        {QStringLiteral("tempGuid"), QStringLiteral("temp-different-send")},
+                                        {QStringLiteral("isFromMe"), true},
+                                        {QStringLiteral("isSent"), true},
+                                        {QStringLiteral("isDelivered"), true},
+                                        {QStringLiteral("dateCreated"), nowMs - 3000}
+                                    }}
+                                }).toJson(QJsonDocument::Compact);
+                                sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                                sock->disconnectFromHost();
+                                return;
+                            }
+                            if (msg == QStringLiteral("Pending no isSent")) {
+                                const QByteArray json = QJsonDocument(QJsonObject{
+                                    {QStringLiteral("status"), 200},
+                                    {QStringLiteral("data"), QJsonObject{
+                                        {QStringLiteral("guid"), QStringLiteral("g-pend-no-issent")},
+                                        {QStringLiteral("tempGuid"), tg},
+                                        {QStringLiteral("text"), msg},
+                                        {QStringLiteral("pending"), true},
+                                        {QStringLiteral("isDelivered"), false},
+                                        {QStringLiteral("dateCreated"), nowMs + 2000}
+                                    }}
+                                }).toJson(QJsonDocument::Compact);
+                                sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                                sock->disconnectFromHost();
+                                return;
+                            }
+                            if (msg == QStringLiteral("Pending explicit isSent")) {
+                                const QByteArray json = QJsonDocument(QJsonObject{
+                                    {QStringLiteral("status"), 200},
+                                    {QStringLiteral("data"), QJsonObject{
+                                        {QStringLiteral("guid"), QStringLiteral("g-pend-pos-issent")},
+                                        {QStringLiteral("tempGuid"), tg},
+                                        {QStringLiteral("text"), msg},
+                                        {QStringLiteral("pending"), true},
+                                        {QStringLiteral("isSent"), true},
+                                        {QStringLiteral("isDelivered"), false},
+                                        {QStringLiteral("dateCreated"), nowMs + 3000}
+                                    }}
+                                }).toJson(QJsonDocument::Compact);
+                                sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                                sock->disconnectFromHost();
+                                return;
+                            }
+                        }
+                        if (hdr.startsWith("POST /api/v1/chat/new")) {
+                            const QByteArray json = QJsonDocument(QJsonObject{
+                                {QStringLiteral("status"), 200},
+                                {QStringLiteral("data"), QJsonObject{
+                                    {QStringLiteral("guid"), chatGuid},
+                                    {QStringLiteral("messages"), QJsonArray{QJsonObject{
+                                        {QStringLiteral("guid"), QStringLiteral("g-newchat-1")},
+                                        {QStringLiteral("tempGuid"), QStringLiteral("relay-gen-newchat-1")},
+                                        {QStringLiteral("isFromMe"), true},
+                                        {QStringLiteral("isSent"), true},
+                                        {QStringLiteral("isDelivered"), false},
+                                        {QStringLiteral("dateCreated"), nowMs - 4000}
+                                    }}}
+                                }}
+                            }).toJson(QJsonDocument::Compact);
+                            sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                            sock->disconnectFromHost();
+                            return;
+                        }
+                        const QByteArray json = R"({"status":200,"data":[]})";
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        sock->disconnectFromHost();
+                    });
+                }
+            });
+
+            QTemporaryDir tempDir;
+            QVERIFY(tempDir.isValid());
+            Backend b(false);
+            b.setStateFilePath(tempDir.filePath(QStringLiteral("state_rev6_text.json")));
+            b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_rev6_text.json")));
+            b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()), QString(), QStringLiteral("pw"));
+            b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+            b.selectChat(chatGuid);
+
+            // (a) AppleScript -as suffix accepted & promotes optimistic row
+            b.sendMessage(chatGuid, QStringLiteral("AS fallback msg"));
+            QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            QVERIFY(!b.cachedMessageForTest(chatGuid, QStringLiteral("g-as-1")).isEmpty());
+            QVERIFY(!b.messages().isEmpty());
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("guid")).toString(), QStringLiteral("g-as-1"));
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("isFailed")).toBool(), false);
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sent"));
+
+            // (b) /api/v1/chat/new omitted tempGuid -> relay-generated tempGuid accepted
+            b.sendMessage(chatGuid, QStringLiteral("New chat msg"));
+            QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            QVERIFY(!b.cachedMessageForTest(chatGuid, QStringLiteral("g-newchat-1")).isEmpty());
+            QVERIFY(!b.messages().isEmpty());
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("guid")).toString(), QStringLiteral("g-newchat-1"));
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("isFailed")).toBool(), false);
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sent"));
+
+            // (c) Mismatched tempGuid rejected
+            b.sendMessage(chatGuid, QStringLiteral("Wrong temp ack"));
+            QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            QVERIFY(b.cachedMessageForTest(chatGuid, QStringLiteral("g-wrong-send")).isEmpty());
+            QVERIFY(!b.messages().isEmpty());
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("isFailed")).toBool(), true);
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
+
+            // (d) Pending ack with isDelivered:false and omitted isSent defaults isSent:false -> shows "Sending..." (never "Sent")
+            b.sendMessage(chatGuid, QStringLiteral("Pending no isSent"));
+            QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            const QJsonObject cachedNoSent = b.cachedMessageForTest(chatGuid, QStringLiteral("g-pend-no-issent"));
+            QCOMPARE(cachedNoSent.value(QStringLiteral("isSent")), QJsonValue(false));
+            QCOMPARE(cachedNoSent.value(QStringLiteral("isDelivered")), QJsonValue(false));
+            QVERIFY(!b.messages().isEmpty());
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sending..."));
+            b.ingestMessagesForTest(QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("g-pend-no-issent")},
+                {QStringLiteral("isFromMe"), true},
+                {QStringLiteral("pending"), false},
+                {QStringLiteral("isDelivered"), false},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            }}, false);
+            QVERIFY(!b.messages().isEmpty());
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sending..."));
+
+            // (e) Pending ack with explicit isSent:true preserves isSent:true -> shows "Sent"
+            b.sendMessage(chatGuid, QStringLiteral("Pending explicit isSent"));
+            QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            const QJsonObject cachedPosSent = b.cachedMessageForTest(chatGuid, QStringLiteral("g-pend-pos-issent"));
+            QCOMPARE(cachedPosSent.value(QStringLiteral("isSent")), QJsonValue(true));
+            QCOMPARE(cachedPosSent.value(QStringLiteral("isDelivered")), QJsonValue(false));
+            QVERIFY(!b.messages().isEmpty());
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sent"));
+        }
+
+        // 3. Sparse pending:true upload ack preserves optimistic attachment metadata & creation time across rebuilds,
+        //    then prefers full server attachment metadata when the real server row arrives.
+        {
+            QTcpServer server;
+            QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+            const QString chatGuid = QStringLiteral("iMessage;-;+14155550193");
+            const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("REV6 Sparse Upload")}, {QStringLiteral("style"), 45}};
+
+            QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+                while (server.hasPendingConnections()) {
+                    QTcpSocket *sock = server.nextPendingConnection();
+                    auto buf = std::make_shared<QByteArray>();
+                    QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, buf]() {
+                        buf->append(sock->readAll());
+                        const int hdrEnd = buf->indexOf("\r\n\r\n");
+                        if (hdrEnd < 0) return;
+                        const QByteArray hdr = buf->left(hdrEnd);
+                        int contentLen = 0;
+                        for (const QByteArray &line : hdr.split('\n')) {
+                            if (line.toLower().startsWith("content-length:")) contentLen = line.mid(15).trimmed().toInt();
+                        }
+                        if (buf->size() < hdrEnd + 4 + contentLen) return;
+                        const QByteArray body = buf->mid(hdrEnd + 4, contentLen);
+                        buf->remove(0, hdrEnd + 4 + contentLen);
+
+                        if (hdr.startsWith("POST /api/v1/message/attachment")) {
+                            const int tgPos = body.indexOf("name=\"tempGuid\"\r\n\r\n");
+                            const int valStart = tgPos + 19;
+                            const int valEnd = body.indexOf("\r\n--", valStart);
+                            const QString tg = (tgPos >= 0 && valEnd > valStart) ? QString::fromUtf8(body.mid(valStart, valEnd - valStart)) : QString();
+                            const QByteArray json = QJsonDocument(QJsonObject{
+                                {QStringLiteral("status"), 200},
+                                {QStringLiteral("data"), QJsonObject{
+                                    {QStringLiteral("guid"), QStringLiteral("g-sparse-pend")},
+                                    {QStringLiteral("tempGuid"), tg},
+                                    {QStringLiteral("pending"), true}
+                                }}
+                            }).toJson(QJsonDocument::Compact);
+                            sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                            sock->disconnectFromHost();
+                            return;
+                        }
+                        const QByteArray json = R"({"status":200,"data":[]})";
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        sock->disconnectFromHost();
+                    });
+                }
+            });
+
+            QTemporaryDir tempDir;
+            QVERIFY(tempDir.isValid());
+            const QString imgPath = tempDir.filePath(QStringLiteral("sparse_photo.png"));
+            {
+                QFile f(imgPath);
+                QVERIFY(f.open(QIODevice::WriteOnly));
+                f.write("PNG");
+                f.close();
+            }
+
+            Backend b(false);
+            b.setStateFilePath(tempDir.filePath(QStringLiteral("state_rev6_sparse.json")));
+            b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_rev6_sparse.json")));
+            b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()), QString(), QStringLiteral("pw"));
+            b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+            b.selectChat(chatGuid);
+
+            b.sendAttachment(chatGuid, imgPath, QStringLiteral("Caption stays"));
+            QTRY_COMPARE_WITH_TIMEOUT(b.sendingMessage(), false, 1500);
+            b.rebuildSelectedChatMessagesForTest();
+            QCOMPARE(b.messages().size(), 1);
+            const QVariantMap rebuiltOpt = b.messages().first().toMap();
+            QCOMPARE(rebuiltOpt.value(QStringLiteral("guid")).toString(), QStringLiteral("g-sparse-pend"));
+            QCOMPARE(rebuiltOpt.value(QStringLiteral("hasImageAttachment")).toBool(), true);
+            QCOMPARE(rebuiltOpt.value(QStringLiteral("attachmentName")).toString(), QStringLiteral("sparse_photo.png"));
+            QCOMPARE(rebuiltOpt.value(QStringLiteral("text")).toString(), QStringLiteral("Caption stays"));
+            QVERIFY(rebuiltOpt.value(QStringLiteral("dateCreated")).toLongLong() > 0);
+            QVERIFY(!rebuiltOpt.value(QStringLiteral("timeText")).toString().isEmpty());
+            QCOMPARE(rebuiltOpt.value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sending..."));
+
+            // Full server row arrives later and supersedes optimistic attachment metadata & timestamp
+            const qint64 srvTs = nowMs + 5000;
+            b.ingestMessagesForTest(QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("g-sparse-pend")},
+                {QStringLiteral("originalROWID"), 7777},
+                {QStringLiteral("text"), QStringLiteral("Caption stays")},
+                {QStringLiteral("isFromMe"), true},
+                {QStringLiteral("isSent"), true},
+                {QStringLiteral("isDelivered"), true},
+                {QStringLiteral("dateDelivered"), srvTs},
+                {QStringLiteral("dateCreated"), srvTs},
+                {QStringLiteral("pending"), false},
+                {QStringLiteral("attachments"), QJsonArray{QJsonObject{
+                    {QStringLiteral("guid"), QStringLiteral("real-srv-att-7777")},
+                    {QStringLiteral("transferName"), QStringLiteral("server_photo.png")},
+                    {QStringLiteral("mimeType"), QStringLiteral("image/png")}
+                }}},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            }}, false);
+            b.rebuildSelectedChatMessagesForTest();
+            QCOMPARE(b.messages().size(), 1);
+            const QVariantMap rebuiltSrv = b.messages().first().toMap();
+            QCOMPARE(rebuiltSrv.value(QStringLiteral("attachmentGuid")).toString(), QStringLiteral("real-srv-att-7777"));
+            QCOMPARE(rebuiltSrv.value(QStringLiteral("attachmentName")).toString(), QStringLiteral("server_photo.png"));
+            QCOMPARE(rebuiltSrv.value(QStringLiteral("dateCreated")).toLongLong(), srvTs);
+            QCOMPARE(rebuiltSrv.value(QStringLiteral("receiptText")).toString(), QStringLiteral("Delivered"));
+        }
+
+        // 5. Reject older positive GUID-query receipt snapshot when it conflicts with newer accepted error=4,
+        //    while preserving clearing error when a genuinely newer delivery/read observation arrives.
+        {
+            QTcpServer server;
+            QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+            const QString chatGuid = QStringLiteral("iMessage;-;+14155550194");
+            const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("displayName"), QStringLiteral("REV6 Error Race")}, {QStringLiteral("style"), 45}};
+
+            QList<QTcpSocket *> heldSocks;
+            QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+                while (server.hasPendingConnections()) {
+                    QTcpSocket *sock = server.nextPendingConnection();
+                    auto buf = std::make_shared<QByteArray>();
+                    QObject::connect(sock, &QTcpSocket::readyRead, sock, [sock, buf, &heldSocks]() {
+                        buf->append(sock->readAll());
+                        const int hdrEnd = buf->indexOf("\r\n\r\n");
+                        if (hdrEnd < 0) return;
+                        const QByteArray hdr = buf->left(hdrEnd);
+                        int contentLen = 0;
+                        for (const QByteArray &line : hdr.split('\n')) {
+                            if (line.toLower().startsWith("content-length:")) contentLen = line.mid(15).trimmed().toInt();
+                        }
+                        if (buf->size() < hdrEnd + 4 + contentLen) return;
+                        const QByteArray body = buf->mid(hdrEnd + 4, contentLen);
+                        buf->remove(0, hdrEnd + 4 + contentLen);
+                        if (hdr.startsWith("POST /api/v1/message/query") && body.contains("message.guid")) {
+                            heldSocks.append(sock);
+                            return;
+                        }
+                        const QByteArray json = R"({"status":200,"data":[]})";
+                        sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(json.size()) + "\r\nConnection: close\r\n\r\n" + json);
+                        sock->disconnectFromHost();
+                    });
+                }
+            });
+
+            QTemporaryDir tempDir;
+            QVERIFY(tempDir.isValid());
+            Backend b(false);
+            b.setStateFilePath(tempDir.filePath(QStringLiteral("state_rev6_race.json")));
+            b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_rev6_race.json")));
+            b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()), QString(), QStringLiteral("pw"));
+            b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+            b.selectChat(chatGuid);
+
+            // (a) In-flight GUID query reads delivered row before live update reports error=4, then finishes last
+            b.ingestMessagesForTest(QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("out-rev6-race-1")},
+                {QStringLiteral("text"), QStringLiteral("Race test")},
+                {QStringLiteral("isFromMe"), true},
+                {QStringLiteral("isSent"), true},
+                {QStringLiteral("isDelivered"), false},
+                {QStringLiteral("dateCreated"), nowMs - 2000},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            }}, false);
+            b.addPendingDeliveryForTest(QStringLiteral("out-rev6-race-1"), chatGuid, nowMs - 1000);
+            b.checkPendingDeliveryStatusesForTest();
+            QTRY_COMPARE_WITH_TIMEOUT(heldSocks.size(), 1, 1500);
+
+            // Live update delivers error=4 while GUID query is in flight
+            b.ingestMessagesForTest(QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("out-rev6-race-1")},
+                {QStringLiteral("isFromMe"), true},
+                {QStringLiteral("isDelivered"), false},
+                {QStringLiteral("error"), 4},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            }}, false);
+            QCOMPARE(b.cachedMessageForTest(chatGuid, QStringLiteral("out-rev6-race-1")).value(QStringLiteral("error")).toInt(), 4);
+
+            // Held GUID query completes with older positive delivery snapshot -> MUST be rejected
+            const quint64 beforeFin = b.pendingDeliveryCheckCompletedCountForTest();
+            const QByteArray staleDelivResp = QJsonDocument(QJsonObject{
+                {QStringLiteral("status"), 200},
+                {QStringLiteral("data"), QJsonArray{QJsonObject{
+                    {QStringLiteral("guid"), QStringLiteral("out-rev6-race-1")},
+                    {QStringLiteral("isFromMe"), true},
+                    {QStringLiteral("isSent"), true},
+                    {QStringLiteral("isDelivered"), true},
+                    {QStringLiteral("dateDelivered"), nowMs - 500},
+                    {QStringLiteral("error"), 0}
+                }}}
+            }).toJson(QJsonDocument::Compact);
+            QTcpSocket *hs = heldSocks.takeFirst();
+            hs->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + QByteArray::number(staleDelivResp.size()) + "\r\nConnection: close\r\n\r\n" + staleDelivResp);
+            hs->disconnectFromHost();
+            QTRY_VERIFY_WITH_TIMEOUT(b.pendingDeliveryCheckCompletedCountForTest() > beforeFin, 1500);
+
+            QCOMPARE(b.cachedMessageForTest(chatGuid, QStringLiteral("out-rev6-race-1")).value(QStringLiteral("error")).toInt(), 4);
+            QVERIFY(!b.messages().isEmpty());
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("isFailed")).toBool(), true);
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
+
+            // (b) Direct merge conflict: initially delivered at T0, then error=4 accepted, then older T0 delivery snapshot
+            //     must NOT clear error=4, whereas a newer delivery (> T0) or read (> 0) MUST clear error=4.
+            b.ingestMessagesForTest(QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("out-rev6-merge-2")},
+                {QStringLiteral("text"), QStringLiteral("Merge conflict")},
+                {QStringLiteral("isFromMe"), true},
+                {QStringLiteral("isSent"), true},
+                {QStringLiteral("isDelivered"), true},
+                {QStringLiteral("dateDelivered"), nowMs - 3000},
+                {QStringLiteral("dateCreated"), nowMs - 1000},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            }}, false);
+            b.ingestMessagesForTest(QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("out-rev6-merge-2")},
+                {QStringLiteral("isFromMe"), true},
+                {QStringLiteral("isDelivered"), false},
+                {QStringLiteral("error"), 4},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            }}, false);
+            QCOMPARE(b.cachedMessageForTest(chatGuid, QStringLiteral("out-rev6-merge-2")).value(QStringLiteral("error")).toInt(), 4);
+
+            // Older positive snapshot (same/older dateDelivered <= nowMs - 3000) must NOT clear error=4
+            b.ingestMessagesForTest(QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("out-rev6-merge-2")},
+                {QStringLiteral("isFromMe"), true},
+                {QStringLiteral("isSent"), true},
+                {QStringLiteral("isDelivered"), true},
+                {QStringLiteral("dateDelivered"), nowMs - 3000},
+                {QStringLiteral("error"), 0},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            }}, false);
+            QCOMPARE(b.cachedMessageForTest(chatGuid, QStringLiteral("out-rev6-merge-2")).value(QStringLiteral("error")).toInt(), 4);
+            QVERIFY(!b.messages().isEmpty());
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("isFailed")).toBool(), true);
+
+            // Genuinely newer delivery observation (dateDelivered > nowMs - 3000) clears error=4
+            b.ingestMessagesForTest(QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("out-rev6-merge-2")},
+                {QStringLiteral("isFromMe"), true},
+                {QStringLiteral("isSent"), true},
+                {QStringLiteral("isDelivered"), true},
+                {QStringLiteral("dateDelivered"), nowMs},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            }}, false);
+            QCOMPARE(b.cachedMessageForTest(chatGuid, QStringLiteral("out-rev6-merge-2")).value(QStringLiteral("error")).toInt(), 0);
+            QVERIFY(!b.messages().isEmpty());
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("isFailed")).toBool(), false);
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Delivered"));
         }
     }
 
