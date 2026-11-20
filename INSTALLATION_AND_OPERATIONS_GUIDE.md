@@ -416,7 +416,7 @@ brew install nertwork/tap/bluepill
 
 # Verify binary installation
 bluepill-server --version
-# Output: bluepill-server 1.2.6
+# Output: bluepill-server 1.2.7
 
 # Link your Mac to BluePill Cloud (opens https://bluepill.nertwork.com/portal) & start service
 bluepill-server login

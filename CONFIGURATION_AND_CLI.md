@@ -16,7 +16,7 @@
   - **Failover Server URL (Optional):** `https://backup-relay.example.com:443`. Include the port inline; without one, `1235` is used.
   - **API Password / Key:** Your relay password/token
   - **Settings Status & Version Banner + Section Tabs (`Server & Sync`, `UI & Appearance`, `Notifications & Audio`):**
-    - Displays the active **BluePill Client Version** (`v1.2.6`), live **Relay Status & Version**, and **Connected Endpoint** at the top of Settings.
+    - Displays the active **BluePill Client Version** (`v1.2.7`), live **Relay Status & Version**, and **Connected Endpoint** at the top of Settings.
     - **UI & Appearance Preferences** (persisted in `~/.config/bluepill/state.json`):
       - `showTopBarStatusPill` (default `false`): Show or hide the compact connection & version status pill in the top bar next to the BluePill badge.
       - `showPinnedRow` (default `true`): Show or hide the pinned / quick-access conversations row at the top of the sidebar.
