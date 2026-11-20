@@ -5,7 +5,8 @@
 `BluePill` stores its server configuration in `~/.config/bluepill/config.json` with strict `0600` (`-rw-------`) owner-only permissions.
 - **Automatic Migration from `imsg`:** If `~/.config/bluepill/config.json` does not exist on first launch and `~/.config/imsg/config.json` is present, `BluePill` automatically migrates your configuration and credentials seamlessly.
 - **GUI Settings & Server Setup (`Ctrl+,`):** Press `Ctrl+,` or click **`⚙ Settings`** in the top bar at any time to configure:
-  - **Primary Server URL + Port:** `mac-relay.example.com` (BluePill Relay), `https://bluepill.example.com` (behind TLS) or `ssh://user@mac-host` (Direct SSH mode)
+  - **BluePill Cloud Quick Connect (`https://bluepill.nertwork.com` — Default):** Click **"Sign in at bluepill.nertwork.com →"** to open the Cloud Portal and copy your Relay URL (`https://api.bluepill.nertwork.com/t/your-name`) & password, or click **"Try Live Demo"** for 1-click live sandbox access.
+  - **Primary Server URL + Port:** `https://api.bluepill.nertwork.com/t/your-name` (BluePill Cloud), `http://mac-ip:1235` (local macOS Relay), `https://bluepill.example.com` (behind TLS) or `ssh://user@mac-host` (Direct SSH mode)
     - A URL without a scheme uses `http://`, because `bluepill-server` serves plain HTTP unless it's started with `--tls-cert`/`--tls-key`.
     - The **Port** field shows the default `1235` greyed out. Leave it empty to use `1235` for both `http://` and `https://`. Enter `443` for a TLS reverse proxy or Tailscale Serve, or `1234` for a BlueBubbles Server on its default port.
     - A port typed into the URL (`host:8080`) moves into the Port field when you leave the URL field.
@@ -15,7 +16,7 @@
   - **Failover Server URL (Optional):** `https://backup-relay.example.com:443`. Include the port inline; without one, `1235` is used.
   - **API Password / Key:** Your relay password/token
   - **Settings Status & Version Banner + Section Tabs (`Server & Sync`, `UI & Appearance`, `Notifications & Audio`):**
-    - Displays the active **BluePill Client Version** (`v1.2.5`), live **Relay Status & Version**, and **Connected Endpoint** at the top of Settings.
+    - Displays the active **BluePill Client Version** (`v1.2.6`), live **Relay Status & Version**, and **Connected Endpoint** at the top of Settings.
     - **UI & Appearance Preferences** (persisted in `~/.config/bluepill/state.json`):
       - `showTopBarStatusPill` (default `false`): Show or hide the compact connection & version status pill in the top bar next to the BluePill badge.
       - `showPinnedRow` (default `true`): Show or hide the pinned / quick-access conversations row at the top of the sidebar.
@@ -36,7 +37,7 @@ Example `~/.config/bluepill/config.json`:
 ```
 
 ### Apple Account, Cloud Relay & Local Privacy
-- **Built-In BluePill Cloud Relay (`~/.config/bluepill/relay.json`):** Claim a free beta token at [https://bluepill.nertwork.com/signup](https://bluepill.nertwork.com/signup) and run `bluepill-server relay-setup --token <TOKEN>` (saved with `0600` permissions). `bluepill-server serve` (and `brew services start bluepill`) connects automatically to `wss://api.bluepill.nertwork.com/tunnel/connect` with zero port forwarding. Pass `--no-relay` for local-only mode or check `bluepill-server relay-status`.
+- **Built-In BluePill Cloud Relay (`~/.config/bluepill/relay.json`):** Sign in at [https://bluepill.nertwork.com/portal](https://bluepill.nertwork.com/portal) and run `bluepill-server login` (or non-interactively `bluepill-server relay-setup --token <TOKEN>`, saved with `0600` permissions). `bluepill-server serve` (and `brew services start bluepill`) connects automatically to `wss://api.bluepill.nertwork.com/tunnel/connect` with zero port forwarding. Pass `--no-relay` for local-only mode or check `bluepill-server relay-status`.
 - **macOS Relay Endpoint:** On your Mac signed into `Messages.app` with your Apple Account, run `bluepill-server preflight` and `brew services start bluepill`. Your relay listens locally on port `1235` (or custom `--port`) and stores its configuration in `~/.config/bluepill/server.json` (`0600`).
 - **Local Database Privacy:** `bluepill-server` accesses `~/Library/Messages/chat.db` and `AddressBook` strictly in read-only SQLite WAL mode (`?mode=ro`). On Linux/Windows, your desktop client caches recent threads locally in `~/.cache/imsg/` and optionally stores your relay password in the Freedesktop Secret Service keyring (`libsecret` / `secret-tool`).
 - **Transport Security:** All HTTPS and WebSocket/Socket.IO connections enforce strict TLS peer verification (`QSslSocket::VerifyPeer`), and Direct SSH (`ssh://user@mac-host`) tunnels all traffic over standard OpenSSH with zero open ports. Need help? Contact `support@nertwork.com`.

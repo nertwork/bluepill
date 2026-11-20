@@ -477,7 +477,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 <li><a href="#3-macos-relay-server-bluepill-server-setup">3. macOS Relay Server (bluepill-server) Setup</a><ul>
 <li><a href="#prerequisites-supported-versions">Prerequisites &amp; Supported Versions</a></li>
-<li><a href="#homebrew-installation-built-in-cloud-relay">Homebrew Installation &amp; Built-In Cloud Relay</a></li>
+<li><a href="#homebrew-installation-bluepill-cloud-login-default">Homebrew Installation &amp; BluePill Cloud Login (Default)</a></li>
 <li><a href="#full-disk-access-permissions">Full Disk Access &amp; Permissions</a><ul>
 <li><a href="#granting-full-disk-access">Granting Full Disk Access:</a></li>
 <li><a href="#granting-automation-permissions">Granting Automation Permissions:</a></li>
@@ -531,6 +531,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 </ul>
 </div>
+
 
 
 
@@ -909,23 +910,22 @@ pkgs.mkShell {
 <li><strong>SMS / RCS Forwarding:</strong> On your iPhone, enable forwarding under <strong>Settings -&gt; Apps -&gt; Messages -&gt; Text Message Forwarding -&gt; [Your Mac Name]</strong>.</li>
 </ul>
 <hr />
-<h3 id="homebrew-installation-built-in-cloud-relay">Homebrew Installation &amp; Built-In Cloud Relay</h3>
-<pre><code class="language-bash"># Add the official tap
-brew tap nertwork/tap
-
-# Install bluepill-server
+<h3 id="homebrew-installation-bluepill-cloud-login-default">Homebrew Installation &amp; BluePill Cloud Login (Default)</h3>
+<pre><code class="language-bash"># Install bluepill-server from Homebrew Tap
 brew install nertwork/tap/bluepill
 
 # Verify binary installation
 bluepill-server --version
-# Output: bluepill-server 1.2.5
+# Output: bluepill-server 1.2.6
 
-# Optional (Zero Port-Forwarding): Connect to BluePill Cloud Relay
-# Claim a free beta token at https://bluepill.nertwork.com/signup
-bluepill-server relay-setup --token &lt;YOUR_TUNNEL_TOKEN&gt;
-bluepill-server relay-status
+# Link your Mac to BluePill Cloud (opens https://bluepill.nertwork.com/portal) &amp; start service
+bluepill-server login
 brew services start bluepill
+
+# Verify Cloud Relay status at any time
+bluepill-server relay-status
 </code></pre>
+<p>Then open the <strong>BluePill Desktop Client</strong> on Linux or Windows and click <strong>"Sign in at bluepill.nertwork.com →"</strong> (or <strong>"Try Live Demo"</strong>).</p>
 <hr />
 <h3 id="full-disk-access-permissions">Full Disk Access &amp; Permissions</h3>
 <p>macOS Privacy protections (TCC) protect <code>~/Library/Messages/chat.db</code> and Contacts databases. You must grant <strong>Full Disk Access</strong> to allow <code>bluepill-server</code> to read messages and resolve contacts.</p>

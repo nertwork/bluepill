@@ -473,6 +473,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
@@ -488,7 +489,8 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <p><code>BluePill</code> stores its server configuration in <code>~/.config/bluepill/config.json</code> with strict <code>0600</code> (<code>-rw-------</code>) owner-only permissions.
 - <strong>Automatic Migration from <code>imsg</code>:</strong> If <code>~/.config/bluepill/config.json</code> does not exist on first launch and <code>~/.config/imsg/config.json</code> is present, <code>BluePill</code> automatically migrates your configuration and credentials seamlessly.
 - <strong>GUI Settings &amp; Server Setup (<code>Ctrl+,</code>):</strong> Press <code>Ctrl+,</code> or click <strong><code>⚙ Settings</code></strong> in the top bar at any time to configure:
-  - <strong>Primary Server URL + Port:</strong> <code>mac-relay.example.com</code> (BluePill Relay), <code>https://bluepill.example.com</code> (behind TLS) or <code>ssh://user@mac-host</code> (Direct SSH mode)
+  - <strong>BluePill Cloud Quick Connect (<code>https://bluepill.nertwork.com</code> — Default):</strong> Click <strong>"Sign in at bluepill.nertwork.com →"</strong> to open the Cloud Portal and copy your Relay URL (<code>https://api.bluepill.nertwork.com/t/your-name</code>) &amp; password, or click <strong>"Try Live Demo"</strong> for 1-click live sandbox access.
+  - <strong>Primary Server URL + Port:</strong> <code>https://api.bluepill.nertwork.com/t/your-name</code> (BluePill Cloud), <code>http://mac-ip:1235</code> (local macOS Relay), <code>https://bluepill.example.com</code> (behind TLS) or <code>ssh://user@mac-host</code> (Direct SSH mode)
     - A URL without a scheme uses <code>http://</code>, because <code>bluepill-server</code> serves plain HTTP unless it's started with <code>--tls-cert</code>/<code>--tls-key</code>.
     - The <strong>Port</strong> field shows the default <code>1235</code> greyed out. Leave it empty to use <code>1235</code> for both <code>http://</code> and <code>https://</code>. Enter <code>443</code> for a TLS reverse proxy or Tailscale Serve, or <code>1234</code> for a BlueBubbles Server on its default port.
     - A port typed into the URL (<code>host:8080</code>) moves into the Port field when you leave the URL field.
@@ -498,7 +500,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
   - <strong>Failover Server URL (Optional):</strong> <code>https://backup-relay.example.com:443</code>. Include the port inline; without one, <code>1235</code> is used.
   - <strong>API Password / Key:</strong> Your relay password/token
   - <strong>Settings Status &amp; Version Banner + Section Tabs (<code>Server &amp; Sync</code>, <code>UI &amp; Appearance</code>, <code>Notifications &amp; Audio</code>):</strong>
-    - Displays the active <strong>BluePill Client Version</strong> (<code>v1.2.5</code>), live <strong>Relay Status &amp; Version</strong>, and <strong>Connected Endpoint</strong> at the top of Settings.
+    - Displays the active <strong>BluePill Client Version</strong> (<code>v1.2.6</code>), live <strong>Relay Status &amp; Version</strong>, and <strong>Connected Endpoint</strong> at the top of Settings.
     - <strong>UI &amp; Appearance Preferences</strong> (persisted in <code>~/.config/bluepill/state.json</code>):
       - <code>showTopBarStatusPill</code> (default <code>false</code>): Show or hide the compact connection &amp; version status pill in the top bar next to the BluePill badge.
       - <code>showPinnedRow</code> (default <code>true</code>): Show or hide the pinned / quick-access conversations row at the top of the sidebar.
@@ -516,7 +518,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </code></pre>
 <h3 id="apple-account-cloud-relay-local-privacy">Apple Account, Cloud Relay &amp; Local Privacy</h3>
 <ul>
-<li><strong>Built-In BluePill Cloud Relay (<code>~/.config/bluepill/relay.json</code>):</strong> Claim a free beta token at <a href="https://bluepill.nertwork.com/signup">https://bluepill.nertwork.com/signup</a> and run <code>bluepill-server relay-setup --token &lt;TOKEN&gt;</code> (saved with <code>0600</code> permissions). <code>bluepill-server serve</code> (and <code>brew services start bluepill</code>) connects automatically to <code>wss://api.bluepill.nertwork.com/tunnel/connect</code> with zero port forwarding. Pass <code>--no-relay</code> for local-only mode or check <code>bluepill-server relay-status</code>.</li>
+<li><strong>Built-In BluePill Cloud Relay (<code>~/.config/bluepill/relay.json</code>):</strong> Sign in at <a href="https://bluepill.nertwork.com/portal">https://bluepill.nertwork.com/portal</a> and run <code>bluepill-server login</code> (or non-interactively <code>bluepill-server relay-setup --token &lt;TOKEN&gt;</code>, saved with <code>0600</code> permissions). <code>bluepill-server serve</code> (and <code>brew services start bluepill</code>) connects automatically to <code>wss://api.bluepill.nertwork.com/tunnel/connect</code> with zero port forwarding. Pass <code>--no-relay</code> for local-only mode or check <code>bluepill-server relay-status</code>.</li>
 <li><strong>macOS Relay Endpoint:</strong> On your Mac signed into <code>Messages.app</code> with your Apple Account, run <code>bluepill-server preflight</code> and <code>brew services start bluepill</code>. Your relay listens locally on port <code>1235</code> (or custom <code>--port</code>) and stores its configuration in <code>~/.config/bluepill/server.json</code> (<code>0600</code>).</li>
 <li><strong>Local Database Privacy:</strong> <code>bluepill-server</code> accesses <code>~/Library/Messages/chat.db</code> and <code>AddressBook</code> strictly in read-only SQLite WAL mode (<code>?mode=ro</code>). On Linux/Windows, your desktop client caches recent threads locally in <code>~/.cache/imsg/</code> and optionally stores your relay password in the Freedesktop Secret Service keyring (<code>libsecret</code> / <code>secret-tool</code>).</li>
 <li><strong>Transport Security:</strong> All HTTPS and WebSocket/Socket.IO connections enforce strict TLS peer verification (<code>QSslSocket::VerifyPeer</code>), and Direct SSH (<code>ssh://user@mac-host</code>) tunnels all traffic over standard OpenSSH with zero open ports. Need help? Contact <code>support@nertwork.com</code>.</li>

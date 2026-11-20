@@ -13,14 +13,12 @@
 - Signed into `Messages.app` with your Apple Account (and **Text Message Forwarding** enabled on your iPhone under **Settings -> Apps -> Messages -> Text Message Forwarding** for SMS/RCS).
 - **Full Disk Access** granted to your terminal / Python / `sshd-keygen-wrapper` under **System Settings -> Privacy & Security -> Full Disk Access** so `bluepill-server` can read `~/Library/Messages/chat.db`.
 
-### 2. Install via Homebrew & Connect BluePill Cloud Relay (Optional)
+### 2. Install via Homebrew & Link BluePill Cloud (Default)
 ```bash
-brew tap nertwork/tap
 brew install nertwork/tap/bluepill
 
-# Optional (Zero Port-Forwarding): Connect to BluePill Cloud Relay
-# Claim a free beta tunnel token at https://bluepill.nertwork.com/signup
-bluepill-server relay-setup --token <YOUR_TUNNEL_TOKEN>
+# Link your Mac to BluePill Cloud (opens https://bluepill.nertwork.com/portal)
+bluepill-server login
 
 # Start the relay daemon (auto-connects Cloud Relay when configured)
 brew services start bluepill

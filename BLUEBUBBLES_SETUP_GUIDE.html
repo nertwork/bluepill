@@ -433,7 +433,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#bluepill-macos-relay-web-ui-bluebubbles-setup-guide">BluePill macOS Relay, Web UI &amp; BlueBubbles Setup Guide</a><ul>
 <li><a href="#option-a-bluepill-native-macos-relay-brew-install-nertworktapbluepill">Option A: BluePill Native macOS Relay (brew install nertwork/tap/bluepill)</a><ul>
 <li><a href="#1-prerequisites-on-macos">1. Prerequisites on macOS</a></li>
-<li><a href="#2-install-via-homebrew-connect-bluepill-cloud-relay-optional">2. Install via Homebrew &amp; Connect BluePill Cloud Relay (Optional)</a></li>
+<li><a href="#2-install-via-homebrew-link-bluepill-cloud-default">2. Install via Homebrew &amp; Link BluePill Cloud (Default)</a></li>
 <li><a href="#3-verify-the-relay-cloud-relay-built-in-web-ui">3. Verify the Relay, Cloud Relay &amp; Built-In Web UI</a></li>
 <li><a href="#4-connect-the-linux-client">4. Connect the Linux Client</a></li>
 </ul>
@@ -444,6 +444,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 </ul>
 </div>
+
 
 
 
@@ -491,13 +492,11 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li>Signed into <code>Messages.app</code> with your Apple Account (and <strong>Text Message Forwarding</strong> enabled on your iPhone under <strong>Settings -&gt; Apps -&gt; Messages -&gt; Text Message Forwarding</strong> for SMS/RCS).</li>
 <li><strong>Full Disk Access</strong> granted to your terminal / Python / <code>sshd-keygen-wrapper</code> under <strong>System Settings -&gt; Privacy &amp; Security -&gt; Full Disk Access</strong> so <code>bluepill-server</code> can read <code>~/Library/Messages/chat.db</code>.</li>
 </ul>
-<h3 id="2-install-via-homebrew-connect-bluepill-cloud-relay-optional">2. Install via Homebrew &amp; Connect BluePill Cloud Relay (Optional)</h3>
-<pre><code class="language-bash">brew tap nertwork/tap
-brew install nertwork/tap/bluepill
+<h3 id="2-install-via-homebrew-link-bluepill-cloud-default">2. Install via Homebrew &amp; Link BluePill Cloud (Default)</h3>
+<pre><code class="language-bash">brew install nertwork/tap/bluepill
 
-# Optional (Zero Port-Forwarding): Connect to BluePill Cloud Relay
-# Claim a free beta tunnel token at https://bluepill.nertwork.com/signup
-bluepill-server relay-setup --token &lt;YOUR_TUNNEL_TOKEN&gt;
+# Link your Mac to BluePill Cloud (opens https://bluepill.nertwork.com/portal)
+bluepill-server login
 
 # Start the relay daemon (auto-connects Cloud Relay when configured)
 brew services start bluepill

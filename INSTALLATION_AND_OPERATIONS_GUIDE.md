@@ -408,25 +408,25 @@ nix-shell --run "cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build buil
 
 ---
 
-### Homebrew Installation & Built-In Cloud Relay
+### Homebrew Installation & BluePill Cloud Login (Default)
 
 ```bash
-# Add the official tap
-brew tap nertwork/tap
-
-# Install bluepill-server
+# Install bluepill-server from Homebrew Tap
 brew install nertwork/tap/bluepill
 
 # Verify binary installation
 bluepill-server --version
-# Output: bluepill-server 1.2.5
+# Output: bluepill-server 1.2.6
 
-# Optional (Zero Port-Forwarding): Connect to BluePill Cloud Relay
-# Claim a free beta token at https://bluepill.nertwork.com/signup
-bluepill-server relay-setup --token <YOUR_TUNNEL_TOKEN>
-bluepill-server relay-status
+# Link your Mac to BluePill Cloud (opens https://bluepill.nertwork.com/portal) & start service
+bluepill-server login
 brew services start bluepill
+
+# Verify Cloud Relay status at any time
+bluepill-server relay-status
 ```
+
+Then open the **BluePill Desktop Client** on Linux or Windows and click **"Sign in at bluepill.nertwork.com →"** (or **"Try Live Demo"**).
 
 ---
 
