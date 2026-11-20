@@ -419,7 +419,7 @@ brew install nertwork/tap/bluepill
 
 # Verify binary installation
 bluepill-server --version
-# Output: bluepill-server 1.2.4
+# Output: bluepill-server 1.2.5
 
 # Optional (Zero Port-Forwarding): Connect to BluePill Cloud Relay
 # Claim a free beta token at https://bluepill.nertwork.com/signup
