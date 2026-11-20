@@ -74,7 +74,7 @@ timeout 10s sqlite3 "${HOME}/Library/Messages/chat.db" "SELECT count(*) FROM cha
 - **Failure Recovery:** If the command fails with `Operation not permitted`:
   > **Agent Action:** Halt and notify the user: *"Full Disk Access (FDA) is missing. Please grant Full Disk Access to your Terminal/Python under System Settings -> Privacy & Security -> Full Disk Access, then re-run."*
 
-### Step 2.2: Install `bluepill-server` via Homebrew
+### Step 2.2: Install `bluepill-server` via Homebrew (and Optional Cloud Relay)
 ```bash
 # Add tap and install formula
 timeout 120s brew tap nertwork/tap </dev/null
@@ -82,6 +82,9 @@ timeout 120s brew install nertwork/tap/bluepill </dev/null
 
 # Verify installed binary
 timeout 5s bluepill-server --version </dev/null
+
+# Optional: pair with BluePill Cloud Relay (token from https://bluepill.nertwork.com/signup)
+# timeout 30s bluepill-server relay-setup --token "${BLUEPILL_RELAY_TOKEN}" </dev/null
 ```
 
 ### Step 2.3: Generate Secure Server Configuration
@@ -202,8 +205,10 @@ else
 fi
 ```
 
-#### Option B: Debian / Ubuntu Build from Source
+#### Option B: Debian / Ubuntu (`.deb` Release or Source Build)
 ```bash
+# Pre-built .deb packages are published at https://github.com/nertwork/bluepill/releases/latest
+# Or build from source:
 if command -v apt-get >/dev/null 2>&1; then
     sudo apt-get update
     sudo apt-get install -y build-essential cmake ninja-build qt6-base-dev qt6-declarative-dev qt6-quickcontrols2-5-dev qt6-svg-dev qt6-wayland-dev libsecret-1-dev libnotify-dev ffmpeg
@@ -217,6 +222,7 @@ if command -v apt-get >/dev/null 2>&1; then
     rm -rf "${BUILD_TMP}"
 fi
 ```
+*(Fedora/RHEL `.rpm` and Windows `BluePill-Setup-*-win64.exe` installers are also published at [GitHub Releases](https://github.com/nertwork/bluepill/releases/latest). Support: `support@nertwork.com`.)*
 
 ### Step 3.2: Provision Client State and Keyring Credentials
 

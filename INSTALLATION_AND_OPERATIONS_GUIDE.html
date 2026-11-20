@@ -462,21 +462,22 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </ul>
 </li>
 <li><a href="#debian-ubuntu">Debian &amp; Ubuntu</a><ul>
-<li><a href="#1-install-build-dependencies">1. Install Build Dependencies</a></li>
-<li><a href="#2-build-and-install-via-cmake">2. Build and Install via CMake</a></li>
+<li><a href="#1-install-pre-built-deb-package-recommended">1. Install Pre-Built .deb Package (Recommended)</a></li>
+<li><a href="#2-build-from-source-alternative">2. Build from Source (Alternative)</a></li>
 </ul>
 </li>
 <li><a href="#fedora-rhel">Fedora &amp; RHEL</a><ul>
-<li><a href="#1-install-build-dependencies_1">1. Install Build Dependencies</a></li>
-<li><a href="#2-build-and-install">2. Build and Install</a></li>
+<li><a href="#1-install-pre-built-rpm-package-recommended">1. Install Pre-Built .rpm Package (Recommended)</a></li>
+<li><a href="#2-build-from-source-alternative_1">2. Build from Source (Alternative)</a></li>
 </ul>
 </li>
+<li><a href="#windows-10-11-x86_64">Windows (10 / 11 x86_64)</a></li>
 <li><a href="#nixos-generic-linux">NixOS &amp; Generic Linux</a></li>
 </ul>
 </li>
 <li><a href="#3-macos-relay-server-bluepill-server-setup">3. macOS Relay Server (bluepill-server) Setup</a><ul>
 <li><a href="#prerequisites-supported-versions">Prerequisites &amp; Supported Versions</a></li>
-<li><a href="#homebrew-installation">Homebrew Installation</a></li>
+<li><a href="#homebrew-installation-built-in-cloud-relay">Homebrew Installation &amp; Built-In Cloud Relay</a></li>
 <li><a href="#full-disk-access-permissions">Full Disk Access &amp; Permissions</a><ul>
 <li><a href="#granting-full-disk-access">Granting Full Disk Access:</a></li>
 <li><a href="#granting-automation-permissions">Granting Automation Permissions:</a></li>
@@ -530,6 +531,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 </ul>
 </div>
+
 
 
 
@@ -810,7 +812,13 @@ sudo apt-get install pipewire pipewire-pulse ffmpeg libnotify-bin
 </code></pre>
 <hr />
 <h3 id="debian-ubuntu">Debian &amp; Ubuntu</h3>
-<h4 id="1-install-build-dependencies">1. Install Build Dependencies</h4>
+<h4 id="1-install-pre-built-deb-package-recommended">1. Install Pre-Built <code>.deb</code> Package (Recommended)</h4>
+<p>Download the latest <code>.deb</code> from <a href="https://github.com/nertwork/bluepill/releases/latest">GitHub Releases</a> (<code>bluepill_&lt;version&gt;_amd64.deb</code>):</p>
+<pre><code class="language-bash">sudo apt-get update
+sudo apt-get install -y ./bluepill_*_amd64.deb
+</code></pre>
+<h4 id="2-build-from-source-alternative">2. Build from Source (Alternative)</h4>
+<p>Install Build Dependencies:</p>
 <pre><code class="language-bash">sudo apt-get update
 sudo apt-get install -y \
     build-essential \
@@ -826,7 +834,7 @@ sudo apt-get install -y \
     libheif-dev \
     ffmpeg
 </code></pre>
-<h4 id="2-build-and-install-via-cmake">2. Build and Install via CMake</h4>
+<p>Build and Install via CMake:</p>
 <pre><code class="language-bash">git clone https://github.com/nertwork/bluepill.git /tmp/bluepill
 cd /tmp/bluepill
 cmake -B build -DCMAKE_BUILD_TYPE=Release -GNinja
@@ -836,7 +844,12 @@ sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
 </code></pre>
 <hr />
 <h3 id="fedora-rhel">Fedora &amp; RHEL</h3>
-<h4 id="1-install-build-dependencies_1">1. Install Build Dependencies</h4>
+<h4 id="1-install-pre-built-rpm-package-recommended">1. Install Pre-Built <code>.rpm</code> Package (Recommended)</h4>
+<p>Download the latest <code>.rpm</code> from <a href="https://github.com/nertwork/bluepill/releases/latest">GitHub Releases</a> (<code>bluepill-&lt;version&gt;-1.fc41.x86_64.rpm</code>):</p>
+<pre><code class="language-bash">sudo dnf install -y ./bluepill-*.rpm
+</code></pre>
+<h4 id="2-build-from-source-alternative_1">2. Build from Source (Alternative)</h4>
+<p>Install Build Dependencies:</p>
 <pre><code class="language-bash">sudo dnf install -y \
     gcc-c++ \
     cmake \
@@ -850,7 +863,7 @@ sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
     libheif-devel \
     ffmpeg
 </code></pre>
-<h4 id="2-build-and-install">2. Build and Install</h4>
+<p>Build and Install:</p>
 <pre><code class="language-bash">git clone https://github.com/nertwork/bluepill.git /tmp/bluepill
 cd /tmp/bluepill
 cmake -B build -DCMAKE_BUILD_TYPE=Release -GNinja
@@ -858,6 +871,9 @@ cmake --build build -j$(nproc)
 sudo cmake --install build
 sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
 </code></pre>
+<hr />
+<h3 id="windows-10-11-x86_64">Windows (10 / 11 <code>x86_64</code>)</h3>
+<p>Download the signed/packaged Inno Setup installer <code>BluePill-Setup-&lt;version&gt;-win64.exe</code> from <a href="https://github.com/nertwork/bluepill/releases/latest">GitHub Releases</a> and run it to install the native Qt 6.8 desktop client and <code>--demo</code> mode shortcut. Support: <code>support@nertwork.com</code>.</p>
 <hr />
 <h3 id="nixos-generic-linux">NixOS &amp; Generic Linux</h3>
 <p>Create a <code>shell.nix</code> in the repository root:</p>
@@ -891,7 +907,7 @@ pkgs.mkShell {
 <li><strong>SMS / RCS Forwarding:</strong> On your iPhone, enable forwarding under <strong>Settings -&gt; Apps -&gt; Messages -&gt; Text Message Forwarding -&gt; [Your Mac Name]</strong>.</li>
 </ul>
 <hr />
-<h3 id="homebrew-installation">Homebrew Installation</h3>
+<h3 id="homebrew-installation-built-in-cloud-relay">Homebrew Installation &amp; Built-In Cloud Relay</h3>
 <pre><code class="language-bash"># Add the official tap
 brew tap nertwork/tap
 
@@ -900,7 +916,13 @@ brew install nertwork/tap/bluepill
 
 # Verify binary installation
 bluepill-server --version
-# Output: bluepill-server 1.1.0
+# Output: bluepill-server 1.2.4
+
+# Optional (Zero Port-Forwarding): Connect to BluePill Cloud Relay
+# Claim a free beta token at https://bluepill.nertwork.com/signup
+bluepill-server relay-setup --token &lt;YOUR_TUNNEL_TOKEN&gt;
+bluepill-server relay-status
+brew services start bluepill
 </code></pre>
 <hr />
 <h3 id="full-disk-access-permissions">Full Disk Access &amp; Permissions</h3>
@@ -1115,9 +1137,10 @@ EOF_PLIST
 <p>Caddy, Nginx, and Tailscale Serve all listen on <code>443</code>. In the Linux client's <strong>⚙ Settings</strong>, enter <code>https://&lt;your-host&gt;</code> and set <strong>Port</strong> to <code>443</code>. An empty Port field means <code>1235</code>. Saved <code>config.json</code> URLs are used exactly as written, so a saved <code>https://bluepill.example.com</code> keeps using <code>443</code>.</p>
 <hr />
 <h2 id="4-built-in-web-ui-operations-web">4. Built-In Web UI Operations (<code>/web</code>)</h2>
-<p>Every instance of <code>bluepill-server</code> includes an embedded, dark-slate Web client accessible at:</p>
+<p>Every instance of <code>bluepill-server</code> includes a unified <strong>Liquid Glass / Matrix / Light</strong> Web Client accessible at:</p>
 <pre><code class="language-text">http://&lt;relay-host&gt;:1235/web
 </code></pre>
+<p>Or try the hosted sandbox instantly at <a href="https://bluepill.nertwork.com/demo">https://bluepill.nertwork.com/demo</a> (Cloud Relay portal at <a href="https://bluepill.nertwork.com/signup">https://bluepill.nertwork.com/signup</a>).</p>
 <h3 id="key-capabilities-in-the-web-ui">Key Capabilities in the Web UI:</h3>
 <ol>
 <li><strong>Authentication:</strong></li>

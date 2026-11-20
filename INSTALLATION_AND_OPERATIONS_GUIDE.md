@@ -287,7 +287,15 @@ paplay /usr/share/bluepill/imessage-notify.wav
 
 ### Debian & Ubuntu
 
-#### 1. Install Build Dependencies
+#### 1. Install Pre-Built `.deb` Package (Recommended)
+Download the latest `.deb` from [GitHub Releases](https://github.com/nertwork/bluepill/releases/latest) (`bluepill_<version>_amd64.deb`):
+```bash
+sudo apt-get update
+sudo apt-get install -y ./bluepill_*_amd64.deb
+```
+
+#### 2. Build from Source (Alternative)
+Install Build Dependencies:
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
@@ -305,7 +313,7 @@ sudo apt-get install -y \
     ffmpeg
 ```
 
-#### 2. Build and Install via CMake
+Build and Install via CMake:
 ```bash
 git clone https://github.com/nertwork/bluepill.git /tmp/bluepill
 cd /tmp/bluepill
@@ -319,7 +327,14 @@ sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
 
 ### Fedora & RHEL
 
-#### 1. Install Build Dependencies
+#### 1. Install Pre-Built `.rpm` Package (Recommended)
+Download the latest `.rpm` from [GitHub Releases](https://github.com/nertwork/bluepill/releases/latest) (`bluepill-<version>-1.fc41.x86_64.rpm`):
+```bash
+sudo dnf install -y ./bluepill-*.rpm
+```
+
+#### 2. Build from Source (Alternative)
+Install Build Dependencies:
 ```bash
 sudo dnf install -y \
     gcc-c++ \
@@ -335,7 +350,7 @@ sudo dnf install -y \
     ffmpeg
 ```
 
-#### 2. Build and Install
+Build and Install:
 ```bash
 git clone https://github.com/nertwork/bluepill.git /tmp/bluepill
 cd /tmp/bluepill
@@ -344,6 +359,12 @@ cmake --build build -j$(nproc)
 sudo cmake --install build
 sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
 ```
+
+---
+
+### Windows (10 / 11 `x86_64`)
+
+Download the signed/packaged Inno Setup installer `BluePill-Setup-<version>-win64.exe` from [GitHub Releases](https://github.com/nertwork/bluepill/releases/latest) and run it to install the native Qt 6.8 desktop client and `--demo` mode shortcut. Support: `support@nertwork.com`.
 
 ---
 
@@ -387,7 +408,7 @@ nix-shell --run "cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build buil
 
 ---
 
-### Homebrew Installation
+### Homebrew Installation & Built-In Cloud Relay
 
 ```bash
 # Add the official tap
@@ -398,7 +419,13 @@ brew install nertwork/tap/bluepill
 
 # Verify binary installation
 bluepill-server --version
-# Output: bluepill-server 1.1.0
+# Output: bluepill-server 1.2.4
+
+# Optional (Zero Port-Forwarding): Connect to BluePill Cloud Relay
+# Claim a free beta token at https://bluepill.nertwork.com/signup
+bluepill-server relay-setup --token <YOUR_TUNNEL_TOKEN>
+bluepill-server relay-status
+brew services start bluepill
 ```
 
 ---
@@ -615,10 +642,11 @@ Caddy, Nginx, and Tailscale Serve all listen on `443`. In the Linux client's **â
 
 ## 4. Built-In Web UI Operations (`/web`)
 
-Every instance of `bluepill-server` includes an embedded, dark-slate Web client accessible at:
+Every instance of `bluepill-server` includes a unified **Liquid Glass / Matrix / Light** Web Client accessible at:
 ```text
 http://<relay-host>:1235/web
 ```
+Or try the hosted sandbox instantly at [https://bluepill.nertwork.com/demo](https://bluepill.nertwork.com/demo) (Cloud Relay portal at [https://bluepill.nertwork.com/signup](https://bluepill.nertwork.com/signup)).
 
 ### Key Capabilities in the Web UI:
 

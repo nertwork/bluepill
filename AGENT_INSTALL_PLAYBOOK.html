@@ -438,7 +438,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 <li><a href="#phase-2-macos-relay-installation-service-deployment">Phase 2: macOS Relay Installation &amp; Service Deployment</a><ul>
 <li><a href="#step-21-verify-macos-permissions-full-disk-access">Step 2.1: Verify macOS Permissions (Full Disk Access)</a></li>
-<li><a href="#step-22-install-bluepill-server-via-homebrew">Step 2.2: Install bluepill-server via Homebrew</a></li>
+<li><a href="#step-22-install-bluepill-server-via-homebrew-and-optional-cloud-relay">Step 2.2: Install bluepill-server via Homebrew (and Optional Cloud Relay)</a></li>
 <li><a href="#step-23-generate-secure-server-configuration">Step 2.3: Generate Secure Server Configuration</a></li>
 <li><a href="#step-24-execute-built-in-self-test">Step 2.4: Execute Built-In Self-Test</a></li>
 <li><a href="#step-25-deploy-and-start-launchagent">Step 2.5: Deploy and Start LaunchAgent</a></li>
@@ -447,7 +447,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#phase-3-linux-desktop-client-installation-configuration">Phase 3: Linux Desktop Client Installation &amp; Configuration</a><ul>
 <li><a href="#step-31-install-desktop-client-package">Step 3.1: Install Desktop Client Package</a><ul>
 <li><a href="#option-a-arch-linux-omarchy-via-aur">Option A: Arch Linux / Omarchy via AUR</a></li>
-<li><a href="#option-b-debian-ubuntu-build-from-source">Option B: Debian / Ubuntu Build from Source</a></li>
+<li><a href="#option-b-debian-ubuntu-deb-release-or-source-build">Option B: Debian / Ubuntu (.deb Release or Source Build)</a></li>
 </ul>
 </li>
 <li><a href="#step-32-provision-client-state-and-keyring-credentials">Step 3.2: Provision Client State and Keyring Credentials</a></li>
@@ -463,6 +463,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#bluepill-server-enable-notes-enable-calendar-enable-photos-preflight-no-fix">bluepill-server --enable-notes --enable-calendar --enable-photos preflight --no-fix</a></li>
 </ul>
 </div>
+
 
 
 
@@ -550,13 +551,16 @@ echo &quot;Package managers: brew=${HAS_BREW}, yay=${HAS_YAY}, apt=${HAS_APT}, d
 </blockquote>
 </li>
 </ul>
-<h3 id="step-22-install-bluepill-server-via-homebrew">Step 2.2: Install <code>bluepill-server</code> via Homebrew</h3>
+<h3 id="step-22-install-bluepill-server-via-homebrew-and-optional-cloud-relay">Step 2.2: Install <code>bluepill-server</code> via Homebrew (and Optional Cloud Relay)</h3>
 <pre><code class="language-bash"># Add tap and install formula
 timeout 120s brew tap nertwork/tap &lt;/dev/null
 timeout 120s brew install nertwork/tap/bluepill &lt;/dev/null
 
 # Verify installed binary
 timeout 5s bluepill-server --version &lt;/dev/null
+
+# Optional: pair with BluePill Cloud Relay (token from https://bluepill.nertwork.com/signup)
+# timeout 30s bluepill-server relay-setup --token &quot;${BLUEPILL_RELAY_TOKEN}&quot; &lt;/dev/null
 </code></pre>
 <h3 id="step-23-generate-secure-server-configuration">Step 2.3: Generate Secure Server Configuration</h3>
 <p>Generate a strong random password if none is provided:</p>
@@ -661,8 +665,10 @@ else
     rm -rf &quot;${BUILD_TMP}&quot;
 fi
 </code></pre>
-<h4 id="option-b-debian-ubuntu-build-from-source">Option B: Debian / Ubuntu Build from Source</h4>
-<pre><code class="language-bash">if command -v apt-get &gt;/dev/null 2&gt;&amp;1; then
+<h4 id="option-b-debian-ubuntu-deb-release-or-source-build">Option B: Debian / Ubuntu (<code>.deb</code> Release or Source Build)</h4>
+<pre><code class="language-bash"># Pre-built .deb packages are published at https://github.com/nertwork/bluepill/releases/latest
+# Or build from source:
+if command -v apt-get &gt;/dev/null 2&gt;&amp;1; then
     sudo apt-get update
     sudo apt-get install -y build-essential cmake ninja-build qt6-base-dev qt6-declarative-dev qt6-quickcontrols2-5-dev qt6-svg-dev qt6-wayland-dev libsecret-1-dev libnotify-dev ffmpeg
     BUILD_TMP=$(mktemp -d /tmp/bluepill-src-XXXXXX)
@@ -675,6 +681,7 @@ fi
     rm -rf &quot;${BUILD_TMP}&quot;
 fi
 </code></pre>
+<p><em>(Fedora/RHEL <code>.rpm</code> and Windows <code>BluePill-Setup-*-win64.exe</code> installers are also published at <a href="https://github.com/nertwork/bluepill/releases/latest">GitHub Releases</a>. Support: <code>support@nertwork.com</code>.)</em></p>
 <h3 id="step-32-provision-client-state-and-keyring-credentials">Step 3.2: Provision Client State and Keyring Credentials</h3>
 <pre><code class="language-bash">CLIENT_CONFIG_DIR=&quot;${HOME}/.config/bluepill&quot;
 mkdir -p &quot;${CLIENT_CONFIG_DIR}&quot;

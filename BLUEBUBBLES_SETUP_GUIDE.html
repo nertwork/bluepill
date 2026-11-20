@@ -433,8 +433,8 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#bluepill-macos-relay-web-ui-bluebubbles-setup-guide">BluePill macOS Relay, Web UI &amp; BlueBubbles Setup Guide</a><ul>
 <li><a href="#option-a-bluepill-native-macos-relay-brew-install-nertworktapbluepill">Option A: BluePill Native macOS Relay (brew install nertwork/tap/bluepill)</a><ul>
 <li><a href="#1-prerequisites-on-macos">1. Prerequisites on macOS</a></li>
-<li><a href="#2-install-via-homebrew">2. Install via Homebrew</a></li>
-<li><a href="#3-verify-the-relay-built-in-web-ui">3. Verify the Relay &amp; Built-In Web UI</a></li>
+<li><a href="#2-install-via-homebrew-connect-bluepill-cloud-relay-optional">2. Install via Homebrew &amp; Connect BluePill Cloud Relay (Optional)</a></li>
+<li><a href="#3-verify-the-relay-cloud-relay-built-in-web-ui">3. Verify the Relay, Cloud Relay &amp; Built-In Web UI</a></li>
 <li><a href="#4-connect-the-linux-client">4. Connect the Linux Client</a></li>
 </ul>
 </li>
@@ -444,6 +444,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 </ul>
 </div>
+
 
 
 
@@ -488,17 +489,23 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li>Signed into <code>Messages.app</code> with your Apple Account (and <strong>Text Message Forwarding</strong> enabled on your iPhone under <strong>Settings -&gt; Apps -&gt; Messages -&gt; Text Message Forwarding</strong> for SMS/RCS).</li>
 <li><strong>Full Disk Access</strong> granted to your terminal / Python / <code>sshd-keygen-wrapper</code> under <strong>System Settings -&gt; Privacy &amp; Security -&gt; Full Disk Access</strong> so <code>bluepill-server</code> can read <code>~/Library/Messages/chat.db</code>.</li>
 </ul>
-<h3 id="2-install-via-homebrew">2. Install via Homebrew</h3>
+<h3 id="2-install-via-homebrew-connect-bluepill-cloud-relay-optional">2. Install via Homebrew &amp; Connect BluePill Cloud Relay (Optional)</h3>
 <pre><code class="language-bash">brew tap nertwork/tap
 brew install nertwork/tap/bluepill
-bluepill-server init
+
+# Optional (Zero Port-Forwarding): Connect to BluePill Cloud Relay
+# Claim a free beta tunnel token at https://bluepill.nertwork.com/signup
+bluepill-server relay-setup --token &lt;YOUR_TUNNEL_TOKEN&gt;
+
+# Start the relay daemon (auto-connects Cloud Relay when configured)
 brew services start bluepill
 </code></pre>
-<h3 id="3-verify-the-relay-built-in-web-ui">3. Verify the Relay &amp; Built-In Web UI</h3>
+<h3 id="3-verify-the-relay-cloud-relay-built-in-web-ui">3. Verify the Relay, Cloud Relay &amp; Built-In Web UI</h3>
 <pre><code class="language-bash">bluepill-server status
+bluepill-server relay-status
 curl -s &quot;http://127.0.0.1:1235/api/v1/server/info&quot;
 </code></pre>
-<p>Open <strong><code>http://127.0.0.1:1235/web</code></strong> in any browser (or <code>https://your-relay.example.com/web</code> behind a TLS reverse proxy / Tailscale Serve) to use the built-in <strong>BluePill Web UI</strong> without installing any client software.</p>
+<p>Open <strong><code>http://127.0.0.1:1235/web</code></strong> in any browser (or your Cloud Relay portal <code>https://bluepill.nertwork.com/t/&lt;slug&gt;/web</code>, or try the <strong><a href="https://bluepill.nertwork.com/demo">Live Demo</a></strong>) to use the unified <strong>Liquid Glass / Matrix / Light</strong> BluePill Web Client with Messages, Notes, Calendar, Photos, and Contacts. Support: <code>support@nertwork.com</code>.</p>
 <h3 id="4-connect-the-linux-client">4. Connect the Linux Client</h3>
 <p><code>bluepill-server</code> listens on <code>127.0.0.1</code> unless it's started with <code>--host</code> (e.g. <code>--host 0.0.0.0</code> or the Mac's Tailscale IP). Once the relay is reachable from Linux:
 1. Launch <code>bluepill</code> and press <strong><code>Ctrl+,</code></strong>. If Tailscale is running, your relay Mac shows up under <strong>Macs on your Tailscale network</strong>, and a single relay is filled in automatically.
@@ -523,22 +530,22 @@ curl -s &quot;http://127.0.0.1:1235/api/v1/server/info&quot;
 </thead>
 <tbody>
 <tr>
-<td style="text-align: left;"><strong>Linux Client (<code>bluepill</code>)</strong></td>
-<td style="text-align: left;">Arch Linux, Omarchy Linux, Fedora, Ubuntu/Debian</td>
+<td style="text-align: left;"><strong>Desktop Client (<code>bluepill</code>)</strong></td>
+<td style="text-align: left;">Arch/Omarchy AUR, Debian/Ubuntu (<code>.deb</code>), Fedora/RHEL (<code>.rpm</code>), Windows 10/11 (<code>.exe</code>)</td>
 <td style="text-align: left;"><code>x86_64</code>, <code>aarch64</code></td>
-<td style="text-align: left;">Wayland (Hyprland, Sway, KDE, GNOME) &amp; X11 · Qt 6.8+</td>
+<td style="text-align: left;">Wayland/X11 (Qt 6.8+) &amp; Windows MSVC Installer</td>
 </tr>
 <tr>
 <td style="text-align: left;"><strong>macOS Relay (<code>bluepill-server</code>)</strong></td>
 <td style="text-align: left;">macOS 13 Ventura, 14 Sonoma, 15 Sequoia, 26 Tahoe</td>
 <td style="text-align: left;"><code>arm64</code>, <code>x86_64</code></td>
-<td style="text-align: left;">Bare-metal Mac or KVM/QEMU Virtual Machine</td>
+<td style="text-align: left;">Bare-metal Mac or KVM/QEMU Virtual Machine + Built-in Cloud Relay</td>
 </tr>
 <tr>
-<td style="text-align: left;"><strong>Web UI (<code>/web</code>)</strong></td>
+<td style="text-align: left;"><strong>Web Client (<code>/web</code> &amp; Cloud)</strong></td>
 <td style="text-align: left;">Any OS with a modern browser</td>
 <td style="text-align: left;">Any</td>
-<td style="text-align: left;">Served directly by <code>bluepill-server</code></td>
+<td style="text-align: left;">Liquid Glass / Matrix / Light UI · <a href="https://bluepill.nertwork.com/demo">Live Demo</a></td>
 </tr>
 </tbody>
 </table>

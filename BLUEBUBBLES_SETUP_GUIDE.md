@@ -13,20 +13,26 @@
 - Signed into `Messages.app` with your Apple Account (and **Text Message Forwarding** enabled on your iPhone under **Settings -> Apps -> Messages -> Text Message Forwarding** for SMS/RCS).
 - **Full Disk Access** granted to your terminal / Python / `sshd-keygen-wrapper` under **System Settings -> Privacy & Security -> Full Disk Access** so `bluepill-server` can read `~/Library/Messages/chat.db`.
 
-### 2. Install via Homebrew
+### 2. Install via Homebrew & Connect BluePill Cloud Relay (Optional)
 ```bash
 brew tap nertwork/tap
 brew install nertwork/tap/bluepill
-bluepill-server init
+
+# Optional (Zero Port-Forwarding): Connect to BluePill Cloud Relay
+# Claim a free beta tunnel token at https://bluepill.nertwork.com/signup
+bluepill-server relay-setup --token <YOUR_TUNNEL_TOKEN>
+
+# Start the relay daemon (auto-connects Cloud Relay when configured)
 brew services start bluepill
 ```
 
-### 3. Verify the Relay & Built-In Web UI
+### 3. Verify the Relay, Cloud Relay & Built-In Web UI
 ```bash
 bluepill-server status
+bluepill-server relay-status
 curl -s "http://127.0.0.1:1235/api/v1/server/info"
 ```
-Open **`http://127.0.0.1:1235/web`** in any browser (or `https://your-relay.example.com/web` behind a TLS reverse proxy / Tailscale Serve) to use the built-in **BluePill Web UI** without installing any client software.
+Open **`http://127.0.0.1:1235/web`** in any browser (or your Cloud Relay portal `https://bluepill.nertwork.com/t/<slug>/web`, or try the **[Live Demo](https://bluepill.nertwork.com/demo)**) to use the unified **Liquid Glass / Matrix / Light** BluePill Web Client with Messages, Notes, Calendar, Photos, and Contacts. Support: `support@nertwork.com`.
 
 ### 4. Connect the Linux Client
 `bluepill-server` listens on `127.0.0.1` unless it's started with `--host` (e.g. `--host 0.0.0.0` or the Mac's Tailscale IP). Once the relay is reachable from Linux:
@@ -49,6 +55,6 @@ If you already run **BlueBubbles Server (`v1.9.x`)** on macOS:
 
 | Target | Supported OS Versions | Architectures | Notes |
 | :--- | :--- | :--- | :--- |
-| **Linux Client (`bluepill`)** | Arch Linux, Omarchy Linux, Fedora, Ubuntu/Debian | `x86_64`, `aarch64` | Wayland (Hyprland, Sway, KDE, GNOME) & X11 · Qt 6.8+ |
-| **macOS Relay (`bluepill-server`)** | macOS 13 Ventura, 14 Sonoma, 15 Sequoia, 26 Tahoe | `arm64`, `x86_64` | Bare-metal Mac or KVM/QEMU Virtual Machine |
-| **Web UI (`/web`)** | Any OS with a modern browser | Any | Served directly by `bluepill-server` |
+| **Desktop Client (`bluepill`)** | Arch/Omarchy AUR, Debian/Ubuntu (`.deb`), Fedora/RHEL (`.rpm`), Windows 10/11 (`.exe`) | `x86_64`, `aarch64` | Wayland/X11 (Qt 6.8+) & Windows MSVC Installer |
+| **macOS Relay (`bluepill-server`)** | macOS 13 Ventura, 14 Sonoma, 15 Sequoia, 26 Tahoe | `arm64`, `x86_64` | Bare-metal Mac or KVM/QEMU Virtual Machine + Built-in Cloud Relay |
+| **Web Client (`/web` & Cloud)** | Any OS with a modern browser | Any | Liquid Glass / Matrix / Light UI · [Live Demo](https://bluepill.nertwork.com/demo) |

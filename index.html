@@ -32,15 +32,15 @@
           "@type": "SoftwareApplication",
           "@id": "https://nertwork.github.io/bluepill/#software",
           "name": "BluePill",
-          "operatingSystem": ["Linux", "macOS"],
+          "operatingSystem": ["Linux", "Windows", "macOS"],
           "applicationCategory": "CommunicationsApplication",
           "offers": {
             "@type": "Offer",
             "price": "0",
             "priceCurrency": "USD"
           },
-          "description": "High-performance native Qt6 C++ / QML iMessage client for Linux and zero-Electron macOS relay daemon. Features voice memo waveforms, tapbacks, scheduling, and direct SSH encryption.",
-          "softwareVersion": "1.1.0",
+          "description": "High-performance native Qt6 C++ / QML iMessage client for Linux & Windows and zero-Electron macOS relay daemon with built-in Cloud Relay and Liquid Glass Web UI.",
+          "softwareVersion": "1.2.4",
           "license": "https://opensource.org/licenses/MIT",
           "downloadUrl": "https://github.com/nertwork/bluepill/releases",
           "author": {
@@ -119,7 +119,7 @@
               "name": "How do I install the BluePill server on macOS?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "On macOS, install via Homebrew: 'brew install nertwork/tap/bluepill'. Then launch the server with 'bluepill-server --port 1234 --password <secret>' or deploy the included LaunchAgent plist for automated boot startup."
+                "text": "On macOS, install via Homebrew: 'brew install nertwork/tap/bluepill'. Claim a free Cloud Relay token at https://bluepill.nertwork.com/signup, run 'bluepill-server relay-setup --token <TOKEN>', and start the background service with 'brew services start bluepill'."
               }
             }
           ]
@@ -207,11 +207,13 @@
     <div class="header-container">
         <img src="logo.png" alt="BluePill Logo" class="logo">
         <h1>BluePill</h1>
-        <p class="tagline">Native Qt6 C++ / QML iMessage Client for Linux & Zero-Electron macOS Relay Server</p>
+        <p class="tagline">Native Qt6 C++ / QML iMessage, RCS &amp; SMS Client for Linux &amp; Windows + Zero-Electron macOS Cloud Relay</p>
         <div class="btn-group">
-            <a href="https://github.com/nertwork/bluepill" class="btn btn-primary">GitHub Repository (v1.1.0)</a>
-            <a href="INSTALLATION_AND_OPERATIONS_GUIDE.html" class="btn btn-secondary">Installation & Operations Guide</a>
-            <a href="AGENT_INSTALL_PLAYBOOK.html" class="btn btn-secondary">AI Agent Playbook</a>
+            <a href="https://bluepill.nertwork.com/demo" class="btn btn-primary">Try Live Demo</a>
+            <a href="https://bluepill.nertwork.com/signup" class="btn btn-secondary">Free Beta Cloud Relay</a>
+            <a href="https://github.com/nertwork/bluepill/releases/latest" class="btn btn-secondary">Downloads (.exe / .deb / .rpm)</a>
+            <a href="https://github.com/nertwork/bluepill" class="btn btn-secondary">GitHub (BluePill v1.2.4)</a>
+            <a href="INSTALLATION_AND_OPERATIONS_GUIDE.html" class="btn btn-secondary">Install Guide</a>
             <a href="https://aur.archlinux.org/packages/bluepill" class="btn btn-secondary">Arch AUR</a>
         </div>
         <div class="stats-banner">
@@ -239,7 +241,7 @@
                 <tr>
                     <th>Feature / Metric</th>
                     <th>BlueBubbles</th>
-                    <th>BluePill v1.2.3</th>
+                    <th>BluePill v1.2.4</th>
                 </tr>
             </thead>
             <tbody>
@@ -283,16 +285,6 @@
                     <td>Plaintext config / browser cookie</td>
                     <td><strong>Freedesktop SecretService (<code>secret-tool</code>)</strong></td>
                 </tr>
-                <tr>
-                    <td><strong>iCloud Hub Integration</strong></td>
-                    <td>None (Messages only)</td>
-                    <td><strong>Notes (Read/Write), Calendar &amp; Photos.app Gallery</strong></td>
-                </tr>
-                <tr>
-                    <td><strong>Notification Control &amp; Dings</strong></td>
-                    <td>Generic system beep</td>
-                    <td><strong>6 Synthesized .wav Presets, Mute Focused Chat &amp; Status Pill</strong></td>
-                </tr>
             </tbody>
         </table>
     </section>
@@ -325,16 +317,12 @@
                 <p>Full-featured web client hosted directly by the relay server with in-browser microphone recording and real-time event streaming.</p>
             </div>
             <div class="card">
-                <h4>iCloud Hub: Notes, Photos & Calendar</h4>
-                <p>Read/Write Apple and local hub Notes with in-place editor and full-screen Pop Out modal. Browse local Photos.app library and Calendar schedules with full-screen pagination (24/60/120).</p>
+                <h4>Local-First Privacy &amp; Keyring</h4>
+                <p>Read-only SQLite WAL access on your Mac, <code>0600</code> config files, <code>libsecret</code> keyring support, and strict TLS verification with zero third-party cloud relays.</p>
             </div>
             <div class="card">
-                <h4>Customizable Notifications & 6 Audio Dings</h4>
-                <p>Configurable in <code>⚙ Settings</code> (<code>Ctrl+,</code>) with 6 synthesized .wav presets, focused chat muting, instant Red/Green connection indicator, and zero startup echo alerts.</p>
-            </div>
-            <div class="card">
-                <h4>Darker Emerald RCS & &lt;0.5ms Image Copy/Paste</h4>
-                <p>High-contrast darker emerald RCS bubbles (<code>#1B5E3A</code>) for WCAG AA readability, paired with sub-millisecond asynchronous clipboard image copy and instant Wayland paste.</p>
+                <h4>Verified GitHub Actions CI/CD</h4>
+                <p>Every commit passes C++20/Qt6 builds, offscreen QtTest suites, <code>cppcheck</code>/<code>qmllint</code> static analysis, Arch <code>makepkg</code>, and Homebrew bottle checks.</p>
             </div>
         </div>
     </section>
@@ -342,20 +330,31 @@
     <section>
         <h2>Quick Installation</h2>
 
-        <h3>1. macOS Relay Server (Intel &amp; Apple Silicon)</h3>
-        <p>Install via Homebrew Tap and start the daemon:</p>
+        <h3>1. macOS Relay Server + Built-In Cloud Relay (Intel &amp; Apple Silicon)</h3>
+        <p>Install via Homebrew Tap, pair with BluePill Cloud Relay (free beta token at <a href="https://bluepill.nertwork.com/signup" style="color: var(--accent-cyan);">bluepill.nertwork.com/signup</a>), and start the daemon:</p>
         <pre><code># Install from Homebrew Tap
+brew tap nertwork/tap
 brew install nertwork/tap/bluepill
 
-# Start the server interactively or configure LaunchAgent
-bluepill-server --port 1234 --password my_secret_token</code></pre>
+# Connect Cloud Relay (zero port-forwarding) &amp; start background service
+bluepill-server relay-setup --token &lt;YOUR_TUNNEL_TOKEN&gt;
+brew services start bluepill</code></pre>
 
-        <h3>2. Linux Desktop Client (Arch / Omarchy)</h3>
-        <p>Install the native client, CLI tools, and Waybar widget from the Arch User Repository:</p>
-        <pre><code>yay -S bluepill</code></pre>
+        <h3>2. Desktop Client (Arch AUR, Debian/Ubuntu .deb, Fedora .rpm, Windows .exe)</h3>
+        <p>Install the native Qt 6.8 client on Linux or Windows:</p>
+        <pre><code># Arch Linux / Omarchy
+yay -S bluepill
 
-        <h3>3. Build from Source (Ubuntu, Debian, Fedora, NixOS)</h3>
-        <p>Compile cleanly on any modern Linux distribution:</p>
+# Debian / Ubuntu (.deb from GitHub Releases)
+sudo apt install ./bluepill_1.2.4_amd64.deb
+
+# Fedora / RHEL (.rpm from GitHub Releases)
+sudo dnf install ./bluepill-1.2.4-1.fc41.x86_64.rpm
+
+# Windows 10/11 (Inno Setup Installer from GitHub Releases)
+# Download BluePill-Setup-1.2.4-win64.exe at https://github.com/nertwork/bluepill/releases/latest</code></pre>
+
+        <h3>3. Build from Source</h3>
         <pre><code>cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 sudo cmake --install build</code></pre>
@@ -391,9 +390,19 @@ sudo cmake --install build</code></pre>
         </div>
     </section>
 
+    <section>
+        <h2>Community &amp; Contributors</h2>
+        <p>Thank you to everyone contributing code, bug reports, and platform improvements to <strong>BluePill</strong>:</p>
+        <ul>
+            <li><a href="https://github.com/nertwork" style="color: var(--accent-cyan);"><strong>@nertwork (James Farr Gomez)</strong></a> — Creator &amp; Maintainer (C++20/Qt6 Linux client, macOS <code>bluepill-server</code> relay, <code>IMCore</code> bridge, Web UI, Arch AUR &amp; Homebrew packaging).</li>
+            <li><a href="https://github.com/JosephGottlieb" style="color: var(--accent-cyan);"><strong>@JosephGottlieb (Joseph Gottlieb)</strong></a> — macOS 26 (<code>any;</code> chat GUID) iMessage/RCS/SMS service resolution (<a href="https://github.com/nertwork/bluepill/pull/36" style="color: var(--accent-cyan);">#36</a> / <a href="https://github.com/nertwork/bluepill/issues/28" style="color: var(--accent-cyan);">#28</a>), Server Setup Port field &amp; Tailscale relay discovery (<a href="https://github.com/nertwork/bluepill/pull/35" style="color: var(--accent-cyan);">#35</a> / <a href="https://github.com/nertwork/bluepill/issues/29" style="color: var(--accent-cyan);">#29</a> / <a href="https://github.com/nertwork/bluepill/issues/30" style="color: var(--accent-cyan);">#30</a>), in-place photo timeline resolution (<a href="https://github.com/nertwork/bluepill/pull/42" style="color: var(--accent-cyan);">#42</a> / <a href="https://github.com/nertwork/bluepill/issues/44" style="color: var(--accent-cyan);">#44</a>), confirmed message Edit/Unsend &amp; right-click action bar (<a href="https://github.com/nertwork/bluepill/pull/55" style="color: var(--accent-cyan);">#55</a> / <a href="https://github.com/nertwork/bluepill/issues/49" style="color: var(--accent-cyan);">#49</a>), Contact Info card, full macOS AddressBook fields &amp; circular contact photos (<a href="https://github.com/nertwork/bluepill/pull/56" style="color: var(--accent-cyan);">#56</a> / <a href="https://github.com/nertwork/bluepill/issues/50" style="color: var(--accent-cyan);">#50</a>), link-preview image decoding validation (<a href="https://github.com/nertwork/bluepill/pull/58" style="color: var(--accent-cyan);">#58</a> / <a href="https://github.com/nertwork/bluepill/issues/52" style="color: var(--accent-cyan);">#52</a>), inline quoted-reply Thread View &amp; Jump-to-Original (<a href="https://github.com/nertwork/bluepill/pull/59" style="color: var(--accent-cyan);">#59</a> / <a href="https://github.com/nertwork/bluepill/issues/53" style="color: var(--accent-cyan);">#53</a>), and macOS pinned conversations sync &amp; context menu Pin/Unpin (<a href="https://github.com/nertwork/bluepill/pull/60" style="color: var(--accent-cyan);">#60</a> / <a href="https://github.com/nertwork/bluepill/issues/54" style="color: var(--accent-cyan);">#54</a>).</li>
+        </ul>
+        <p>View the full <a href="https://github.com/nertwork/bluepill/graphs/contributors" style="color: var(--accent-cyan);">GitHub Contributors Graph</a>.</p>
+    </section>
+
     <footer>
-        <p>&copy; 2026 <a href="https://www.nertwork.com">Nertwork</a>. Released under the MIT License.</p>
-        <p>Built for the modern Linux workstation, Omarchy, and Apple ecosystem interoperability.</p>
+        <p>&copy; 2026 <a href="https://bluepill.nertwork.com">Nertwork</a>. Released under the MIT License.</p>
+        <p>Live Demo: <a href="https://bluepill.nertwork.com/demo">bluepill.nertwork.com/demo</a> · Support: <a href="mailto:support@nertwork.com">support@nertwork.com</a></p>
     </footer>
 </div>
 
