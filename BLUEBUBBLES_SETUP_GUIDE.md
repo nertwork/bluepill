@@ -30,7 +30,7 @@ bluepill-server status
 bluepill-server relay-status
 curl -s "http://127.0.0.1:1235/api/v1/server/info"
 ```
-Open **`http://127.0.0.1:1235/web`** in any browser (or your Cloud Relay portal `https://bluepill.nertwork.com/t/<slug>/web`, or try the **[Live Demo](https://bluepill.nertwork.com/demo)**) to use the unified **Liquid Glass / Matrix / Light** BluePill Web Client with Messages, Notes, Calendar, Photos, and Contacts. Support: `support@nertwork.com`.
+Open **`http://127.0.0.1:1235/web`** in any browser (or your Cloud Relay portal `https://bluepill.nertwork.com/t/<slug>/web`, or try the **[Live Demo](https://bluepill.nertwork.com/demo)**) to use the unified **Liquid Glass / Matrix / Light** BluePill Web Client with contact resolution, `lastMessage` previews, lazy-loaded Photos, `.caf` audio transcoding, Notes, Calendar, and Contacts. Cloud-linked Macs also support hardened Cloud Managed Updates (`bluepill-server update-status` / `bluepill-server update --confirm`) with LaunchAgent-aware restarts and automatic SHA256-verified release bottle fallback. Support: `support@nertwork.com`.
 
 ### 4. Connect the Linux Client
 `bluepill-server` listens on `127.0.0.1` unless it's started with `--host` (e.g. `--host 0.0.0.0` or the Mac's Tailscale IP). Once the relay is reachable from Linux:

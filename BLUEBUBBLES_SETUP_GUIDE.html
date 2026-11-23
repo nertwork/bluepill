@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BlueBubbles Server Setup & Migration — BluePill Documentation</title>
-    <meta name="description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta name="description" content="BluePill documentation: BlueBubbles Server Setup & Migration. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <link rel="canonical" href="https://bluepill.nertwork.com/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
@@ -12,7 +12,7 @@
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://nertwork.github.io/bluepill/BLUEBUBBLES_SETUP_GUIDE.html">
     <meta property="og:title" content="BlueBubbles Server Setup & Migration — BluePill Documentation">
-    <meta property="og:description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta property="og:description" content="BluePill documentation: BlueBubbles Server Setup & Migration. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <meta property="og:image" content="https://nertwork.github.io/bluepill/screenshot.png">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:creator" content="@jamesfarr">
@@ -478,17 +478,22 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
         <main class="doc-content">
             <div class="doc-banner">
                 <div>
-                    <strong>💊 BluePill v1.1.0 Documentation Portal</strong>
+                    <strong>💊 BluePill v1.2.12 Documentation Portal</strong>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
-                <h1 id="bluepill-macos-relay-web-ui-bluebubbles-setup-guide">BluePill macOS Relay, Web UI &amp; BlueBubbles Setup Guide</h1>
+                </div>
+                <a href="index.html">← Home</a>
+            </div>
+
+            <h1 id="bluepill-macos-relay-web-ui-bluebubbles-setup-guide">BluePill macOS Relay, Web UI &amp; BlueBubbles Setup Guide</h1>
 <p><code>BluePill</code> supports <strong>two macOS server backends</strong> out of the box:
 1. <strong>BluePill Native macOS Relay (<code>bluepill-server</code>)</strong> — Lightweight (~18 MB RSS), zero-Electron daemon installed via Homebrew (<code>brew install nertwork/tap/bluepill</code>) with a <strong>built-in Web UI</strong> (<code>/web</code>).
 2. <strong>Legacy BlueBubbles Server (<code>BlueBubbles.app</code> <code>v1.9.x</code>)</strong> — 100% backward-compatible with existing BlueBubbles installations.</p>
@@ -514,7 +519,7 @@ brew services start bluepill
 bluepill-server relay-status
 curl -s &quot;http://127.0.0.1:1235/api/v1/server/info&quot;
 </code></pre>
-<p>Open <strong><code>http://127.0.0.1:1235/web</code></strong> in any browser (or your Cloud Relay portal <code>https://bluepill.nertwork.com/t/&lt;slug&gt;/web</code>, or try the <strong><a href="https://bluepill.nertwork.com/demo">Live Demo</a></strong>) to use the unified <strong>Liquid Glass / Matrix / Light</strong> BluePill Web Client with Messages, Notes, Calendar, Photos, and Contacts. Support: <code>support@nertwork.com</code>.</p>
+<p>Open <strong><code>http://127.0.0.1:1235/web</code></strong> in any browser (or your Cloud Relay portal <code>https://bluepill.nertwork.com/t/&lt;slug&gt;/web</code>, or try the <strong><a href="https://bluepill.nertwork.com/demo">Live Demo</a></strong>) to use the unified <strong>Liquid Glass / Matrix / Light</strong> BluePill Web Client with contact resolution, <code>lastMessage</code> previews, lazy-loaded Photos, <code>.caf</code> audio transcoding, Notes, Calendar, and Contacts. Cloud-linked Macs also support hardened Cloud Managed Updates (<code>bluepill-server update-status</code> / <code>bluepill-server update --confirm</code>) with LaunchAgent-aware restarts and automatic SHA256-verified release bottle fallback. Support: <code>support@nertwork.com</code>.</p>
 <h3 id="4-connect-the-linux-client">4. Connect the Linux Client</h3>
 <p><code>bluepill-server</code> listens on <code>127.0.0.1</code> unless it's started with <code>--host</code> (e.g. <code>--host 0.0.0.0</code> or the Mac's Tailscale IP). Once the relay is reachable from Linux:
 1. Launch <code>bluepill</code> and press <strong><code>Ctrl+,</code></strong>. If Tailscale is running, your relay Mac shows up under <strong>Macs on your Tailscale network</strong>, and a single relay is filled in automatically.

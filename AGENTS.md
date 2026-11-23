@@ -107,7 +107,7 @@ fi
 # For remote Linux clients, set BLUEPILL_BIND_HOST to the Mac's Tailscale IP
 # (`tailscale ip -4`; traffic is WireGuard-encrypted). Avoid 0.0.0.0 on untrusted LANs:
 # the relay speaks plain HTTP, so the password would cross the LAN in cleartext.
-# Use a TLS reverse proxy instead (docs/INSTALLATION_AND_OPERATIONS_GUIDE.md).
+# Use a TLS reverse proxy instead (INSTALLATION_AND_OPERATIONS_GUIDE.md).
 BIND_HOST="${BLUEPILL_BIND_HOST:-127.0.0.1}"
 
 # 2.4 Run Server Self-Test
@@ -272,7 +272,7 @@ echo "VERIFICATION_SUMMARY: PING=${PING_OK} WEB_UI=${WEB_OK} CHAT_QUERY=${CHAT_O
 
 ## 3. Related Documentation
 
-- Complete Reference: [INSTALLATION_AND_OPERATIONS_GUIDE.md](docs/INSTALLATION_AND_OPERATIONS_GUIDE.md)
-- Playbook Checklist: [AGENT_INSTALL_PLAYBOOK.md](docs/AGENT_INSTALL_PLAYBOOK.md)
-- Configuration & CLI: [CONFIGURATION_AND_CLI.md](docs/CONFIGURATION_AND_CLI.md)
-- Architecture: [ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- Complete Reference: [INSTALLATION_AND_OPERATIONS_GUIDE.md](INSTALLATION_AND_OPERATIONS_GUIDE.md)
+- Playbook Checklist: [AGENT_INSTALL_PLAYBOOK.md](AGENT_INSTALL_PLAYBOOK.md)
+- Configuration & CLI: [CONFIGURATION_AND_CLI.md](CONFIGURATION_AND_CLI.md)
+- Architecture: [ARCHITECTURE.md](ARCHITECTURE.md)

@@ -192,9 +192,13 @@ timeout 5s curl -s -f "http://${CHECK_HOST}:${SERVER_PORT}/api/v1/ping?password=
 #### Option A: Arch Linux / Omarchy via AUR
 ```bash
 if command -v yay >/dev/null 2>&1; then
-    timeout 300s yay -S --noconfirm bluepill </dev/null
+    PKG="bluepill"
+    [[ "$(uname -m)" == "x86_64" ]] && PKG="bluepill-bin"
+    timeout 300s yay -S --noconfirm "${PKG}" </dev/null
 elif command -v paru >/dev/null 2>&1; then
-    timeout 300s paru -S --noconfirm bluepill </dev/null
+    PKG="bluepill"
+    [[ "$(uname -m)" == "x86_64" ]] && PKG="bluepill-bin"
+    timeout 300s paru -S --noconfirm "${PKG}" </dev/null
 else
     # Fallback: clone and makepkg
     BUILD_TMP=$(mktemp -d /tmp/bluepill-build-XXXXXX)

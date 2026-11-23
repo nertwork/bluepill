@@ -40,7 +40,7 @@
             "priceCurrency": "USD"
           },
           "description": "High-performance native Qt6 C++ / QML iMessage client for Linux & Windows and zero-Electron macOS relay daemon with built-in Cloud Relay and Liquid Glass Web UI.",
-          "softwareVersion": "1.2.7",
+          "softwareVersion": "1.2.12",
           "license": "https://opensource.org/licenses/MIT",
           "downloadUrl": "https://github.com/nertwork/bluepill/releases",
           "author": {
@@ -384,8 +384,12 @@
                 <p>Full support for heart, thumbs up, haha, exclamation, and question reactions, plus message effects and scheduled future delivery.</p>
             </div>
             <div class="card">
-                <h4>Embedded /web UI</h4>
-                <p>Full-featured web client hosted directly by the relay server with in-browser microphone recording and real-time event streaming.</p>
+                <h4>Embedded &amp; Cloud Web UI</h4>
+                <p>Full-featured Liquid Glass / Matrix / Light web client at <code>/web</code> and <code>/t/&lt;slug&gt;/web</code> with contact resolution, <code>lastMessage</code> previews, lazy-loaded Photos, <code>.caf</code> audio transcoding, and XSS/CSP/cookie hardening.</p>
+            </div>
+            <div class="card">
+                <h4>Hardened Smart Auto-Updates</h4>
+                <p>SHA256-verified direct client updates (Windows silent Inno Setup, Arch <code>pkexec pacman -U</code>/<code>yay</code>, Debian <code>apt-get</code>, Fedora <code>dnf</code>) and Mac server updates with LaunchAgent-aware restarts &amp; release bottle fallback.</p>
             </div>
             <div class="card">
                 <h4>Local-First Privacy &amp; Keyring</h4>
@@ -410,17 +414,17 @@ brew services start bluepill</code></pre>
 
         <h3>2. Desktop Client (Arch AUR, Debian/Ubuntu .deb, Fedora .rpm, Windows .exe)</h3>
         <p>Install the native Qt 6.8 client on Linux or Windows, then click <strong>Sign in with BluePill Cloud &rarr;</strong> (or <strong>Try Live Demo</strong>):</p>
-        <pre><code># Arch Linux / Omarchy
-yay -S bluepill
+        <pre><code># Arch Linux / Omarchy (fast prebuilt binary or source AUR)
+yay -S bluepill-bin   # or: yay -S bluepill
 
 # Debian / Ubuntu (.deb from GitHub Releases)
-sudo apt install ./bluepill_1.2.7_amd64.deb
+sudo apt install ./bluepill_1.2.12_amd64.deb
 
 # Fedora / RHEL (.rpm from GitHub Releases)
-sudo dnf install ./bluepill-1.2.7-1.fc41.x86_64.rpm
+sudo dnf install ./bluepill-1.2.12-1.x86_64.rpm
 
-# Windows 10/11 (Inno Setup Installer from GitHub Releases)
-# Download BluePill-Setup-1.2.7-win64.exe at https://github.com/nertwork/bluepill/releases/latest</code></pre>
+# Windows 10/11 (Per-User Inno Setup Installer from GitHub Releases)
+# Download BluePill-Setup-1.2.12-win64.exe at https://github.com/nertwork/bluepill/releases/latest</code></pre>
 
         <h3>3. Build from Source</h3>
         <pre><code>cmake -B build -DCMAKE_BUILD_TYPE=Release

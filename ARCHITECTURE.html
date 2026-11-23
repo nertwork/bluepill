@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Architecture & Direct SQLite WAL Engine — BluePill Documentation</title>
-    <meta name="description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta name="description" content="BluePill documentation: Architecture & Direct SQLite WAL Engine. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <link rel="canonical" href="https://bluepill.nertwork.com/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
@@ -12,7 +12,7 @@
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://nertwork.github.io/bluepill/ARCHITECTURE.html">
     <meta property="og:title" content="Architecture & Direct SQLite WAL Engine — BluePill Documentation">
-    <meta property="og:description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta property="og:description" content="BluePill documentation: Architecture & Direct SQLite WAL Engine. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <meta property="og:image" content="https://nertwork.github.io/bluepill/screenshot.png">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:creator" content="@jamesfarr">
@@ -471,17 +471,22 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
         <main class="doc-content">
             <div class="doc-banner">
                 <div>
-                    <strong>💊 BluePill v1.1.0 Documentation Portal</strong>
+                    <strong>💊 BluePill v1.2.12 Documentation Portal</strong>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
-                <h1 id="bluepill-architecture-internals">BluePill Architecture &amp; Internals</h1>
+                </div>
+                <a href="index.html">← Home</a>
+            </div>
+
+            <h1 id="bluepill-architecture-internals">BluePill Architecture &amp; Internals</h1>
 <pre><code class="language-mermaid">flowchart LR
     subgraph Linux[&quot;Linux Workstation (x86_64 / aarch64)&quot;]
         GUI[&quot;BluePill Qt6/QML Desktop Client
@@ -528,7 +533,7 @@ or Direct SSH&quot;| RELAY
 <ul>
 <li><strong>Direct SQLite WAL Reader:</strong> Queries <code>~/Library/Messages/chat.db</code> in read-only WAL mode (<code>?mode=ro</code>), decoding <code>attributedBody</code> typedstreams and exposing <code>is_read</code>, <code>date_read</code>, <code>date_edited</code>, <code>date_retracted</code>, <code>error</code>, and <code>expressive_send_style_id</code> directly in JSON responses.</li>
 <li><strong>Dual-Mode Action Dispatcher:</strong> Connects to <code>IMCore</code> (<code>localhost:45670</code>) when the Private API helper is loaded inside <code>Messages.app</code>, and falls back automatically to <code>osascript</code> on SIP-enabled Macs.</li>
-<li><strong>Built-In Web UI (<code>/web</code>) &amp; Cloud Relay:</strong> Self-contained <strong>Liquid Glass / Matrix / Light</strong> browser client served directly by <code>bluepill-server</code> with tabbed <strong>Messages, Notes, Calendar, Photos, and Contacts</strong> views, inline tapbacks, 1-click OTP copy, and real-time Socket.IO streaming. <code>bluepill-server</code> also includes a built-in pure-stdlib RFC 6455 TLS WebSocket tunnel client (<code>bluepill-server relay-setup</code>) for zero-port-forwarding remote access via <code>wss://api.bluepill.nertwork.com/tunnel/connect</code> (Demo: <code>https://bluepill.nertwork.com/demo</code>, Support: <code>support@nertwork.com</code>).</li>
+<li><strong>Built-In Web UI (<code>/web</code>, <code>/t/&lt;slug&gt;/web</code>) &amp; Cloud Relay:</strong> Self-contained <strong>Liquid Glass / Matrix / Light</strong> browser client served directly by <code>bluepill-server</code> (and proxied over <code>https://bluepill.nertwork.com/t/&lt;slug&gt;/web</code>) with tabbed <strong>Messages, Notes, Calendar, Photos, and Contacts</strong> views, contact resolution &amp; <code>lastMessage</code> previews, lazy-loaded Photos, <code>.caf</code> (<code>audio/x-caf</code>) server-side audio transcoding (<code>?transcode=1</code>), inline tapbacks, 1-click OTP copy, XSS/CSP/cookie/<code>no-store</code> hardening, and real-time Socket.IO streaming. <code>bluepill-server</code> also includes a built-in pure-stdlib RFC 6455 TLS WebSocket tunnel client (<code>bluepill-server login</code> / <code>relay-setup</code>) and hardened Cloud Managed Updates (LaunchAgent-aware restart + SHA256-verified release bottle fallback). Demo: <code>https://bluepill.nertwork.com/demo</code>, Support: <code>support@nertwork.com</code>.</li>
 </ul>
         </main>
     </div>

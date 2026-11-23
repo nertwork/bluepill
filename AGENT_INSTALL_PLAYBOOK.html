@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Autonomous AI Agent Install Playbook — BluePill Documentation</title>
-    <meta name="description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta name="description" content="BluePill documentation: Autonomous AI Agent Install Playbook. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <link rel="canonical" href="https://bluepill.nertwork.com/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
@@ -12,7 +12,7 @@
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html">
     <meta property="og:title" content="Autonomous AI Agent Install Playbook — BluePill Documentation">
-    <meta property="og:description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta property="og:description" content="BluePill documentation: Autonomous AI Agent Install Playbook. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <meta property="og:image" content="https://nertwork.github.io/bluepill/screenshot.png">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:creator" content="@jamesfarr">
@@ -497,17 +497,22 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
         <main class="doc-content">
             <div class="doc-banner">
                 <div>
-                    <strong>💊 BluePill v1.1.0 Documentation Portal</strong>
+                    <strong>💊 BluePill v1.2.12 Documentation Portal</strong>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
-                <blockquote>
+                </div>
+                <a href="index.html">← Home</a>
+            </div>
+
+            <blockquote>
 <p>[!TIP]
 <strong>Interactive Documentation Portal:</strong> View the formatted dark-mode documentation with one-click copy buttons and live sidebar navigation at:<br />
 <a href="https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html"><strong>https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html</strong></a></p>
@@ -599,7 +604,7 @@ fi
 </code></pre>
 <blockquote>
 <p><strong>Note:</strong> <code>bluepill-server</code> reads <code>password</code> and the iCloud module toggles (<code>enableNotes</code>, <code>enableCalendar</code>, <code>enablePhotos</code>) from <code>server.json</code>, but <strong>not</strong> <code>host</code>/<code>port</code>. Those come from <code>--host</code> / <code>--port</code> (or <code>BLUEPILL_HOST</code> / <code>BLUEPILL_PORT</code>), and without <code>--host</code> the relay listens on <code>127.0.0.1</code> only. For remote Linux clients, set <code>BLUEPILL_BIND_HOST</code> to the Mac's Tailscale IP (<code>tailscale ip -4</code>), which keeps traffic WireGuard-encrypted.</p>
-<p><strong>Security:</strong> the relay speaks plain HTTP. Binding to <code>0.0.0.0</code> sends the relay password across your LAN in cleartext. On networks you don't fully trust, bind to the Tailscale IP or put a TLS reverse proxy in front (see <a href="INSTALLATION_AND_OPERATIONS_GUIDE.md#reverse-proxy--tls-termination">Reverse Proxy &amp; TLS Termination</a>).</p>
+<p><strong>Security:</strong> the relay speaks plain HTTP. Binding to <code>0.0.0.0</code> sends the relay password across your LAN in cleartext. On networks you don't fully trust, bind to the Tailscale IP or put a TLS reverse proxy in front (see <a href="INSTALLATION_AND_OPERATIONS_GUIDE.html#reverse-proxy--tls-termination">Reverse Proxy &amp; TLS Termination</a>).</p>
 </blockquote>
 <h3 id="step-24-execute-built-in-self-test">Step 2.4: Execute Built-In Self-Test</h3>
 <p>Verify that typedstream serialization and database engines pass all assertions:</p>
@@ -664,9 +669,13 @@ timeout 5s curl -s -f &quot;http://${CHECK_HOST}:${SERVER_PORT}/api/v1/ping?pass
 <h3 id="step-31-install-desktop-client-package">Step 3.1: Install Desktop Client Package</h3>
 <h4 id="option-a-arch-linux-omarchy-via-aur">Option A: Arch Linux / Omarchy via AUR</h4>
 <pre><code class="language-bash">if command -v yay &gt;/dev/null 2&gt;&amp;1; then
-    timeout 300s yay -S --noconfirm bluepill &lt;/dev/null
+    PKG=&quot;bluepill&quot;
+    [[ &quot;$(uname -m)&quot; == &quot;x86_64&quot; ]] &amp;&amp; PKG=&quot;bluepill-bin&quot;
+    timeout 300s yay -S --noconfirm &quot;${PKG}&quot; &lt;/dev/null
 elif command -v paru &gt;/dev/null 2&gt;&amp;1; then
-    timeout 300s paru -S --noconfirm bluepill &lt;/dev/null
+    PKG=&quot;bluepill&quot;
+    [[ &quot;$(uname -m)&quot; == &quot;x86_64&quot; ]] &amp;&amp; PKG=&quot;bluepill-bin&quot;
+    timeout 300s paru -S --noconfirm &quot;${PKG}&quot; &lt;/dev/null
 else
     # Fallback: clone and makepkg
     BUILD_TMP=$(mktemp -d /tmp/bluepill-build-XXXXXX)

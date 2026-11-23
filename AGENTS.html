@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Agent Operating Instructions & Mandates — BluePill Documentation</title>
-    <meta name="description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta name="description" content="BluePill documentation: Agent Operating Instructions & Mandates. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <link rel="canonical" href="https://bluepill.nertwork.com/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
@@ -12,7 +12,7 @@
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://nertwork.github.io/bluepill/AGENTS.html">
     <meta property="og:title" content="Agent Operating Instructions & Mandates — BluePill Documentation">
-    <meta property="og:description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta property="og:description" content="BluePill documentation: Agent Operating Instructions & Mandates. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <meta property="og:image" content="https://nertwork.github.io/bluepill/screenshot.png">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:creator" content="@jamesfarr">
@@ -478,17 +478,22 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
         <main class="doc-content">
             <div class="doc-banner">
                 <div>
-                    <strong>💊 BluePill v1.1.0 Documentation Portal</strong>
+                    <strong>💊 BluePill v1.2.12 Documentation Portal</strong>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
-                <h1 id="bluepill-autonomous-agent-operations-installation-guide">🤖 BluePill Autonomous Agent Operations &amp; Installation Guide</h1>
+                </div>
+                <a href="index.html">← Home</a>
+            </div>
+
+            <h1 id="bluepill-autonomous-agent-operations-installation-guide">🤖 BluePill Autonomous Agent Operations &amp; Installation Guide</h1>
 <p>This file provides direct operational instructions for autonomous AI coding agents (<strong>Claude Code</strong>, <strong>OpenCode</strong>, <strong>Gemini CLI</strong>, <strong>Codex</strong>, <strong>Cursor</strong>, <strong>Antigravity</strong>) interacting with the <code>bluepill</code> repository.</p>
 <p>When an end-user prompts an agent with:</p>
 <blockquote>
@@ -586,7 +591,7 @@ fi
 # For remote Linux clients, set BLUEPILL_BIND_HOST to the Mac's Tailscale IP
 # (`tailscale ip -4`; traffic is WireGuard-encrypted). Avoid 0.0.0.0 on untrusted LANs:
 # the relay speaks plain HTTP, so the password would cross the LAN in cleartext.
-# Use a TLS reverse proxy instead (docs/INSTALLATION_AND_OPERATIONS_GUIDE.md).
+# Use a TLS reverse proxy instead (INSTALLATION_AND_OPERATIONS_GUIDE.md).
 BIND_HOST=&quot;${BLUEPILL_BIND_HOST:-127.0.0.1}&quot;
 
 # 2.4 Run Server Self-Test
@@ -740,10 +745,10 @@ echo &quot;VERIFICATION_SUMMARY: PING=${PING_OK} WEB_UI=${WEB_OK} CHAT_QUERY=${C
 <hr />
 <h2 id="3-related-documentation">3. Related Documentation</h2>
 <ul>
-<li>Complete Reference: <a href="docs/INSTALLATION_AND_OPERATIONS_GUIDE.md">INSTALLATION_AND_OPERATIONS_GUIDE.md</a></li>
-<li>Playbook Checklist: <a href="docs/AGENT_INSTALL_PLAYBOOK.md">AGENT_INSTALL_PLAYBOOK.md</a></li>
-<li>Configuration &amp; CLI: <a href="docs/CONFIGURATION_AND_CLI.md">CONFIGURATION_AND_CLI.md</a></li>
-<li>Architecture: <a href="docs/ARCHITECTURE.md">ARCHITECTURE.md</a></li>
+<li>Complete Reference: <a href="INSTALLATION_AND_OPERATIONS_GUIDE.html">INSTALLATION_AND_OPERATIONS_GUIDE.md</a></li>
+<li>Playbook Checklist: <a href="AGENT_INSTALL_PLAYBOOK.html">AGENT_INSTALL_PLAYBOOK.md</a></li>
+<li>Configuration &amp; CLI: <a href="CONFIGURATION_AND_CLI.html">CONFIGURATION_AND_CLI.md</a></li>
+<li>Architecture: <a href="ARCHITECTURE.html">ARCHITECTURE.md</a></li>
 </ul>
         </main>
     </div>

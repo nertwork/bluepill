@@ -129,11 +129,11 @@ The official package is distributed via the Arch User Repository (AUR) as `bluep
 
 #### 1. Installation via AUR Helper
 ```bash
-# Using yay
-yay -S bluepill
+# Prebuilt x86_64 binary (~4s install, recommended on x86_64 Arch/Omarchy)
+yay -S bluepill-bin   # or: paru -S bluepill-bin
 
-# Using paru
-paru -S bluepill
+# Compile from source (x86_64 & aarch64)
+yay -S bluepill       # or: paru -S bluepill
 ```
 
 #### 2. Manual PKGBUILD Compilation
@@ -328,7 +328,7 @@ sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
 ### Fedora & RHEL
 
 #### 1. Install Pre-Built `.rpm` Package (Recommended)
-Download the latest `.rpm` from [GitHub Releases](https://github.com/nertwork/bluepill/releases/latest) (`bluepill-<version>-1.fc41.x86_64.rpm`):
+Download the latest `.rpm` from [GitHub Releases](https://github.com/nertwork/bluepill/releases/latest) (`bluepill-<version>-1.x86_64.rpm`):
 ```bash
 sudo dnf install -y ./bluepill-*.rpm
 ```
@@ -364,7 +364,16 @@ sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
 
 ### Windows (10 / 11 `x86_64`)
 
-Download the signed/packaged Inno Setup installer `BluePill-Setup-<version>-win64.exe` from [GitHub Releases](https://github.com/nertwork/bluepill/releases/latest) and run it to install the native Qt 6.8 desktop client and `--demo` mode shortcut. Support: `support@nertwork.com`.
+Download the per-user Inno Setup installer `BluePill-Setup-<version>-win64.exe` from [GitHub Releases](https://github.com/nertwork/bluepill/releases/latest) (~53 MB; installs to `%LOCALAPPDATA%\Programs\BluePill` with zero UAC prompt, native in-process `Qt6::Multimedia` audio playback, and `--demo` shortcut).
+
+### Smart Cross-Platform Client Auto-Updates (BluePill Cloud)
+
+When signed in to BluePill Cloud (`bluepill.nertwork.com`), the desktop client checks `https://api.bluepill.nertwork.com/api/v1/updates/latest` and applies confirmed client updates directly over an HTTPS host allowlist (`github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, `bluepill.nertwork.com`, `*.bluepill.nertwork.com`) with redirect verification (`UserVerifiedRedirectPolicy`), version regex validation, per-update `QTemporaryDir` isolation (`O_CREAT|O_EXCL|O_NOFOLLOW`), and mandatory `SHA256SUMS.txt` verification (including on-disk SHA256 re-verification):
+
+- **Windows (`x86_64`):** Downloads `BluePill-Setup-<version>-win64.exe` + `SHA256SUMS.txt` and runs silent Inno Setup (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS`) when installed in a user-writable directory, or interactive setup otherwise, followed by a guarded `QProcess::startDetached` relaunch.
+- **Arch Linux / Omarchy (`x86_64`):** Downloads `bluepill-<version>-1-x86_64.pkg.tar.zst` + `SHA256SUMS.txt` and installs via `pkexec pacman -U --noconfirm` (with interactive terminal `sudo pacman -U` fallback on `pkexec` exit `127`, or `yay`/`paru -S --noconfirm bluepill-bin` / `bluepill` when using AUR).
+- **Debian / Ubuntu (`x86_64`):** Downloads `bluepill_<version>_amd64.deb` + `SHA256SUMS.txt` and installs via `pkexec apt-get install -y` (with terminal `sudo apt-get install -y` fallback).
+- **Fedora / RHEL (`x86_64`):** Downloads `bluepill-<version>-1.x86_64.rpm` + `SHA256SUMS.txt` and installs via `pkexec dnf install -y` (with terminal `sudo dnf install -y` fallback).
 
 ---
 
@@ -416,15 +425,21 @@ brew install nertwork/tap/bluepill
 
 # Verify binary installation
 bluepill-server --version
-# Output: bluepill-server 1.2.7
+# Output: bluepill-server 1.2.12
 
 # Link your Mac to BluePill Cloud (opens https://bluepill.nertwork.com/portal) & start service
 bluepill-server login
 brew services start bluepill
 
-# Verify Cloud Relay status at any time
+# Verify Cloud Relay status & Cloud Managed Updates at any time
 bluepill-server relay-status
+bluepill-server update-status
+# Apply confirmed Mac server update (Homebrew upgrade with SHA256 release bottle fallback + LaunchAgent restart)
+bluepill-server update --confirm
 ```
+
+> [!NOTE]
+> **Hardened Mac Server Cloud Managed Updates (`v1.2.12+`):** Strictly gated to Macs signed into BluePill Cloud (never phones home when self-hosted offline). `bluepill-server update --confirm` (or `POST /api/v1/server/update/apply` from the desktop client) first attempts `brew update` + `brew upgrade nertwork/tap/bluepill`. If Homebrew lacks `git`/Xcode CLT or the tap lags behind the latest GitHub release, it automatically falls back to downloading `SHA256SUMS.txt` and `bluepill-<ver>.all.bottle.tar.gz` over an HTTPS host allowlist with redirect verification (`_SafeRedirectHandler`), verifies the SHA256 digest and Python AST, atomically swaps `bluepill-server`, and performs a LaunchAgent-aware restart (`launchctl kickstart -k` for `com.nertwork.bluepill-server` or `homebrew.mxcl.bluepill`, falling back to `brew services restart bluepill`).
 
 Then open the **BluePill Desktop Client** on Linux or Windows and click **"Sign in at bluepill.nertwork.com →"** (or **"Try Live Demo"**).
 
@@ -640,26 +655,28 @@ Caddy, Nginx, and Tailscale Serve all listen on `443`. In the Linux client's **�
 
 ---
 
-## 4. Built-In Web UI Operations (`/web`)
+## 4. Built-In Web UI Operations (`/web` & `/t/<slug>/web`)
 
-Every instance of `bluepill-server` includes a unified **Liquid Glass / Matrix / Light** Web Client accessible at:
+Every instance of `bluepill-server` includes a unified **Liquid Glass / Matrix / Light** Web Client accessible locally at:
 ```text
 http://<relay-host>:1235/web
 ```
-Or try the hosted sandbox instantly at [https://bluepill.nertwork.com/demo](https://bluepill.nertwork.com/demo) (Cloud Relay portal at [https://bluepill.nertwork.com/signup](https://bluepill.nertwork.com/signup)).
+Or remotely through your BluePill Cloud Relay at `https://bluepill.nertwork.com/t/<slug>/web` (or try the hosted sandbox instantly at [https://bluepill.nertwork.com/demo](https://bluepill.nertwork.com/demo); Cloud Relay portal at [https://bluepill.nertwork.com/signup](https://bluepill.nertwork.com/signup)).
 
-### Key Capabilities in the Web UI:
+### Key Capabilities & Hardening in the Web UI (`v1.2.12+`):
 
-1. **Authentication:**
-   - Enter your relay password in the top-right authorization input or pass it in the query string: `http://<host>:1235/web?password=YOUR_PASSWORD`.
-   - Credentials are saved in browser `localStorage`.
+1. **Authentication & Security Hardening:**
+   - Auto-populates Cloud Relay credentials when signed into `bluepill.nertwork.com`, or accepts your relay password via the auth modal / `localStorage` (clearing empty keys cleanly and showing inline invalid-password feedback).
+   - Enforces XSS escaping across message reactions and dynamic DOM attributes, `rel="noopener noreferrer"` on attachment download links, strict CSP (`object-src 'none'; base-uri 'self'`), `Cache-Control: no-store, private` on `/t/<slug>/web` responses, and `cookie` header stripping across Cloud Relay proxy modes.
 
-2. **Pinned Conversations Avatar Bar:**
+2. **Contact Resolution, `lastMessage` Previews & Pinned Conversations:**
+   - Resolves macOS `AddressBook` contacts across `chat_id` and participant handles and displays `lastMessage` text/attachment previews directly in the sidebar chat list (chunked `query_chats` queries with `COALESCE` NULL-date handling and deleted/system message filtering).
    - Displays circular avatar shortcuts synchronized with macOS `com.apple.messages.pinning.plist`.
    - Click any avatar to jump directly to the thread.
 
-3. **Inline 28-Bar Voice Memo Player & `🎙` Recorder:**
-   - Renders animated 28-bar audio waveforms for incoming audio clips.
+3. **Inline Voice Memo Player (`.caf` Transcoding) & Lazy-Loaded Photos:**
+   - Plays inline `<audio>` / `<video>` attachments and automatically requests server-side `.caf` (`audio/x-caf`) transcoding (`/api/v1/attachment/<guid>/live?transcode=1`) with private `0700` atomic `.m4a`/`.wav` caching.
+   - Photos tab renders iCloud `Photos.app` items with `loading="lazy" decoding="async"`, title/filename/timestamp fallbacks, and avoids tearing down active audio/video playback during background polls.
    - Click the `🎙` microphone icon to record voice memos in your browser and dispatch them as `.m4a` audio attachments.
 
 4. **`✨` Expressive Send Effects:**
