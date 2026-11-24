@@ -37,6 +37,7 @@ import os
 import platform
 import plistlib
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -54,7 +55,7 @@ import urllib.request
 import uuid
 import wave
 import math
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 VERSION = "1.2.13"
@@ -16748,6 +16749,105 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
         finally:
             feat_srv.shutdown()
             feat_srv.server_close()
+
+    # #66 Browser loopback login path smoke test (secrets + HTTPServer callback + exchange)
+    with tempfile.TemporaryDirectory(prefix="bluepill-login-smoke-") as login_dir:
+        exchanged_payloads: List[Dict[str, Any]] = []
+
+        class _MockExchangeHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *log_args: Any) -> None:  # noqa: A002
+                return
+
+            def do_POST(self) -> None:
+                if self.path != "/api/v1/auth/desktop/exchange":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                n = int(self.headers.get("Content-Length", "0") or "0")
+                raw = self.rfile.read(n).decode("utf-8") if n > 0 else "{}"
+                exchanged_payloads.append(json.loads(raw))
+                resp_body = json.dumps({
+                    "ok": True,
+                    "tunnel_token": "bp_smoke_tunnel_token_123456",
+                    "tunnel_url": "wss://api.bluepill.nertwork.com/tunnel/connect",
+                    "relay_password": "smoke-relay-password",
+                    "email": "smoke@example.com",
+                    "server_url": "https://smoke.bluepill.nertwork.com",
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp_body)))
+                self.end_headers()
+                self.wfile.write(resp_body)
+
+        ex_srv = HTTPServer(("127.0.0.1", 0), _MockExchangeHandler)
+        ex_port = ex_srv.server_address[1]
+        threading.Thread(target=ex_srv.serve_forever, daemon=True).start()
+        orig_subproc_run = subprocess.run
+        saved_env = {
+            k: os.environ.get(k)
+            for k in ("HOME", "BLUEPILL_RELAY_CONFIG", "BLUEPILL_RELAY_TOKEN", "BLUEPILL_TUNNEL_TOKEN", "BLUEPILL_CLOUD_API_URL")
+        }
+        try:
+            os.environ["HOME"] = login_dir
+            os.environ["BLUEPILL_RELAY_CONFIG"] = os.path.join(login_dir, "relay.json")
+            os.environ["BLUEPILL_CLOUD_API_URL"] = f"http://127.0.0.1:{ex_port}"
+            os.environ.pop("BLUEPILL_RELAY_TOKEN", None)
+            os.environ.pop("BLUEPILL_TUNNEL_TOKEN", None)
+
+            def _fake_open_browser(cmd: Any, *a: Any, **kw: Any) -> Any:
+                if isinstance(cmd, list) and len(cmd) >= 2 and cmd[0] in ("open", "xdg-open"):
+                    parsed = urllib.parse.urlparse(cmd[1])
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    cb_port_str = (qs.get("port") or [""])[0]
+                    cb_state = (qs.get("state") or [""])[0]
+                    assert cb_port_str.isdigit() and int(cb_port_str) > 0, f"Invalid callback port: {cmd[1]}"
+                    assert len(cb_state) == 32, f"Invalid login state token: {cb_state!r}"
+
+                    def _send_callback() -> None:
+                        cb_url = f"http://127.0.0.1:{cb_port_str}/callback?code=smoke-auth-code&state={cb_state}"
+                        with urllib.request.urlopen(cb_url, timeout=5.0) as cb_resp:
+                            assert cb_resp.status == 200
+
+                    threading.Thread(target=_send_callback, daemon=True).start()
+                    return subprocess.CompletedProcess(cmd, 0)
+                return orig_subproc_run(cmd, *a, **kw)
+
+            subprocess.run = _fake_open_browser  # type: ignore[assignment]
+            login_args = argparse.Namespace(
+                command="login",
+                disable=False,
+                token="",
+                relay_token="",
+                url="",
+                relay_url="",
+                relay_password="",
+                json=False,
+                no_check=True,
+                tls_cert="",
+                tls_key="",
+                port=1235,
+                insecure_relay_tls=False,
+            )
+            orig_stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                login_rc = run_relay_setup_cli(login_args, engine)
+            finally:
+                sys.stdout = orig_stdout
+            assert login_rc == 0, f"Expected run_relay_setup_cli rc=0, got {login_rc}"
+            assert len(exchanged_payloads) == 1 and exchanged_payloads[0].get("code") == "smoke-auth-code", exchanged_payloads
+            saved_relay = load_relay_config(os.path.join(login_dir, "relay.json"))
+            assert saved_relay.get("enabled") is True and saved_relay.get("token") == "bp_smoke_tunnel_token_123456", saved_relay
+        finally:
+            subprocess.run = orig_subproc_run  # type: ignore[assignment]
+            ex_srv.shutdown()
+            ex_srv.server_close()
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     info = engine.get_server_info()
     print(
