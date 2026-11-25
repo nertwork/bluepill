@@ -26,13 +26,14 @@
   <a href="https://github.com/nertwork/bluepill/actions/workflows/ci.yml"><img src="https://github.com/nertwork/bluepill/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/nertwork/bluepill/releases/latest"><img src="https://img.shields.io/github/v/release/nertwork/bluepill?color=0a84ff&label=Release" alt="Release" /></a>
   <a href="https://aur.archlinux.org/packages/bluepill-bin"><img src="https://img.shields.io/badge/Arch_Linux-AUR_bluepill--bin-1793d1?logo=arch-linux&logoColor=white" alt="AUR Binary Package" /></a>
+  <a href="https://omarchy.org"><img src="https://img.shields.io/badge/Developed_on-Omarchy-7aa2f7?logo=arch-linux&logoColor=white" alt="Developed on Omarchy" /></a>
   <a href="https://github.com/nertwork/homebrew-tap"><img src="https://img.shields.io/badge/Homebrew-nertwork%2Ftap%2Fbluepill-FBB040?logo=homebrew&logoColor=white" alt="Homebrew Tap" /></a>
   <a href="https://coderabbit.ai"><img src="https://img.shields.io/coderabbit/prs/github/nertwork/bluepill?utm_source=oss&utm_medium=github&utm_campaign=nertwork%2Fbluepill&labelColor=171717&color=FF570A&label=CodeRabbit+Reviews" alt="CodeRabbit Pull Request Reviews" /></a>
   <a href="https://github.com/nertwork/bluepill/graphs/contributors"><img src="https://img.shields.io/github/contributors/nertwork/bluepill?color=0a84ff&label=Contributors" alt="Contributors" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-9ece6a.svg" alt="License: MIT" /></a>
 </p>
 
-**`BluePill`** (`bluepill`, backward-compatible with `imsg`) is a complete, open-source **iMessage, RCS, and SMS ecosystem for Linux, Windows, macOS, and the Web** consisting of three unified interfaces:
+**`BluePill`** (`bluepill`, backward-compatible with `imsg`) is a complete, open-source **iMessage, RCS, and SMS ecosystem for Linux, Windows, macOS, and the Web** — **developed natively on [Omarchy Linux](https://omarchy.org)** (`Arch Linux` + `Hyprland` + `Wayland`) with live Omarchy theme hot-reloading — consisting of three unified interfaces:
 
 1. **Native Linux & Windows Desktop Client (`bluepill`):** A fast (~48 MB RSS), zero-Electron, zero-Flutter **C++20 and Qt6/QML** desktop application for **Linux** (Arch/Omarchy AUR, Debian/Ubuntu `.deb`, Fedora/RHEL `.rpm`) and **Windows** (`BluePill-Setup-*.exe`) with **0ms local cache startup**, real-time **Socket.IO v4 push**, **Pinned Conversations**, **1-click 2FA OTP copy pills**, **built-in Photo Lightbox**, and live Omarchy theme hot-reloading.
 2. **Headless macOS Relay Daemon (`bluepill-server` / `brew install nertwork/tap/bluepill`):** A lightweight (~18 MB RSS), zero-Electron macOS daemon that reads `~/Library/Messages/chat.db` directly in SQLite WAL mode (`<2ms` queries), decodes `attributedBody` typedstreams natively, resolves `AddressBook` contacts in `<5ms`, includes **built-in BluePill Cloud Relay** (`wss://api.bluepill.app/tunnel/connect`, zero port-forwarding), and supports both **Full `IMCore` Private API mode** and **Zero-SIP `osascript` Gateway mode** — while remaining **100% API-compatible with legacy BlueBubbles Server (`1.9.x`)**.
