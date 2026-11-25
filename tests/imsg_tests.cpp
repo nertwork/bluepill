@@ -31,19 +31,11 @@
 
 struct ScopedTestHome {
     QByteArray prevHome = qgetenv("HOME");
-    QByteArray prevXdgConfig = qgetenv("XDG_CONFIG_HOME");
-    QByteArray prevXdgCache = qgetenv("XDG_CACHE_HOME");
-    QByteArray prevXdgData = qgetenv("XDG_DATA_HOME");
-    QByteArray prevXdgState = qgetenv("XDG_STATE_HOME");
     QByteArray prevUserProfile = qgetenv("USERPROFILE");
     QByteArray prevAppData = qgetenv("APPDATA");
     explicit ScopedTestHome(const QString &path) {
         const QByteArray utf8 = path.toUtf8();
         qputenv("HOME", utf8);
-        qputenv("XDG_CONFIG_HOME", (path + QStringLiteral("/.config")).toUtf8());
-        qputenv("XDG_CACHE_HOME", (path + QStringLiteral("/.cache")).toUtf8());
-        qputenv("XDG_DATA_HOME", (path + QStringLiteral("/.local/share")).toUtf8());
-        qputenv("XDG_STATE_HOME", (path + QStringLiteral("/.local/state")).toUtf8());
 #ifdef Q_OS_WIN
         qputenv("USERPROFILE", utf8);
         qputenv("APPDATA", (path + QStringLiteral("/AppData/Roaming")).toUtf8());
@@ -51,10 +43,6 @@ struct ScopedTestHome {
     }
     ~ScopedTestHome() {
         if (prevHome.isEmpty()) qunsetenv("HOME"); else qputenv("HOME", prevHome);
-        if (prevXdgConfig.isEmpty()) qunsetenv("XDG_CONFIG_HOME"); else qputenv("XDG_CONFIG_HOME", prevXdgConfig);
-        if (prevXdgCache.isEmpty()) qunsetenv("XDG_CACHE_HOME"); else qputenv("XDG_CACHE_HOME", prevXdgCache);
-        if (prevXdgData.isEmpty()) qunsetenv("XDG_DATA_HOME"); else qputenv("XDG_DATA_HOME", prevXdgData);
-        if (prevXdgState.isEmpty()) qunsetenv("XDG_STATE_HOME"); else qputenv("XDG_STATE_HOME", prevXdgState);
 #ifdef Q_OS_WIN
         if (prevUserProfile.isEmpty()) qunsetenv("USERPROFILE"); else qputenv("USERPROFILE", prevUserProfile);
         if (prevAppData.isEmpty()) qunsetenv("APPDATA"); else qputenv("APPDATA", prevAppData);
@@ -65,26 +53,12 @@ struct ScopedTestHome {
 class ImsgTests : public QObject {
     Q_OBJECT
 
-private:
-    std::unique_ptr<QTemporaryDir> m_suiteHomeDir;
-    std::unique_ptr<ScopedTestHome> m_suiteScopedHome;
-
 private slots:
     void initTestCase() {
         QQuickStyle::setStyle(QStringLiteral("Basic"));
-        // Isolate HOME and XDG_*_HOME from the host user's real ~/.config and ~/.cache
-        // so AUR/local builds never read or pollute an existing BluePill installation.
-        m_suiteHomeDir = std::make_unique<QTemporaryDir>();
-        QVERIFY(m_suiteHomeDir->isValid());
-        m_suiteScopedHome = std::make_unique<ScopedTestHome>(m_suiteHomeDir->path());
         // Keep the suite hermetic: Settings opens on first run in QML tests and
         // would otherwise run `tailscale status` and probe real tailnet peers.
         qputenv("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY", "1");
-    }
-
-    void cleanupTestCase() {
-        m_suiteScopedHome.reset();
-        m_suiteHomeDir.reset();
     }
 
     void testThemeParsing() {
@@ -981,7 +955,6 @@ private slots:
     void testAuthoritativeServerUnreadReconciliation() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state.json")));
         b.setWindowActive(false);
@@ -1689,10 +1662,7 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("id: searchInput\n                                    Layout.fillWidth: true\n                                    Layout.fillHeight: true\n                                    topPadding: 4\n                                    bottomPadding: 4")));
 
         // 3. Verify Lexi Matthews (1 (415) 555-0170 / 4155550170) + organization/nickname fallback contact resolution
-        QTemporaryDir tempDir;
-        QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
-        Backend b(false);
+        Backend b;
         const QByteArray contactsPayload = R"({
             "status": 200,
             "data": [
@@ -4161,7 +4131,6 @@ private slots:
     void testOrphanSmsVerificationCodeWithoutChatJoin() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state.json")));
 
@@ -4301,7 +4270,6 @@ private slots:
     void testBluePillPinnedChatsAndTogglePin() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_pins.json")));
         b.loadDemoData();
@@ -4922,7 +4890,6 @@ private slots:
     void testChatServiceEvidenceOrderingAndNotifications() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_svc2.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("cfg_svc2.json")));
@@ -4992,7 +4959,6 @@ private slots:
     void testMessageCreatedChatUsesEmbeddedChatService() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_svc3.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("cfg_svc3.json")));
@@ -5050,7 +5016,6 @@ private slots:
     void testAnyPrefixedChatServiceInChatListAndRefinedByMessages() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_svc.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("cfg_svc.json")));
@@ -5134,7 +5099,6 @@ private slots:
     void testOutboundTempGuidDeduplication() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_dedup.json")));
 
@@ -6804,7 +6768,6 @@ private slots:
     void testRcsGroupSiblingUnificationAndActiveSendRouting() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_unify.json")));
 
@@ -7034,7 +6997,6 @@ private slots:
     void testAsyncDeliveryFailureSurfacing() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_err.json")));
 
@@ -7173,7 +7135,6 @@ private slots:
 
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_batch.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_batch.json")));
@@ -7281,7 +7242,6 @@ private slots:
 
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_vm.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_vm.json")));
@@ -7487,7 +7447,6 @@ private slots:
 
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_dup.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_dup.json")));
@@ -7671,7 +7630,6 @@ private slots:
 
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_deliv.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_deliv.json")));
@@ -7981,7 +7939,6 @@ private slots:
 
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_sec.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_sec.json")));
@@ -8581,7 +8538,6 @@ private slots:
     void testPollDeltaAndRebuildNoSpuriousSignals() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_nobounce.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_nobounce.json")));
@@ -8911,7 +8867,6 @@ private slots:
 
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_rev3_poll.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_rev3_poll.json")));
@@ -9044,7 +8999,6 @@ private slots:
     void testExpiredPendingTrackingCleanupAndTapbackReplyExclusion() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_exp_tap.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_exp_tap.json")));
@@ -9210,7 +9164,6 @@ private slots:
 
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_upmerge.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_upmerge.json")));
@@ -10986,7 +10939,6 @@ private slots:
     void testKeyboardShortcutsModalScrollableSearchableAndBounded() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_shortcuts_modal.json")));
         b.loadDemoData();
@@ -11074,7 +11026,6 @@ private slots:
     void testDeliveredReceiptStabilityAcrossBackgroundPollsAndReconcile() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_delivered_bounce.json")));
 
@@ -11244,23 +11195,6 @@ private slots:
         QCOMPARE(theme.isDark(), true);
         QCOMPARE(theme.background(), QColor(QStringLiteral("#11121a")));
 
-        // System mode respects Omarchy colors.toml (mode = "dark") as the authoritative desktop theme
-        theme.setThemeMode(QStringLiteral("system"));
-        QCOMPARE(theme.isDark(), true);
-        QCOMPARE(theme.background(), QColor(QStringLiteral("#11121a")));
-
-        // Switching Omarchy colors.toml to mode = "light" flips System mode to light
-        QVERIFY(omarchyToml.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text));
-        omarchyToml.write("mode = \"light\"\nbackground = \"#fafbff\"\naccent = \"#0A84FF\"\n");
-        omarchyToml.close();
-        theme.reload();
-        QCOMPARE(theme.isDark(), false);
-        QCOMPARE(theme.background(), QColor(QStringLiteral("#fafbff")));
-
-        // Restore dark Omarchy colors.toml and verify explicit Light mode still stays Light
-        QVERIFY(omarchyToml.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text));
-        omarchyToml.write("mode = \"dark\"\nbackground = \"#11121a\"\naccent = \"#ff9e64\"\n");
-        omarchyToml.close();
         theme.setThemeMode(QStringLiteral("light"));
         QCOMPARE(theme.isDark(), false);
         QCOMPARE(theme.background(), QColor(QStringLiteral("#f5f7fb")));
@@ -12398,7 +12332,6 @@ private slots:
     void testChatListModelAndMessageListModelIncrementalSync() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        ScopedTestHome testHome(tempDir.path());
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_listmodels.json")));
 

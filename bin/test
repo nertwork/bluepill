@@ -9,11 +9,4 @@ mkdir -p obj
 echo "$ARCH" > obj/.arch
 qmake6 imsg_tests.pro
 make -j"$(nproc)"
-TEST_HOME="$(mktemp -d -t bluepill-test-home.XXXXXX)"
-trap 'rm -rf "$TEST_HOME"' EXIT
-HOME="$TEST_HOME" \
-XDG_CONFIG_HOME="$TEST_HOME/.config" \
-XDG_CACHE_HOME="$TEST_HOME/.cache" \
-XDG_DATA_HOME="$TEST_HOME/.local/share" \
-XDG_STATE_HOME="$TEST_HOME/.local/state" \
 QT_QPA_PLATFORM=offscreen ./imsg_tests
