@@ -111,10 +111,11 @@ SpellChecker::SpellChecker(QObject *parent) : QObject(parent) {
 
 SpellChecker::~SpellChecker() {
     m_assistDebounceTimer.stop();
-    if (m_assistReply) {
-        m_assistReply->abort();
-        m_assistReply->deleteLater();
+    if (QNetworkReply *reply = m_assistReply.data()) {
         m_assistReply.clear();
+        reply->disconnect(this);
+        reply->abort();
+        reply->deleteLater();
     }
     cleanupNativeSpellChecker();
 }
@@ -550,10 +551,11 @@ void SpellChecker::clearAssist() {
     m_assistDebounceTimer.stop();
     m_pendingAssistText.clear();
     ++m_assistSeq;
-    if (m_assistReply) {
-        m_assistReply->abort();
-        m_assistReply->deleteLater();
+    if (QNetworkReply *reply = m_assistReply.data()) {
         m_assistReply.clear();
+        reply->disconnect(this);
+        reply->abort();
+        reply->deleteLater();
     }
     if (!m_inlineSuggestion.isEmpty() || !m_grammarHint.isEmpty() || !m_grammarHints.isEmpty()) {
         m_inlineSuggestion.clear();
@@ -595,14 +597,16 @@ void SpellChecker::dispatchAssistRequest() {
         u.setQuery(q);
     }
 
-    if (m_assistReply) {
-        m_assistReply->abort();
-        m_assistReply->deleteLater();
+    if (QNetworkReply *oldReply = m_assistReply.data()) {
         m_assistReply.clear();
+        oldReply->disconnect(this);
+        oldReply->abort();
+        oldReply->deleteLater();
     }
 
     const quint64 seq = ++m_assistSeq;
     QNetworkRequest req(u);
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     req.setTransferTimeout(5000);
     if (!m_relayPassword.isEmpty()) {

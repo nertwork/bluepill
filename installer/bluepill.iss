@@ -57,6 +57,22 @@ Filename: "{app}\bluepill.exe"; Description: "{cm:LaunchProgram,BluePill}"; Flag
 Filename: "{app}\bluepill.exe"; Parameters: ""; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [Code]
+function InitializeSetup(): Boolean;
+var
+  WaitMs: Integer;
+begin
+  Result := True;
+  if WizardSilent then
+  begin
+    WaitMs := 0;
+    while CheckForMutexes('BluePillSingleInstanceMutex') and (WaitMs < 5000) do
+    begin
+      Sleep(100);
+      WaitMs := WaitMs + 100;
+    end;
+  end;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if (CurUninstallStep = usPostUninstall) and (not UninstallSilent) then

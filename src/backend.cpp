@@ -3765,7 +3765,7 @@ void Backend::confirmClientUpdate() {
                                          ? QStringLiteral("Installing BluePill v%1 silently and restarting...").arg(m_clientLatestVersion)
                                          : QStringLiteral("Launched BluePill v%1 installer...").arg(m_clientLatestVersion);
                 emit updateStateChanged();
-                QTimer::singleShot(400, this, &Backend::quitApplication);
+                QTimer::singleShot(0, this, &Backend::quitApplication);
             });
         return;
     }
@@ -15982,17 +15982,19 @@ bool Backend::startMultimediaVoiceRecording(const QString &targetPath) {
         chosen = inputs.first();
     }
 
+    QMediaFormat fmt(QMediaFormat::Wave);
+    fmt.setAudioCodec(QMediaFormat::AudioCodec::Wave);
+    if (!fmt.isSupported(QMediaFormat::Encode)) {
+        return false;
+    }
+
     auto *session = new QMediaCaptureSession(this);
     auto *audioIn = new QAudioInput(chosen, this);
     auto *recorder = new QMediaRecorder(this);
     session->setAudioInput(audioIn);
     session->setRecorder(recorder);
 
-    QMediaFormat fmt(QMediaFormat::Wave);
-    fmt.setAudioCodec(QMediaFormat::AudioCodec::Wave);
-    if (fmt.isSupported(QMediaFormat::Encode)) {
-        recorder->setMediaFormat(fmt);
-    }
+    recorder->setMediaFormat(fmt);
     recorder->setAudioChannelCount(1);
     recorder->setAudioSampleRate(16000);
     recorder->setQuality(QMediaRecorder::NormalQuality);
