@@ -58,7 +58,7 @@ import math
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.15"
+VERSION = "1.2.16"
 DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.app/tunnel/connect"
 DEFAULT_UPDATES_FEED_URL = "https://api.bluepill.app/api/v1/updates/latest"
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 3600
@@ -10021,7 +10021,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill</span>
-      <span class="pill pill-blue">v1.2.15</span>
+      <span class="pill pill-blue">v1.2.16</span>
       <span class="status-dot" id="wcConnDot"></span>
       <span id="serverBadge" class="pill">Enter API Key to Connect</span>
     </div>

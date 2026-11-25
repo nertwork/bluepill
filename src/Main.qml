@@ -11424,7 +11424,7 @@ ApplicationWindow {
                                 id: headerVerTxt
                                 objectName: "settingsHeaderVersionText"
                                 anchors.centerIn: parent
-                                text: "v" + (Qt.application.version || "1.2.15")
+                                text: "v" + (Qt.application.version || "1.2.16")
                                 font.pixelSize: theme.fontSize - 3
                                 font.bold: true
                                 color: theme.accent
@@ -11436,8 +11436,8 @@ ApplicationWindow {
                             }
                             ToolTip.visible: headerVerMouse.containsMouse
                             ToolTip.text: backend.serverCurrentVersion && backend.serverCurrentVersion.length > 0
-                                          ? ("BluePill v" + (Qt.application.version || "1.2.15") + " · Relay v" + backend.serverCurrentVersion)
-                                          : ("BluePill v" + (Qt.application.version || "1.2.15"))
+                                          ? ("BluePill v" + (Qt.application.version || "1.2.16") + " · Relay v" + backend.serverCurrentVersion)
+                                          : ("BluePill v" + (Qt.application.version || "1.2.16"))
                             ToolTip.delay: 250
                         }
                         Rectangle {
@@ -13870,8 +13870,8 @@ ApplicationWindow {
                                     Text {
                                         Layout.fillWidth: true
                                         text: backend.clientUpdateAvailable
-                                              ? ("v" + (Qt.application.version || "1.2.15") + " → v" + backend.clientLatestVersion)
-                                              : i18n.tr("Up to date (v%1)").arg(Qt.application.version || "1.2.15")
+                                              ? ("v" + (Qt.application.version || "1.2.16") + " → v" + backend.clientLatestVersion)
+                                              : i18n.tr("Up to date (v%1)").arg(Qt.application.version || "1.2.16")
                                         font.pixelSize: theme.fontSize - 2
                                         color: backend.clientUpdateAvailable ? theme.accent : theme.darkForeground
                                         elide: Text.ElideRight
