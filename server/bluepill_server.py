@@ -601,7 +601,9 @@ class BluePillEngine:
             None if is_ephemeral else os.path.expanduser("~/.config/bluepill/scheduled_messages.json")
         )
         self.server_config_path: Optional[str] = (
-            None if is_ephemeral else os.path.expanduser("~/.config/bluepill/server.json")
+            None
+            if is_ephemeral
+            else os.path.expanduser(os.environ.get("BLUEPILL_SERVER_CONFIG") or "~/.config/bluepill/server.json")
         )
         self.enable_notes: bool = True
         self.enable_calendar: bool = True
@@ -4489,14 +4491,67 @@ end run
         # Multi-recipient (2+): create group chat via Private API helper or AppleScript fallback
         chat_guid = ""
         used_group_applescript = False
+        helper_timed_out = False
+        svc_prefix = f"{service};+;"
+        target_set = {a.lower() for a in clean_addrs}
+
+        def _find_matching_group_guid(exclude_guids: Optional[set[str]] = None) -> str:
+            fallback_existing = ""
+            try:
+                for ch in self.query_chats(limit=50, offset=0, with_participants=True):
+                    cguid = str(ch.get("guid") or "")
+                    if not cguid.startswith(svc_prefix):
+                        continue
+                    parts = {
+                        str(p.get("address") or "").strip().lower()
+                        for p in (ch.get("participants") or [])
+                        if p.get("address")
+                    }
+                    if parts == target_set:
+                        if exclude_guids and cguid in exclude_guids:
+                            if not fallback_existing:
+                                fallback_existing = cguid
+                            continue
+                        return cguid
+            except Exception:
+                pass
+            return fallback_existing
+
+        pre_existing_guids: set[str] = set()
+        if sys.platform == "darwin" and os.path.exists(self.db_path):
+            try:
+                for ch in self.query_chats(limit=50, offset=0, with_participants=True):
+                    cguid = str(ch.get("guid") or "")
+                    if cguid.startswith(svc_prefix):
+                        pre_existing_guids.add(cguid)
+            except Exception:
+                pass
+
         if method_req != "apple-script":
             ok, helper_chat_guid = self._send_helper_payload_with_tx(
                 "create-chat",
                 {"addresses": clean_addrs, "service": service},
                 wait_timeout=2.0,
             )
+            last_state = str(getattr(self._tx_local, "last_state", "") or "")
             if ok and helper_chat_guid:
                 chat_guid = helper_chat_guid.strip()
+            elif ok and last_state == "timeout":
+                helper_timed_out = True
+
+        if not chat_guid and helper_timed_out:
+            # Helper accepted the create-chat write but timed out replying; do NOT spawn a duplicate via AppleScript.
+            if sys.platform == "darwin" and os.path.exists(self.db_path):
+                deadline = time.time() + 3.0
+                while time.time() < deadline and not chat_guid:
+                    chat_guid = _find_matching_group_guid(pre_existing_guids)
+                    if not chat_guid:
+                        time.sleep(0.15)
+            if not chat_guid:
+                raise RuntimeError(
+                    "Timed out waiting for Private API helper to confirm group chat creation; "
+                    "check Messages before retrying to avoid duplicate groups."
+                )
 
         if not chat_guid and sys.platform == "darwin" and os.path.exists(self.db_path):
             if effect_id:
@@ -4507,22 +4562,28 @@ end run
             if not as_ok:
                 raise RuntimeError(f"Failed to create group chat for {', '.join(clean_addrs)}")
             used_group_applescript = True
-            # Poll chat.db briefly for the newly created group chat GUID
-            deadline = time.time() + 1.5
-            target_set = {a.lower() for a in clean_addrs}
+            # Poll chat.db briefly for the newly created (or reused) group chat GUID matching the requested service
+            deadline = time.time() + 2.0
+            reused_candidate = ""
             while time.time() < deadline and not chat_guid:
-                try:
-                    for ch in self.query_chats(limit=25, offset=0, with_participants=True):
-                        parts = {str(p.get("address") or "").strip().lower() for p in (ch.get("participants") or []) if p.get("address")}
-                        if parts == target_set and ";+;" in str(ch.get("guid") or ""):
-                            chat_guid = str(ch["guid"])
-                            break
-                except Exception:
-                    pass
-                if not chat_guid:
-                    time.sleep(0.15)
+                cand = _find_matching_group_guid(pre_existing_guids)
+                if cand and cand not in pre_existing_guids:
+                    chat_guid = cand
+                    break
+                if cand:
+                    reused_candidate = cand
+                time.sleep(0.15)
+            if not chat_guid and reused_candidate:
+                chat_guid = reused_candidate
+            if not chat_guid:
+                raise RuntimeError(
+                    f"Group chat creation via AppleScript did not produce a confirmed {service} chat GUID in chat.db yet."
+                )
 
         if not chat_guid:
+            if sys.platform == "darwin" and os.path.exists(self.db_path):
+                raise RuntimeError(f"Could not determine a real {service} group chat GUID.")
+            # Simulated / non-macOS test environment only
             chat_guid = f"{service};+;chat{uuid.uuid4().hex[:16]}"
             with self._chat_state_lock:
                 self.group_participants_override[chat_guid] = list(clean_addrs)
@@ -6551,10 +6612,21 @@ end run
                     dispatched.append(item)
                     self.broadcast_socketio("scheduled-message-sent", item)
                 except Exception as exc:  # noqa: BLE001
-                    self.logger.error("Scheduled message send failed for %s: %s", item.get("id"), exc)
+                    err_str = str(exc)
+                    self.logger.error("Scheduled message send failed for %s: %s", item.get("id"), err_str)
                     item_failed = dict(item)
-                    item_failed["lastError"] = str(exc)
-                    failed_due.append(item_failed)
+                    item_failed["lastError"] = err_str
+                    retries = int(item_failed.get("retryCount") or 0) + 1
+                    item_failed["retryCount"] = retries
+                    is_helper_unavail = "Private API helper" in err_str
+                    is_terminal = (not is_helper_unavail and isinstance(exc, (ValueError, NotImplementedError))) or retries > 5
+                    if is_terminal:
+                        item_failed["status"] = "failed"
+                        self.broadcast_socketio("scheduled-message-failed", item_failed)
+                    else:
+                        backoff_ms = min(300_000, 15_000 * (2 ** (retries - 1)))
+                        item_failed["scheduledFor"] = int(time.time() * 1000) + backoff_ms
+                        failed_due.append(item_failed)
         finally:
             with self._scheduled_lock:
                 for item in due:
@@ -9087,12 +9159,12 @@ end run
         return resp
 
     def _fetch_updates_feed(self) -> Dict[str, Any]:
-        req = urllib.request.Request(
-            self._updates_feed_url,
-            headers={"User-Agent": f"bluepill-server/{VERSION}", "Accept": "application/json"},
-            method="GET",
-        )
-        with urllib.request.urlopen(req, timeout=8.0) as resp:
+        opener = getattr(self, "_updates_feed_opener", None)
+        if callable(opener):
+            resp_ctx = opener(self._updates_feed_url, 8.0)
+        else:
+            resp_ctx = self._open_trusted_update_url(self._updates_feed_url, timeout=8.0)
+        with resp_ctx as resp:
             payload = json.loads(self._read_bounded(resp, 1024 * 1024, "updates feed").decode("utf-8"))
         latest = self._validate_update_version(str(payload.get("version") or VERSION))
         rel_url = self._validate_update_url(
@@ -17692,6 +17764,7 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
             os.environ["BLUEPILL_ALLOW_AUTO_UPDATE"] = "1"
             eng83 = BluePillEngine(db_path="/nonexistent/feat83.db", password="pw83", enable_background_daemons=False)
             eng83._updates_feed_url = f"http://127.0.0.1:{feed_port}/api/v1/updates/latest"
+            eng83._updates_feed_opener = lambda url, timeout: urllib.request.urlopen(url, timeout=timeout)  # type: ignore[attr-defined]
             eng83._detect_update_method = lambda: "homebrew"  # type: ignore[method-assign]
             applied_calls: List[Tuple[str, str, str]] = []
             eng83._run_server_update_worker = lambda m, v, c: applied_calls.append((m, v, c))  # type: ignore[method-assign]

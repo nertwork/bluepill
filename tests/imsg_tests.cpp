@@ -13204,10 +13204,14 @@ private slots:
 #endif
 
         // Verify Inno Setup script directives for #84
-        QFile issFile(QStringLiteral("../installer/bluepill.iss"));
+        const QString sourceDirIss = QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath())
+                                         .filePath(QStringLiteral("../installer/bluepill.iss"));
+        QFile issFile(sourceDirIss);
+        if (!issFile.exists()) issFile.setFileName(QStringLiteral("../installer/bluepill.iss"));
         if (!issFile.exists()) issFile.setFileName(QStringLiteral("installer/bluepill.iss"));
         if (!issFile.exists()) issFile.setFileName(QStringLiteral("../../installer/bluepill.iss"));
-        QVERIFY(issFile.open(QIODevice::ReadOnly | QIODevice::Text));
+        QVERIFY2(issFile.open(QIODevice::ReadOnly | QIODevice::Text),
+                 qPrintable(QStringLiteral("Failed to open bluepill.iss (tried %1)").arg(sourceDirIss)));
         const QString iss = QString::fromUtf8(issFile.readAll());
         QVERIFY(iss.contains(QStringLiteral("CloseApplications=force")));
         QVERIFY(iss.contains(QStringLiteral("RestartApplications=yes")));

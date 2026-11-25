@@ -1774,20 +1774,35 @@ bool Backend::startSingleInstanceServer(const QString &serverName) {
         while (srv->hasPendingConnections()) {
             QLocalSocket *sock = srv->nextPendingConnection();
             if (!sock) continue;
-            connect(sock, &QLocalSocket::readyRead, this, [this, sock]() {
-                const QByteArray payload = sock->readAll().trimmed();
+            QPointer<QLocalSocket> safeSock(sock);
+            auto handled = std::make_shared<bool>(false);
+            auto handlePayload = [this, safeSock, handled](bool disconnectAfter) {
+                if (*handled) return;
+                const QByteArray payload = safeSock ? safeSock->readAll().trimmed() : QByteArray();
                 if (payload.isEmpty() || payload.contains("RAISE")) {
+                    *handled = true;
                     raiseWindow();
                 }
-                sock->disconnectFromServer();
-            });
-            connect(sock, &QLocalSocket::disconnected, sock, &QObject::deleteLater);
-            QTimer::singleShot(150, this, [this, sock]() {
-                if (sock && sock->state() == QLocalSocket::ConnectedState) {
-                    raiseWindow();
-                    sock->disconnectFromServer();
+                if (disconnectAfter && safeSock && safeSock->state() != QLocalSocket::UnconnectedState) {
+                    safeSock->disconnectFromServer();
                 }
+            };
+            connect(sock, &QLocalSocket::readyRead, this, [handlePayload]() {
+                handlePayload(true);
             });
+            connect(sock, &QLocalSocket::disconnected, this, [safeSock, handlePayload]() {
+                handlePayload(false);
+                if (safeSock) safeSock->deleteLater();
+            });
+            if (sock->bytesAvailable() > 0 || sock->state() == QLocalSocket::UnconnectedState) {
+                handlePayload(sock->state() != QLocalSocket::UnconnectedState);
+            } else {
+                QTimer::singleShot(150, sock, [safeSock, handlePayload]() {
+                    if (safeSock && safeSock->state() == QLocalSocket::ConnectedState) {
+                        handlePayload(true);
+                    }
+                });
+            }
         }
     });
     return true;
@@ -13526,15 +13541,50 @@ void Backend::startNewChat(const QString &address, const QString &text) {
     const QString msg = replaceEmojiShortcodes(text.trimmed());
     if (rawInput.isEmpty()) return;
 
-    // Support comma/semicolon-separated multi-recipient input (#91)
+    // Support comma/semicolon-separated multi-recipient input (#91), preserving commas inside display names (e.g. "Rivera, Alex <a@b.com>")
     if (rawInput.contains(QLatin1Char(',')) || rawInput.contains(QLatin1Char(';'))) {
-        static const QRegularExpression reMultiSep(QStringLiteral("[,;]+"));
-        const QStringList rawParts = rawInput.split(reMultiSep, Qt::SkipEmptyParts);
         QStringList cleanParts;
-        for (const QString &part : rawParts) {
-            const QString p = part.trimmed();
-            if (!p.isEmpty()) cleanParts.append(p);
+        QString cur;
+        bool inQuotes = false;
+        bool inAngle = false;
+        for (int i = 0; i < rawInput.size(); ++i) {
+            const QChar ch = rawInput.at(i);
+            if (ch == QLatin1Char('"')) {
+                inQuotes = !inQuotes;
+                cur.append(ch);
+            } else if (!inQuotes && ch == QLatin1Char('<')) {
+                inAngle = true;
+                cur.append(ch);
+            } else if (!inQuotes && ch == QLatin1Char('>')) {
+                inAngle = false;
+                cur.append(ch);
+            } else if (!inQuotes && !inAngle && (ch == QLatin1Char(';') || ch == QLatin1Char(','))) {
+                bool commaInDisplayName = false;
+                if (ch == QLatin1Char(',') && !cur.contains(QLatin1Char('<')) && !cur.contains(QLatin1Char('@'))) {
+                    const int nextAngleOpen = rawInput.indexOf(QLatin1Char('<'), i + 1);
+                    const int nextAngleClose = (nextAngleOpen >= 0) ? rawInput.indexOf(QLatin1Char('>'), nextAngleOpen + 1) : -1;
+                    const int nextSemi = rawInput.indexOf(QLatin1Char(';'), i + 1);
+                    const int nextComma = rawInput.indexOf(QLatin1Char(','), i + 1);
+                    if (nextAngleOpen >= 0 && nextAngleClose > nextAngleOpen &&
+                        (nextSemi < 0 || nextAngleOpen < nextSemi) &&
+                        (nextComma < 0 || nextAngleOpen < nextComma)) {
+                        commaInDisplayName = true;
+                    }
+                }
+                if (commaInDisplayName) {
+                    cur.append(ch);
+                } else {
+                    const QString p = cur.trimmed();
+                    if (!p.isEmpty()) cleanParts.append(p);
+                    cur.clear();
+                }
+            } else {
+                cur.append(ch);
+            }
         }
+        const QString tail = cur.trimmed();
+        if (!tail.isEmpty()) cleanParts.append(tail);
+
         if (cleanParts.size() >= 2) {
             createGroupChat(cleanParts, text);
             return;
@@ -13703,8 +13753,7 @@ void Backend::createGroupChat(const QStringList &addresses, const QString &messa
 
         const QString canonical = canonicalizeAddress(item);
         if (canonical.isEmpty()) continue;
-        const QString norm = normalizeHandle(canonical);
-        const QString dedupKey = norm.isEmpty() ? canonical.toLower() : norm;
+        const QString dedupKey = canonical.toLower();
         if (seenNorm.contains(dedupKey)) continue;
         seenNorm.insert(dedupKey);
         uniqueAddrs.append(canonical);
@@ -13716,13 +13765,13 @@ void Backend::createGroupChat(const QStringList &addresses, const QString &messa
         return;
     }
 
-    // Reuse an existing group chat matching the exact participant set
+    // Reuse an existing group chat matching the exact canonical participant set
     for (const ChatEntry &c : std::as_const(m_chats)) {
         if (!c.isGroup || c.participantHandles.size() < 2) continue;
         QSet<QString> existingSet;
         for (const QString &ph : c.participantHandles) {
-            const QString n = normalizeHandle(ph);
-            existingSet.insert(n.isEmpty() ? ph.trimmed().toLower() : n);
+            const QString canonPh = canonicalizeAddress(ph);
+            existingSet.insert((canonPh.isEmpty() ? ph.trimmed() : canonPh).toLower());
         }
         if (existingSet == seenNorm) {
             selectChat(c.guid);
@@ -13802,8 +13851,8 @@ void Backend::createGroupChat(const QStringList &addresses, const QString &messa
             createdGuid = data.value(QStringLiteral("chatGuid")).toString().trimmed();
         }
         if (createdGuid.isEmpty()) {
-            createdGuid = QStringLiteral("%1;+;group-%2")
-                              .arg(normSvc, QUuid::createUuid().toString(QUuid::Id128).left(12));
+            emit toastMessage(QStringLiteral("⚠ Failed to create group chat: server did not return a chat GUID"));
+            return;
         }
 
         const QString canonicalGuid = resolveCanonicalChatGuid(createdGuid);
@@ -13837,7 +13886,6 @@ void Backend::createGroupChat(const QStringList &addresses, const QString &messa
 
         selectChat(canonicalGuid);
         fetchChatsMetadata();
-        loadChatMessages(canonicalGuid);
     });
 }
 
@@ -16338,6 +16386,24 @@ void Backend::startVoiceRecording() {
                     dshowName = ins.first().description();
                 }
 #endif
+                if (dshowName.isEmpty()) {
+                    // Discover DirectShow audio capture device via bundled/system ffmpeg even without Qt Multimedia
+                    QProcess probe;
+                    probe.setProcessChannelMode(QProcess::MergedChannels);
+                    probe.start(ffmpegBin, {QStringLiteral("-hide_banner"), QStringLiteral("-list_devices"),
+                                            QStringLiteral("true"), QStringLiteral("-f"), QStringLiteral("dshow"),
+                                            QStringLiteral("-i"), QStringLiteral("dummy")});
+                    if (probe.waitForFinished(2500)) {
+                        const QString out = QString::fromUtf8(probe.readAll());
+                        static const QRegularExpression reDshowAudio(QStringLiteral(R"re("([^"]+)"\s*\(audio\))re"));
+                        const auto m = reDshowAudio.match(out);
+                        if (m.hasMatch()) {
+                            dshowName = m.captured(1).trimmed();
+                        }
+                    } else {
+                        probe.kill();
+                    }
+                }
                 if (!dshowName.isEmpty()) {
                     bin = ffmpegBin;
                     args << QStringLiteral("-y") << QStringLiteral("-loglevel") << QStringLiteral("error")

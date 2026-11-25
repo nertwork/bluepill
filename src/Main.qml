@@ -825,6 +825,7 @@ ApplicationWindow {
         target: backend
         function onSelectedChatChanged() {
             if (root.showThreadView && backend.selectedChatGuid !== root.threadChatGuid) root.closeThread()
+            if (composerSpellMenu.visible) composerSpellMenu.close()
         }
     }
     property string highlightGuid: ""
@@ -1367,7 +1368,7 @@ ApplicationWindow {
         }
     }
 
-    function submitNewChat(overrideAddress) {
+    function resolvedNewChatRecipients(overrideAddress) {
         var recipients = []
         var seen = ({})
         function pushAddr(raw) {
@@ -1401,7 +1402,11 @@ ApplicationWindow {
                 }
             }
         }
+        return recipients
+    }
 
+    function submitNewChat(overrideAddress) {
+        var recipients = root.resolvedNewChatRecipients(overrideAddress)
         if (recipients.length === 0) return
         var initialMsg = newChatText.text.trim()
         if (recipients.length >= 2) {
@@ -7451,6 +7456,8 @@ ApplicationWindow {
                                         composerSpellMenu.targetWord = word
                                         composerSpellMenu.wordStart = start
                                         composerSpellMenu.wordEnd = end
+                                        composerSpellMenu.targetChatGuid = backend.selectedChatGuid
+                                        composerSpellMenu.targetDraftSnapshot = txt
                                         composerSpellMenu.suggestions = spellChecker.spellingSuggestions(word) || []
                                         var pt = composerInput.mapToItem(root.contentItem, mouse.x, mouse.y)
                                         composerSpellMenu.x = Math.max(12, Math.min(pt.x, root.width - composerSpellMenu.width - 12))
@@ -10474,8 +10481,10 @@ ApplicationWindow {
                         Text {
                             anchors.centerIn: parent
                             text: {
+                                // Reference reactive properties so QML re-evaluates on chip or input edits
+                                void (root.newChatRecipients.length + newChatRecipient.text.length + root.newChatSelectedHandle.length)
                                 var hasMsg = newChatText.text.trim().length > 0
-                                if (root.newChatRecipients.length >= 2) {
+                                if (root.resolvedNewChatRecipients("").length >= 2) {
                                     return hasMsg ? i18n.tr("Send Group Message") : i18n.tr("Start Group Chat")
                                 }
                                 return hasMsg ? i18n.tr("Send Message") : i18n.tr("Open Conversation")
@@ -16704,6 +16713,8 @@ ApplicationWindow {
         property string targetWord: ""
         property int wordStart: 0
         property int wordEnd: 0
+        property string targetChatGuid: ""
+        property string targetDraftSnapshot: ""
         property var suggestions: []
         modal: false
         focus: true
@@ -16747,7 +16758,10 @@ ApplicationWindow {
                             var full = composerInput.text
                             var s = composerSpellMenu.wordStart
                             var e = composerSpellMenu.wordEnd
-                            if (s >= 0 && e >= s && e <= full.length) {
+                            var sameContext = (backend.selectedChatGuid === composerSpellMenu.targetChatGuid &&
+                                               full === composerSpellMenu.targetDraftSnapshot)
+                            if (sameContext && s >= 0 && e >= s && e <= full.length &&
+                                full.slice(s, e) === composerSpellMenu.targetWord) {
                                 composerInput.text = full.slice(0, s) + modelData + full.slice(e)
                                 composerInput.cursorPosition = s + modelData.length
                             }
