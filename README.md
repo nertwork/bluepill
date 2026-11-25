@@ -42,16 +42,16 @@
 
 ## Screenshots
 
-### Active Conversation — Pinned Chats Bar, Multi-Photo Gallery, Tapbacks, Edited/Confetti Badges & 1-Click 2FA OTP Copy Pill
+### Active Conversation — Upper-Corner Tapbacks, Multi-Photo Gallery, 1-Click 2FA OTP & Sleek Pill Composer
 ![Active Conversation](docs/screenshots/chat-conversation.png)
 
-### BluePill Home Dashboard — Sync Window Presets, Web UI Launcher, Server Setup & Unread Summary
-![BluePill Home Dashboard](docs/screenshots/home-dashboard.png)
+### Clean Home View & Quick Conversation Launcher (`Ctrl+N`)
+![BluePill Home View](docs/screenshots/home-dashboard.png)
 
-### Built-In Full-Window Photo Lightbox & Gallery Viewer
+### Decluttered Proportional Photo Lightbox & Thumbnail Strip
 ![Photo Lightbox Viewer](docs/screenshots/photo-viewer.png)
 
-### Responsive 50% Tiled Split-Window Layout (`920x860`)
+### Responsive 50% Tiled Split-Window Layout (`920x860` logical / `1840x1720` HiDPI)
 ![Responsive Split-Window Header](docs/screenshots/split-window-responsive.png)
 
 ---
@@ -97,11 +97,15 @@ bluepill --webui
 
 - **Pinned Conversations Bar:** Syncs pinned threads from macOS (`com.apple.messages.pinning.plist`) or lets you right-click any conversation to pin/unpin circular avatar tiles at the top of the sidebar.
 - **1-Click 2FA / OTP Verification Code Copy (`󰆏 Copy Code: 482910`):** Automatically extracts 4–8 digit verification codes and `G-XXXXXX` tokens from incoming SMS/iMessage texts (while ignoring years, phone numbers, and prices) and renders a 1-click copy pill inside the message bubble.
-- **iOS-Style Inline Media:** Photos keep their aspect ratio (scaled down, never cropped), GIFs and WebP animate inline and in the Photo Lightbox, and photos or one to three emoji sent without text are shown on their own, without a bubble.
-- **Edited, Expressive Send Effects & Delivery Failure Badges:** Displays `"· Edited"`, `"· sent with confetti / slam / lasers"`, and red `"⚠ Not Delivered"` indicators directly on message bubbles.
+- **iOS-Style Inline Media, Multi-Image Queuing & Proportional Viewers:** Photos keep their aspect ratio (scaled down, never cropped), GIFs and WebP animate inline and in the decluttered, proportionally sized Photo Lightbox, and photos or 1–3 emoji sent without text render cleanly without a bubble. Queue multiple pasted/attached images or embed iCloud/iMessage Photos directly in the composer (`sendAttachments()`), and browse Notes and Calendar in proportionally sized modal viewers.
+- **Right-Click Tapbacks, Upper-Corner Reactions & Multi-Message Selection:** Right-click any message bubble or photo to open the macOS Messages-style context popover (`❤️ 👍 👎 😂 ‼️ ❓ ➕` custom emoji picker, Reply, Edit, Copy / Copy Image, Copy Code, Unsend, Delete); reaction pills anchor cleanly to the upper-left (sent) / upper-right (received) corner of bubbles. Select multiple messages with `Ctrl+Click` or `Shift+Click` and press `Ctrl+C` (or **Copy** / **Copy with Names**) to copy them chronologically.
+- **Expressive Send Effects (`Slam`, `Loud`, `Gentle`, `Invisible Ink`, `Confetti`, `Lasers`, `Fireworks`, `Echo`):** Right-click the Send (`↑`) button or choose **Send with Effect** to send immediately or arm a dismissible effect pill (`✨ Sending with <Effect>`) above the composer, with full-viewport animations, click-to-reveal Invisible Ink, `"· Edited"` and `"· sent with ..."` indicators, and red `"⚠ Not Delivered"` alerts.
+- **Multi-Recipient Group Chat Creation & Compact Service Badges:** Start new 1:1 or group threads (`Ctrl+N`) using the chip/token `To:` bar (`Enter`, comma, or autocomplete click adds removable recipient chips; `Backspace` removes the last chip) backed by `POST /api/v1/chat/new`, with compact iMessage/SMS symbol badges in the sidebar and headers.
+- **Composer Spell Check, Custom Dictionary & macOS Grammar Assist:** Real-time spell-check underlines, right-click spelling suggestions, custom dictionary persistence (`~/.config/bluepill/dictionary.txt`), and macOS relay `NSSpellChecker` grammar/auto-suggest chips (`POST /api/v1/text/check`), all toggleable in **⚙ Settings → Appearance**.
+- **Native Audio Waveforms & Windows Voice Memo Recording (`Qt6::Multimedia`):** Renders interactive 28-bar voice memo waveforms across Linux and Windows (`Qt6::Multimedia` + bundled `ffmpeg.exe`) with in-process voice memo recording on Windows, Linux, and macOS.
 - **Non-Blocking Clipboard Image Copy (`󰆏 Copy Image` / Right-Click / `Ctrl+C`) & Instant Paste (`Ctrl+V`):**
-  - Copy any photo from a message bubble (`󰆏 Copy Image` in the action bar, right-click on the bubble or inline photo card, or `󰆏 Copy Image` / `Ctrl+C` in the Photo Lightbox) with `<0.5ms` GUI-thread response via header-only validation (`QImageReader::canRead()`), local `file://` URL staging (`m_lastCopiedImagePath`), and asynchronous background `QThreadPool` PNG encoding (`QImageWriter` compression level 1 piped to `wl-copy --type image/png`).
-  - Paste images across conversations (`Ctrl+V` or `Shift+Insert` in the message composer) using a `<0.1ms` zero-copy fast-path for in-app/local image files and direct raw byte stream writes for external Wayland screenshots (`wl-paste`).
+  - Copy any photo from a message bubble (`󰆏 Copy Image` in the right-click menu, right-click on an inline photo card, or `Copy` / `Ctrl+C` in the Photo Lightbox) with `<0.5ms` GUI-thread response via header-only validation (`QImageReader::canRead()`), local `file://` URL staging (`m_lastCopiedImagePath`), and asynchronous background `QThreadPool` PNG encoding (`QImageWriter` compression level 1 piped to `wl-copy --type image/png`).
+  - Paste and queue images across conversations (`Ctrl+V` or `Shift+Insert` in the message composer) using a `<0.1ms` zero-copy fast-path for in-app/local image files and direct raw byte stream writes for external Wayland screenshots (`wl-paste`).
 - **Clickable Scheme-Less SMS Shortlinks & Rich Multi-Paragraph Formatting:** Automatically linkifies both full `https://` URLs and scheme-less SMS/carrier domain links (e.g., `youngla.attn.tv/...`, `bit.ly/...`, `www.example.com/...`) while preserving `
 ` paragraph breaks as `<br/>` and opening links with debounced `Backend::openUrl()` (`QDesktopServices` + `xdg-open` fallback).
 - **Strict Per-Chat Optimistic Send & Off-Thread Cache Architecture:**
@@ -117,10 +121,11 @@ bluepill --webui
   - **Paginated & Full-Screen (`⛶ Full Screen`) iCloud Photos, Notes & Calendar** with customizable `24 / 60 / 120` items per page selector, custom scrollbar, and page navigator.
   - Full local macOS **Photos.app** library browser with instant preview, zoom, copy, and download, plus Apple **Calendar** events with schedule and day agendas.
   - `bluepill-server preflight` verifies macOS Full Disk Access for `NoteStore.sqlite`, `Calendar.sqlitedb`, and `Photos.sqlite`, and automatically enables/kickstarts `com.apple.photolibraryd` and `com.apple.cloudphotod` on macOS so iCloud `Photos.app` library assets and derivatives stay synced.
-- **Customizable Notifications, 6 Audio Ding Presets & Top-Left Red/Green Connection Indicator:**
+- **Customizable Notifications, System Tray, Auto-Updates & Calm Collapsible Settings:**
   - Eliminates spurious startup/historical/self-echo audio alerts via startup baseline (`m_initialSyncComplete`, `m_startupTimestamp`, `m_startupHighestRowId`), persistent `notifiedMessageGuids` in `state.json`, and active-chat focus mute (`notificationMuteWhenActive`).
-  - Configurable in **`⚙ Settings` (`Ctrl+,`) -> Notifications & Audio Ding** with toggles for **Desktop Banner**, **Audio Ding**, and **Mute Focused Chat**, **6 built-in synthesized `.wav` presets** (`Classic Chime`, `Crystal Ding`, `Tri-Tone Marimba`, `Soft Pop`, `Glass Ping`, `System Tone`), **`🔊 Preview Ding`**, and **`🔔 Test Alert`**.
-  - Top-left connection dot (and optional `showTopBarStatusPill` status pill) turn **Red (`Disconnected`)** immediately when offline and **Green (`Connected`)** when online, while the macOS Messages-inspired UI keeps the top bar minimal (compact **`≡` Filter menu**, borderless icon actions, and pill composer with unified **`+`** popover menu + automatic 3-attempt retry & `↻ Resend`). **`⚙ Settings` (`Ctrl+,`)** keeps basic cloud/appearance controls up front and tucks version details, history retention days, and manual URL/port/failover into collapsible **Advanced Options**, alongside a Mac-like **3-column circular Pinned Grid** (strictly explicit pins), sidebar **`📌` Pin/Unpin** hover actions, **Hover Tapback Action Bar** (`hoverMessageActions`), and **`➕` Custom Emoji Tapbacks**.
+  - Configurable in **`⚙ Settings` (`Ctrl+,`) -> Notifications** with toggles for **Desktop Banner**, **Audio Ding**, **Mute Focused Chat**, **Minimize to Tray on Close** (`minimizeToTrayOnClose`, default ON; use `Ctrl+Q` or tray **Quit** to exit), single-instance window wake, click-to-focus desktop notifications, and **6 built-in synthesized `.wav` presets** (`Classic Chime`, `Crystal Ding`, `Tri-Tone Marimba`, `Soft Pop`, `Glass Ping`, `System Tone`).
+  - Top-left connection dot turns **Red (`Disconnected`)**, **Yellow (`Mac needs Full Disk Access`)** when `chat.db` permissions are missing on macOS (`503 chat_db_unreadable`), and **Green (`Connected`)** when online. **`⚙ Settings` (`Ctrl+,`)** displays a header version badge and keeps Connection, Appearance, and Notifications tidy with collapsed-by-default accordions (`iCloud Hub Modules`, `Updates`, `Self-Hosted & Advanced`, `Interface & Layout`, `Audio Devices & Advanced Alerts`). First-run launches also present a one-time onboarding wizard (`onboardingCompleted`).
+  - **Auto-Updates ON by Default (Opt-Out Available):** Both the desktop client (`autoUpdateCheck`, including silent in-place Windows Inno Setup updates) and `bluepill-server` (`autoUpdate` in `~/.config/bluepill/server.json`, running on startup + every 6h) enable automatic update checks by default with explicit opt-out toggles (`BLUEPILL_AUTO_UPDATE=0` / `"autoUpdate": false` on macOS, or **Auto-Check Updates** in Settings).
 - **High-Contrast Darker Emerald RCS Sent Bubbles (`#1B5E3A`):** Vivid contrast and WCAG AA legibility for sent RCS messages against dark backgrounds, paired with `<0.5ms` non-blocking async clipboard image copy/paste.
 - **Full Headless JSON CLI (`bluepill`, `imsg` & `bluepill-server`):**
   ```bash
@@ -187,7 +192,9 @@ Every commit and Pull Request on `nertwork/bluepill` is verified by GitHub Actio
 
 ---
 
-## Community & Contributors
+## Community, Acknowledgments & Contributors
+
+**Starting Point & Foundation:** BluePill began as a native Linux/Windows client built on top of the **[BlueBubbles](https://bluebubbles.app/)** protocol, `BlueBubblesHelper` Private API ecosystem, and open-source community. Huge credit and thanks to the [BlueBubbles](https://github.com/BlueBubblesApp) maintainers and contributors whose pioneering work made iMessage on non-Apple desktops possible — BluePill remains 100% API-compatible with BlueBubbles Server (`1.9.x`) in tribute to that foundation.
 
 Thank you to everyone contributing code, bug reports, testing, and platform improvements to **BluePill**!
 

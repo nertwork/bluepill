@@ -16,12 +16,25 @@ ApplicationWindow {
     title: "BluePill"
     color: theme.background
 
+    onClosing: function(close) {
+        if (backend.shouldMinimizeToTrayOnClose()) {
+            close.accepted = false
+            root.hide()
+        }
+    }
+
     Connections {
         target: backend
         function onThemeModeChanged() {
             if (theme.themeMode !== backend.themeMode) {
                 theme.themeMode = backend.themeMode
             }
+        }
+        function onRequestRaiseWindow() {
+            root.show()
+            root.showNormal()
+            root.raise()
+            root.requestActivate()
         }
     }
 
@@ -82,6 +95,104 @@ ApplicationWindow {
     property string pinnedActionMessageGuid: ""
     // The photo that was right-clicked, so Copy Image copies that one
     property string pinnedActionAttachmentGuid: ""
+    property var selectedMessageGuids: ({})
+    property string selectionAnchorGuid: ""
+    readonly property int selectedMessageCount: Object.keys(selectedMessageGuids || ({})).length
+    property string _lastTriggeredMessageEffectSig: ""
+    readonly property bool hasSpellChecker: typeof spellChecker !== "undefined" && spellChecker !== null
+
+    function clearMessageSelection() {
+        root.selectedMessageGuids = ({})
+        root.selectionAnchorGuid = ""
+    }
+
+    function selectedMessageGuidList() {
+        var sel = root.selectedMessageGuids || ({})
+        var out = []
+        var keys = Object.keys(sel)
+        for (var i = 0; i < keys.length; ++i) {
+            if (sel[keys[i]]) out.push(keys[i])
+        }
+        return out
+    }
+
+    function toggleMessageSelected(guid) {
+        var g = (guid || "").trim()
+        if (g.length === 0) return
+        var next = Object.assign({}, root.selectedMessageGuids || ({}))
+        if (next[g]) {
+            delete next[g]
+        } else {
+            next[g] = true
+            root.selectionAnchorGuid = g
+        }
+        root.selectedMessageGuids = next
+    }
+
+    function selectMessageRangeTo(targetIndex) {
+        if (targetIndex < 0 || targetIndex >= messageListView.count) return
+        var targetItem = backend.messageListModel.get(targetIndex)
+        var targetGuid = (targetItem && targetItem.guid) ? String(targetItem.guid) : ""
+        if (targetGuid.length === 0) return
+        var anchorIdx = -1
+        if (root.selectionAnchorGuid.length > 0) {
+            for (var i = 0; i < messageListView.count; ++i) {
+                var row = backend.messageListModel.get(i)
+                if (row && row.guid === root.selectionAnchorGuid) {
+                    anchorIdx = i
+                    break
+                }
+            }
+        }
+        if (anchorIdx < 0) {
+            var single = Object.assign({}, root.selectedMessageGuids || ({}))
+            single[targetGuid] = true
+            root.selectedMessageGuids = single
+            root.selectionAnchorGuid = targetGuid
+            return
+        }
+        var lo = Math.min(anchorIdx, targetIndex)
+        var hi = Math.max(anchorIdx, targetIndex)
+        var next = Object.assign({}, root.selectedMessageGuids || ({}))
+        for (var k = lo; k <= hi; ++k) {
+            var item = backend.messageListModel.get(k)
+            if (item && item.guid) {
+                next[item.guid] = true
+            }
+        }
+        root.selectedMessageGuids = next
+    }
+
+    function acceptComposerInlineSuggestion() {
+        if (!root.hasSpellChecker || !spellChecker.autoSuggestEnabled) return false
+        var suggestion = (spellChecker.inlineSuggestion || "").trim()
+        if (suggestion.length === 0) return false
+        var pos = composerInput.cursorPosition
+        var full = composerInput.text
+        var before = full.slice(0, pos)
+        var after = full.slice(pos)
+        var replacedBefore = before
+        if (suggestion.indexOf(" ") === -1) {
+            var m = before.match(/([A-Za-z'’-]+)$/)
+            if (m && m[1].length > 0) {
+                replacedBefore = before.slice(0, before.length - m[1].length) + suggestion
+            } else {
+                replacedBefore = before + ((before.length > 0 && !/\s$/.test(before)) ? " " : "") + suggestion
+            }
+        } else {
+            var m2 = before.match(/([A-Za-z'’-]+)$/)
+            if (m2 && suggestion.toLowerCase().indexOf(m2[1].toLowerCase()) === 0) {
+                replacedBefore = before.slice(0, before.length - m2[1].length) + suggestion
+            } else {
+                replacedBefore = before + ((before.length > 0 && !/\s$/.test(before)) ? " " : "") + suggestion
+            }
+        }
+        composerInput.text = replacedBefore + after
+        composerInput.cursorPosition = replacedBefore.length
+        spellChecker.clearAssist()
+        composerInput.forceActiveFocus()
+        return true
+    }
     property bool showTapbackEmojiPicker: false
     property string tapbackEmojiTargetGuid: ""
     property string tapbackEmojiQuery: ""
@@ -467,19 +578,19 @@ ApplicationWindow {
 
     function triggerExpressiveEffect(effectText) {
         var eff = (effectText || "").toLowerCase()
-        if (eff.indexOf("confetti") !== -1) {
+        if (eff.indexOf("confetti") !== -1 || eff.indexOf("ckconfettieffect") !== -1) {
             root.activeScreenEffect = "confetti"
             screenEffectTimer.restart()
             effectAnim.restart()
-        } else if (eff.indexOf("firework") !== -1) {
+        } else if (eff.indexOf("firework") !== -1 || eff.indexOf("ckfireworkseffect") !== -1) {
             root.activeScreenEffect = "fireworks"
             screenEffectTimer.restart()
             effectAnim.restart()
-        } else if (eff.indexOf("laser") !== -1) {
+        } else if (eff.indexOf("laser") !== -1 || eff.indexOf("cklaserseffect") !== -1) {
             root.activeScreenEffect = "lasers"
             screenEffectTimer.restart()
             effectAnim.restart()
-        } else if (eff.indexOf("balloon") !== -1) {
+        } else if (eff.indexOf("balloon") !== -1 || eff.indexOf("happybirthday") !== -1) {
             root.activeScreenEffect = "balloons"
             screenEffectTimer.restart()
             effectAnim.restart()
@@ -487,7 +598,7 @@ ApplicationWindow {
             root.activeScreenEffect = "hearts"
             screenEffectTimer.restart()
             effectAnim.restart()
-        } else if (eff.indexOf("echo") !== -1) {
+        } else if (eff.indexOf("echo") !== -1 || eff.indexOf("ckechoeffect") !== -1) {
             root.activeScreenEffect = "echo"
             screenEffectTimer.restart()
             effectAnim.restart()
@@ -1168,7 +1279,77 @@ ApplicationWindow {
     property var newChatSuggestions: []
     property int newChatSelectedIndex: 0
     property string newChatSelectedHandle: ""
+    property var newChatRecipients: []
     property var sidebarContactMatches: []
+
+    function normalizeRecipientAddress(raw) {
+        var s = (raw || "").trim()
+        var m = s.match(/<([^>]+)>/)
+        if (m && m[1]) s = m[1].trim()
+        return s
+    }
+
+    function addNewChatRecipient(rawAddress, displayLabel) {
+        var addr = root.normalizeRecipientAddress(rawAddress)
+        if (addr.length === 0) return false
+        var label = (displayLabel || "").trim()
+        if (label.length === 0) label = addr
+        var normNew = addr.toLowerCase()
+        var existing = root.newChatRecipients || []
+        for (var i = 0; i < existing.length; ++i) {
+            var cur = existing[i]
+            var curAddr = typeof cur === "string" ? root.normalizeRecipientAddress(cur) : root.normalizeRecipientAddress(cur.address || cur.label || "")
+            if (curAddr.toLowerCase() === normNew) {
+                return false
+            }
+        }
+        var next = existing.slice()
+        next.push({ label: label, address: addr })
+        root.newChatRecipients = next
+        return true
+    }
+
+    function removeNewChatRecipientAt(index) {
+        var existing = root.newChatRecipients || []
+        if (index < 0 || index >= existing.length) return
+        var next = existing.slice()
+        next.splice(index, 1)
+        root.newChatRecipients = next
+    }
+
+    function commitPendingNewChatInput(preferSuggestion) {
+        var raw = newChatRecipient.text.trim()
+        if (raw.length === 0) return false
+        if (preferSuggestion && root.newChatSuggestions.length > 0) {
+            var sel = root.newChatSuggestions[root.newChatSelectedIndex] || root.newChatSuggestions[0]
+            var selAddr = sel ? (sel.address || sel.handle || "") : ""
+            var selName = sel ? (sel.displayName || sel.name || selAddr) : selAddr
+            if (selAddr.length > 0) {
+                root.addNewChatRecipient(selAddr, selName)
+                newChatRecipient.text = ""
+                root.newChatSelectedHandle = ""
+                root.newChatSelectedIndex = 0
+                root.refreshNewChatSuggestions()
+                return true
+            }
+        }
+        var parts = raw.split(/[,;]+/)
+        var added = false
+        for (var i = 0; i < parts.length; ++i) {
+            var p = parts[i].trim()
+            if (p.length > 0) {
+                root.addNewChatRecipient(p, p)
+                added = true
+            }
+        }
+        if (added) {
+            newChatRecipient.text = ""
+            root.newChatSelectedHandle = ""
+            root.newChatSelectedIndex = 0
+            root.refreshNewChatSuggestions()
+        }
+        return added
+    }
 
     function refreshNewChatSuggestions() {
         root.newChatSuggestions = backend.searchContacts(newChatRecipient.text, 8)
@@ -1187,20 +1368,48 @@ ApplicationWindow {
     }
 
     function submitNewChat(overrideAddress) {
-        var targetAddr = overrideAddress || ""
-        if (targetAddr.length === 0) {
-            if (root.newChatSelectedHandle.length > 0) {
-                targetAddr = root.newChatSelectedHandle
-            } else if (root.newChatSuggestions.length > 0) {
-                var sel = root.newChatSuggestions[root.newChatSelectedIndex] || root.newChatSuggestions[0]
-                targetAddr = sel.address || sel.handle || newChatRecipient.text.trim()
-            } else {
-                targetAddr = newChatRecipient.text.trim()
+        var recipients = []
+        var seen = ({})
+        function pushAddr(raw) {
+            var addr = root.normalizeRecipientAddress(raw)
+            if (addr.length === 0) return
+            var key = addr.toLowerCase()
+            if (!seen[key]) {
+                seen[key] = true
+                recipients.push(addr)
             }
         }
-        if (targetAddr.length === 0) return
+
+        var chips = root.newChatRecipients || []
+        for (var i = 0; i < chips.length; ++i) {
+            var item = chips[i]
+            pushAddr(typeof item === "string" ? item : (item.address || item.handle || item.label || ""))
+        }
+
+        if (overrideAddress && overrideAddress.length > 0) {
+            pushAddr(overrideAddress)
+        } else if (newChatRecipient.text.trim().length > 0) {
+            if (root.newChatSelectedHandle.length > 0) {
+                pushAddr(root.newChatSelectedHandle)
+            } else if (root.newChatSuggestions.length > 0 && chips.length === 0) {
+                var sel = root.newChatSuggestions[root.newChatSelectedIndex] || root.newChatSuggestions[0]
+                pushAddr(sel.address || sel.handle || newChatRecipient.text.trim())
+            } else {
+                var rawParts = newChatRecipient.text.split(/[,;]+/)
+                for (var p = 0; p < rawParts.length; ++p) {
+                    pushAddr(rawParts[p])
+                }
+            }
+        }
+
+        if (recipients.length === 0) return
         var initialMsg = newChatText.text.trim()
-        backend.startNewChat(targetAddr, initialMsg)
+        if (recipients.length >= 2) {
+            backend.createGroupChat(recipients, initialMsg, "")
+        } else {
+            backend.createNewChat(recipients[0], initialMsg)
+        }
+        root.newChatRecipients = []
         newChatRecipient.text = ""
         newChatText.text = ""
         root.newChatSelectedHandle = ""
@@ -1218,6 +1427,12 @@ ApplicationWindow {
             root.newChatSelectedIndex = 0
             root.refreshNewChatSuggestions()
             newChatRecipient.forceActiveFocus()
+        } else {
+            root.newChatRecipients = []
+            newChatRecipient.text = ""
+            newChatText.text = ""
+            root.newChatSelectedHandle = ""
+            root.newChatSelectedIndex = 0
         }
     }
 
@@ -1302,6 +1517,8 @@ ApplicationWindow {
             var sameConv = (root.lastDraftChatGuid === newGuid) || (root.lastDraftChatGuid !== "" && newGuid !== "" && backend.isSameConversation(root.lastDraftChatGuid, newGuid))
             if (!sameConv) {
                 root.clearActionMenu()
+                root.clearMessageSelection()
+                if (root.hasSpellChecker) spellChecker.clearAssist()
                 // The info card follows the conversation
                 if (root.showContactInfo) {
                     if (newGuid.length > 0) {
@@ -1869,8 +2086,12 @@ ApplicationWindow {
                 root.emojiAutocompleteResults = []
                 root.emojiShortcodePrefix = ""
                 root.emojiShortcodeStart = -1
+            } else if (composerSpellMenu.visible) {
+                composerSpellMenu.close()
             } else if (root.activeActionMessageGuid !== "") {
                 root.clearActionMenu()
+            } else if (root.selectedMessageCount > 0) {
+                root.clearMessageSelection()
             } else if (root.editTargetGuid !== "") {
                 root.cancelEditing()
             } else if (backend.recordingVoice || backend.hasRecordedVoiceMemo) {
@@ -1886,8 +2107,16 @@ ApplicationWindow {
         }
     }
     Shortcut {
+        sequence: "Ctrl+C"
+        enabled: !firstRunOnboardingModal.visible && !root.showPhotoViewer && !composerInput.activeFocus && !searchInput.activeFocus && root.selectedMessageCount > 0 && (!root.activeFocusItem || !root.activeFocusItem.selectedText || root.activeFocusItem.selectedText.length === 0)
+        onActivated: {
+            backend.copyMessagesToClipboard(root.selectedMessageGuidList(), false)
+            root.clearMessageSelection()
+        }
+    }
+    Shortcut {
         sequence: "Ctrl+Q"
-        onActivated: Qt.quit()
+        onActivated: backend.quitApplication()
     }
     Shortcut {
         sequence: "Ctrl+Shift+Delete"
@@ -4365,11 +4594,37 @@ ApplicationWindow {
                             }
                         }
 
+                        readonly property string resolvedEffectKey: (modelData.expressiveEffect || modelData.sendEffectLabel || modelData.expressiveSendStyleId || "").trim()
+                        property string _prevResolvedEffectKey: ""
+
+                        onResolvedEffectKeyChanged: {
+                            var eff = msgDelegate.resolvedEffectKey
+                            if (eff.length > 0 && eff !== msgDelegate._prevResolvedEffectKey) {
+                                msgDelegate._prevResolvedEffectKey = eff
+                                var g = modelData.guid || modelData.tempGuid || ""
+                                var sig = g + "|" + eff.toLowerCase()
+                                if (index === messageListView.count - 1 && root._lastTriggeredMessageEffectSig !== sig) {
+                                    root._lastTriggeredMessageEffectSig = sig
+                                    playBubbleEffect(eff)
+                                    root.triggerExpressiveEffect(eff)
+                                }
+                            }
+                        }
+
                         Component.onCompleted: {
-                            var eff = modelData.expressiveEffect || modelData.sendEffectLabel || ""
-                            if (eff.length > 0 && modelData.isFromMe && index === messageListView.count - 1) {
-                                playBubbleEffect(eff)
-                                root.triggerExpressiveEffect(eff)
+                            var eff = msgDelegate.resolvedEffectKey
+                            msgDelegate._prevResolvedEffectKey = eff
+                            if (eff.length > 0 && index === messageListView.count - 1) {
+                                var recentIncoming = (Date.now() - Number(modelData.dateCreated || 0)) < 15000
+                                if (modelData.isFromMe || recentIncoming) {
+                                    var g = modelData.guid || modelData.tempGuid || ""
+                                    var sig = g + "|" + eff.toLowerCase()
+                                    if (root._lastTriggeredMessageEffectSig !== sig) {
+                                        root._lastTriggeredMessageEffectSig = sig
+                                        playBubbleEffect(eff)
+                                        root.triggerExpressiveEffect(eff)
+                                    }
+                                }
                             }
                         }
 
@@ -4941,6 +5196,48 @@ ApplicationWindow {
                                         }
 
                                         Rectangle {
+                                            id: selectMsgBtn
+                                            objectName: "selectMsgBtn"
+                                            Layout.fillWidth: true
+                                            height: 30
+                                            radius: 6
+                                            color: selectBtnMouse.containsMouse ? theme.selection : "transparent"
+
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 8
+                                                anchors.rightMargin: 8
+                                                spacing: 8
+                                                Text {
+                                                    text: (msgDelegate.modelData.guid && root.selectedMessageGuids && root.selectedMessageGuids[msgDelegate.modelData.guid]) ? "☑" : "☐"
+                                                    font.pixelSize: theme.fontSize - 1
+                                                    color: theme.accent
+                                                }
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: (msgDelegate.modelData.guid && root.selectedMessageGuids && root.selectedMessageGuids[msgDelegate.modelData.guid])
+                                                          ? i18n.tr("Deselect")
+                                                          : i18n.tr("Select")
+                                                    font.pixelSize: theme.fontSize - 2
+                                                    font.bold: true
+                                                    color: theme.brightForeground
+                                                }
+                                            }
+
+                                            MouseArea {
+                                                id: selectBtnMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    var mGuid = msgDelegate.modelData.guid
+                                                    root.clearActionMenu()
+                                                    root.toggleMessageSelected(mGuid)
+                                                }
+                                            }
+                                        }
+
+                                        Rectangle {
                                             id: deleteMsgBtn
                                             Layout.fillWidth: true
                                             height: 30
@@ -4988,6 +5285,19 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     objectName: "messageBubbleRect"
                                     radius: theme.radius + 2
+                                    readonly property bool isMultiSelected: Boolean(modelData.guid && root.selectedMessageGuids && root.selectedMessageGuids[modelData.guid])
+
+                                    // Multi-message selection tint & border ring
+                                    Rectangle {
+                                        objectName: "multiSelectHighlightRing"
+                                        anchors.fill: parent
+                                        radius: parent.radius
+                                        color: bubbleRect.isMultiSelected ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.20) : "transparent"
+                                        border.width: bubbleRect.isMultiSelected ? 2 : 0
+                                        border.color: theme.accent
+                                        z: 9
+                                        visible: bubbleRect.isMultiSelected
+                                    }
 
                                     // Flash after jumping here from a thread
                                     Rectangle {
@@ -5005,12 +5315,14 @@ ApplicationWindow {
                                            : (modelData.isFromMe
                                               ? (msgDelegate.isGreenService ? theme.outgoingGreenBubble : theme.outgoingBlueBubble)
                                               : theme.incomingBubble)
-                                    border.width: msgDelegate.isBubbleless ? 0 : 1  // no outline on bare photos/emoji, even with actions open
-                                    border.color: (root.activeActionMessageGuid === modelData.guid)
-                                                  ? theme.brightForeground
-                                                  : (modelData.isFromMe
-                                                     ? (msgDelegate.isGreenService ? theme.outgoingGreenBorder : theme.outgoingBlueBorder)
-                                                     : theme.incomingBubbleBorder)
+                                    border.width: msgDelegate.isBubbleless ? 0 : (bubbleRect.isMultiSelected ? 2 : 1)  // no outline on bare photos/emoji, even with actions open
+                                    border.color: bubbleRect.isMultiSelected
+                                                  ? theme.accent
+                                                  : ((root.activeActionMessageGuid === modelData.guid)
+                                                     ? theme.brightForeground
+                                                     : (modelData.isFromMe
+                                                        ? (msgDelegate.isGreenService ? theme.outgoingGreenBorder : theme.outgoingBlueBorder)
+                                                        : theme.incomingBubbleBorder))
                                     implicitWidth: msgDelegate.isBubbleless ? bubbleContent.width : Math.max(bubbleContent.width + 28, 96)
                                     implicitHeight: msgDelegate.isBubbleless ? bubbleContent.height : bubbleContent.height + 20
 
@@ -5053,10 +5365,21 @@ ApplicationWindow {
                                                 root.pinnedActionAttachmentGuid = ""
                                                 return
                                             }
+                                            if (mouse.modifiers & Qt.ShiftModifier) {
+                                                root.clearActionMenu()
+                                                root.selectMessageRangeTo(msgDelegate.index)
+                                                return
+                                            }
+                                            if (mouse.modifiers & Qt.ControlModifier) {
+                                                root.clearActionMenu()
+                                                root.toggleMessageSelected(modelData.guid)
+                                                return
+                                            }
                                             // Left-click just dismisses an open action bar
                                             if (root.pinnedActionMessageGuid !== "") root.clearActionMenu()
                                         }
                                         onDoubleClicked: (mouse) => {
+                                            if ((mouse.modifiers & Qt.ControlModifier) || (mouse.modifiers & Qt.ShiftModifier)) return
                                             var cGuid = backend.selectedChatGuid
                                             var mGuid = modelData.guid
                                             root.clearActionMenu()
@@ -5200,6 +5523,16 @@ ApplicationWindow {
                                                             const reopen = root.pinnedActionMessageGuid !== mg || root.pinnedActionAttachmentGuid !== (modelData.guid || "")
                                                             root.pinnedActionMessageGuid = reopen ? mg : ""
                                                             root.pinnedActionAttachmentGuid = reopen ? (modelData.guid || "") : ""
+                                                            return
+                                                        }
+                                                        if (mouse.modifiers & Qt.ShiftModifier) {
+                                                            root.clearActionMenu()
+                                                            root.selectMessageRangeTo(msgDelegate.index)
+                                                            return
+                                                        }
+                                                        if (mouse.modifiers & Qt.ControlModifier) {
+                                                            root.clearActionMenu()
+                                                            root.toggleMessageSelected(msgDelegate.modelData.guid)
                                                             return
                                                         }
                                                         var rawList = imageAttachmentRepeater.model || []
@@ -5535,8 +5868,20 @@ ApplicationWindow {
                                                 }
 
                                                 TapHandler {
+                                                    id: msgTextTapHandler
                                                     acceptedButtons: Qt.LeftButton
                                                     onTapped: (eventPoint) => {
+                                                        var mods = msgTextTapHandler.point.modifiers
+                                                        if (mods & Qt.ShiftModifier) {
+                                                            root.clearActionMenu()
+                                                            root.selectMessageRangeTo(msgDelegate.index)
+                                                            return
+                                                        }
+                                                        if (mods & Qt.ControlModifier) {
+                                                            root.clearActionMenu()
+                                                            root.toggleMessageSelected(modelData.guid)
+                                                            return
+                                                        }
                                                         // A left tap in the text closes an open action bar (a drag-select isn't a tap)
                                                         if (root.pinnedActionMessageGuid !== "") root.clearActionMenu()
                                                         var lnk = msgText.linkAt(eventPoint.position.x, eventPoint.position.y)
@@ -5556,6 +5901,10 @@ ApplicationWindow {
                                                     if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_C) {
                                                         if (msgText.selectedText.length > 0) {
                                                             backend.copyToClipboard(msgText.selectedText, "selection")
+                                                            event.accepted = true
+                                                        } else if (root.selectedMessageCount > 0) {
+                                                            backend.copyMessagesToClipboard(root.selectedMessageGuidList(), false)
+                                                            root.clearMessageSelection()
                                                             event.accepted = true
                                                         }
                                                     } else if (event.key === Qt.Key_PageUp) {
@@ -6770,6 +7119,206 @@ ApplicationWindow {
 
                 }
 
+                // Multi-Message Selection Floating Action Bar above Composer (#87)
+                Rectangle {
+                    id: multiSelectBar
+                    objectName: "multiSelectBar"
+                    visible: backend.selectedChatGuid.length > 0 && root.selectedMessageCount > 0
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 42
+                    color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.14)
+
+                    Rectangle {
+                        anchors.top: parent.top
+                        width: parent.width
+                        height: 1
+                        color: theme.accent
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 14
+                        spacing: 8
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.selectedMessageCount + " " + i18n.tr("selected")
+                            font.pixelSize: theme.fontSize - 1
+                            font.bold: true
+                            color: theme.brightForeground
+                            elide: Text.ElideRight
+                        }
+
+                        Rectangle {
+                            id: multiSelectCopyBtn
+                            objectName: "multiSelectCopyBtn"
+                            height: 28
+                            implicitWidth: multiCopyTxt.implicitWidth + 18
+                            radius: 14
+                            color: multiCopyMouse.containsMouse ? theme.accent : theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.accent
+                            Text {
+                                id: multiCopyTxt
+                                anchors.centerIn: parent
+                                text: i18n.tr("Copy")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: multiCopyMouse.containsMouse ? theme.onAccent : theme.brightForeground
+                            }
+                            MouseArea {
+                                id: multiCopyMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    backend.copyMessagesToClipboard(root.selectedMessageGuidList(), false)
+                                    root.clearMessageSelection()
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            id: multiSelectCopyNamesBtn
+                            objectName: "multiSelectCopyNamesBtn"
+                            height: 28
+                            implicitWidth: multiCopyNamesTxt.implicitWidth + 18
+                            radius: 14
+                            color: multiCopyNamesMouse.containsMouse ? theme.accent : theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.accent
+                            Text {
+                                id: multiCopyNamesTxt
+                                anchors.centerIn: parent
+                                text: i18n.tr("Copy with Names")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: multiCopyNamesMouse.containsMouse ? theme.onAccent : theme.brightForeground
+                            }
+                            MouseArea {
+                                id: multiCopyNamesMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    backend.copyMessagesToClipboard(root.selectedMessageGuidList(), true)
+                                    root.clearMessageSelection()
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            id: multiSelectCancelBtn
+                            objectName: "multiSelectCancelBtn"
+                            height: 28
+                            implicitWidth: multiCancelTxt.implicitWidth + 16
+                            radius: 14
+                            color: multiCancelMouse.containsMouse ? theme.selection : theme.background
+                            border.width: 1
+                            border.color: theme.muted
+                            Text {
+                                id: multiCancelTxt
+                                anchors.centerIn: parent
+                                text: i18n.tr("Cancel")
+                                font.pixelSize: theme.fontSize - 2
+                                color: theme.foreground
+                            }
+                            MouseArea {
+                                id: multiCancelMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.clearMessageSelection()
+                            }
+                        }
+                    }
+                }
+
+                // Inline Auto-Suggest & Grammar Hint Chip Bar above Composer (#88)
+                Rectangle {
+                    id: composerAssistBar
+                    objectName: "composerAssistBar"
+                    readonly property string activeSuggestion: (root.hasSpellChecker && spellChecker.autoSuggestEnabled) ? (spellChecker.inlineSuggestion || "") : ""
+                    readonly property string activeGrammarHint: (root.hasSpellChecker && spellChecker.autoSuggestEnabled) ? (spellChecker.grammarHint || "") : ""
+                    visible: backend.selectedChatGuid.length > 0 && (activeSuggestion.length > 0 || activeGrammarHint.length > 0)
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 34
+                    color: theme.darkBackground
+
+                    Rectangle {
+                        anchors.top: parent.top
+                        width: parent.width
+                        height: 1
+                        color: theme.subtleBorder
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 14
+                        spacing: 8
+
+                        Rectangle {
+                            id: inlineSuggestionChip
+                            objectName: "inlineSuggestionChip"
+                            visible: composerAssistBar.activeSuggestion.length > 0
+                            height: 24
+                            radius: 12
+                            implicitWidth: Math.min(composerAssistBar.width - 28, suggestChipTxt.implicitWidth + 20)
+                            color: suggestChipMouse.containsMouse
+                                   ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.28)
+                                   : Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.14)
+                            border.width: 1
+                            border.color: theme.accent
+
+                            Text {
+                                id: suggestChipTxt
+                                anchors.centerIn: parent
+                                width: Math.min(implicitWidth, parent.width - 14)
+                                text: "✨ " + composerAssistBar.activeSuggestion + "  · Tab"
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: true
+                                color: theme.brightForeground
+                                elide: Text.ElideRight
+                            }
+
+                            MouseArea {
+                                id: suggestChipMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.acceptComposerInlineSuggestion()
+                            }
+                        }
+
+                        Rectangle {
+                            id: grammarHintChip
+                            objectName: "grammarHintChip"
+                            visible: composerAssistBar.activeGrammarHint.length > 0
+                            height: 24
+                            radius: 12
+                            Layout.maximumWidth: composerAssistBar.width - (inlineSuggestionChip.visible ? inlineSuggestionChip.width + 36 : 28)
+                            implicitWidth: Math.min(Layout.maximumWidth, grammarHintTxt.implicitWidth + 18)
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.muted
+
+                            Text {
+                                id: grammarHintTxt
+                                anchors.centerIn: parent
+                                width: Math.min(implicitWidth, parent.width - 12)
+                                text: "💡 " + composerAssistBar.activeGrammarHint
+                                font.pixelSize: theme.fontSize - 3
+                                color: theme.foreground
+                                elide: Text.ElideRight
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+                    }
+                }
+
                 // Bottom Message Composer Bar (macOS Messages pill composer with unified + menu)
                 Rectangle {
                     visible: backend.selectedChatGuid.length > 0
@@ -6860,10 +7409,55 @@ ApplicationWindow {
                                 background: Item {}
 
                                 readOnly: root.showPhotoViewer
+                                Component.onCompleted: {
+                                    if (root.hasSpellChecker) {
+                                        spellChecker.attachToDocument(composerInput.textDocument)
+                                    }
+                                }
                                 onTextChanged: {
                                     root.updateEmojiAutocomplete()
+                                    if (root.hasSpellChecker) {
+                                        spellChecker.requestAssist(composerInput.text)
+                                    }
                                 }
                                 onCursorPositionChanged: root.updateEmojiAutocomplete()
+
+                                MouseArea {
+                                    id: composerSpellRightClickArea
+                                    anchors.fill: parent
+                                    acceptedButtons: Qt.RightButton
+                                    onClicked: function(mouse) {
+                                        if (!root.hasSpellChecker || !spellChecker.spellCheckEnabled) return
+                                        var pos = composerInput.positionAt(mouse.x, mouse.y)
+                                        var txt = composerInput.text || ""
+                                        if (txt.length === 0) return
+                                        var isWordChar = function(ch) {
+                                            return /[A-Za-z0-9'’-]/.test(ch)
+                                        }
+                                        var idx = Math.max(0, Math.min(pos, txt.length - 1))
+                                        if (!isWordChar(txt.charAt(idx)) && pos > 0 && isWordChar(txt.charAt(pos - 1))) {
+                                            idx = pos - 1
+                                        }
+                                        if (!isWordChar(txt.charAt(idx))) return
+                                        var start = idx
+                                        while (start > 0 && isWordChar(txt.charAt(start - 1))) start--
+                                        var end = idx + 1
+                                        while (end < txt.length && isWordChar(txt.charAt(end))) end++
+                                        while (start < end && (txt.charAt(start) === "'" || txt.charAt(start) === "’" || txt.charAt(start) === "-")) start++
+                                        while (end > start && (txt.charAt(end - 1) === "'" || txt.charAt(end - 1) === "’" || txt.charAt(end - 1) === "-")) end--
+                                        if (end <= start) return
+                                        var word = txt.slice(start, end)
+                                        if (!spellChecker.isWordMisspelled(word)) return
+                                        composerSpellMenu.targetWord = word
+                                        composerSpellMenu.wordStart = start
+                                        composerSpellMenu.wordEnd = end
+                                        composerSpellMenu.suggestions = spellChecker.spellingSuggestions(word) || []
+                                        var pt = composerInput.mapToItem(root.contentItem, mouse.x, mouse.y)
+                                        composerSpellMenu.x = Math.max(12, Math.min(pt.x, root.width - composerSpellMenu.width - 12))
+                                        composerSpellMenu.y = Math.max(12, Math.min(pt.y - composerSpellMenu.height - 6, root.height - composerSpellMenu.height - 12))
+                                        composerSpellMenu.open()
+                                    }
+                                }
 
                                 Keys.priority: Keys.BeforeItem
                                 Keys.onPressed: function(event) {
@@ -6925,6 +7519,8 @@ ApplicationWindow {
                                     } else if (root.emojiAutocompleteResults.length > 0) {
                                         event.accepted = true
                                         root.applyEmojiAutocomplete(root.emojiAutocompleteResults[root.selectedEmojiIndex].emoji, true)
+                                    } else if (root.acceptComposerInlineSuggestion()) {
+                                        event.accepted = true
                                     } else {
                                         event.accepted = false
                                     }
@@ -7120,8 +7716,8 @@ ApplicationWindow {
         flags: Qt.Dialog
         title: (noteDetailTitleInput.text.trim().length > 0 ? noteDetailTitleInput.text.trim() : i18n.tr("Note Viewer")) + " - BluePill Notes"
         property bool isFullScreen: false
-        width: isFullScreen ? Math.max(640, root.width - 24) : Math.min(680, Math.max(480, Math.round(root.width * 0.65)))
-        height: isFullScreen ? Math.max(480, root.height - 24) : Math.min(520, Math.max(380, Math.round(root.height * 0.65)))
+        width: isFullScreen ? Math.max(640, root.width - 24) : Math.min(Math.max(640, root.width - 24), Math.max(680, Math.min(Math.round(root.width * 0.82), 1200)))
+        height: isFullScreen ? Math.max(480, root.height - 24) : Math.min(Math.max(480, root.height - 24), Math.max(520, Math.min(Math.round(root.height * 0.84), 900)))
         minimumWidth: 440
         minimumHeight: 340
         color: theme.darkBackground
@@ -7726,8 +8322,8 @@ ApplicationWindow {
         focus: true
         anchors.centerIn: parent
         property bool isFullScreen: false
-        width: isFullScreen ? Math.max(520, root.width - 20) : Math.min(960, Math.max(580, root.width - 80))
-        height: isFullScreen ? Math.max(400, root.height - 20) : Math.min(580, Math.max(400, root.height - 80))
+        width: isFullScreen ? Math.max(520, root.width - 24) : Math.min(root.width - 24, Math.max(Math.min(680, root.width - 24), Math.min(Math.round(root.width * 0.90), 1400)))
+        height: isFullScreen ? Math.max(400, root.height - 24) : Math.min(root.height - 24, Math.max(Math.min(520, root.height - 24), Math.min(Math.round(root.height * 0.88), 960)))
         readonly property bool compactNotesLayout: width < 760
         property int notesPage: 0
         property int notesPageSize: 20
@@ -7745,9 +8341,9 @@ ApplicationWindow {
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         background: Rectangle {
             color: theme.darkBackground
-            radius: icloudNotesPopup.isFullScreen ? 8 : (theme.radius + 4)
+            radius: icloudNotesPopup.isFullScreen ? 8 : 14
             border.width: 1
-            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.4)
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.35)
         }
 
         property string selectedNoteId: ""
@@ -8652,29 +9248,29 @@ ApplicationWindow {
         focus: true
         anchors.centerIn: parent
         property bool isFullScreen: false
-        width: isFullScreen ? Math.max(500, root.width - 20) : Math.min(840, Math.max(500, root.width - 80))
-        height: isFullScreen ? Math.max(400, root.height - 20) : Math.min(560, Math.max(380, root.height - 80))
+        width: isFullScreen ? Math.max(500, root.width - 24) : Math.min(root.width - 24, Math.max(Math.min(680, root.width - 24), Math.min(Math.round(root.width * 0.90), 1400)))
+        height: isFullScreen ? Math.max(400, root.height - 24) : Math.min(root.height - 24, Math.max(Math.min(520, root.height - 24), Math.min(Math.round(root.height * 0.88), 960)))
         property int eventsPage: 0
         property int eventsPageSize: 25
         readonly property int eventsPageCount: Math.max(1, Math.ceil((backend.icloudEvents ? backend.icloudEvents.length : 0) / Math.max(1, eventsPageSize)))
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         background: Rectangle {
             color: theme.darkBackground
-            radius: theme.radius + 4
+            radius: icloudCalendarPopup.isFullScreen ? 8 : 14
             border.width: 1
-            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.4)
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.35)
         }
 
         contentItem: ColumnLayout {
             anchors.fill: parent
-            anchors.margins: 16
+            anchors.margins: 18
             spacing: 12
 
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 6
+                spacing: 8
                 Text {
-                    text: "📅 " + i18n.tr("iCloud & Local Hub Calendar")
+                    text: "📅 " + i18n.tr("Calendar")
                     font.pixelSize: theme.fontSize + 3
                     font.bold: true
                     color: theme.brightForeground
@@ -8703,53 +9299,86 @@ ApplicationWindow {
                 Button {
                     id: calendarFullScreenBtn
                     objectName: "calendarFullScreenBtn"
-                    leftPadding: 8
-                    rightPadding: 8
+                    leftPadding: 12
+                    rightPadding: 12
+                    implicitHeight: 32
                     text: icloudCalendarPopup.width < 640
                           ? (icloudCalendarPopup.isFullScreen ? "🗗" : "⛶")
                           : (icloudCalendarPopup.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen")))
+                    contentItem: Text {
+                        text: parent.text
+                        font.pixelSize: theme.fontSize - 2
+                        font.bold: true
+                        color: theme.brightForeground
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        radius: 16
+                        color: parent.hovered ? theme.selection : theme.lighterBackground
+                        border.width: 1
+                        border.color: icloudCalendarPopup.isFullScreen ? theme.accent : theme.subtleBorder
+                    }
                     onClicked: icloudCalendarPopup.isFullScreen = !icloudCalendarPopup.isFullScreen
                 }
                 Button {
+                    leftPadding: 12
+                    rightPadding: 12
+                    implicitHeight: 32
                     text: "✕"
-                    leftPadding: 8
-                    rightPadding: 8
+                    contentItem: Text {
+                        text: parent.text
+                        font.pixelSize: theme.fontSize - 1
+                        font.bold: true
+                        color: parent.hovered ? "#ffffff" : theme.brightForeground
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        radius: 16
+                        color: parent.hovered ? "#c53b53" : theme.lighterBackground
+                        border.width: 1
+                        border.color: parent.hovered ? "#f7768e" : theme.subtleBorder
+                    }
                     onClicked: icloudCalendarPopup.close()
                 }
             }
 
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 48
+                Layout.preferredHeight: 52
                 color: theme.background
-                radius: 6
-                border.color: Qt.rgba(1, 1, 1, 0.1)
+                radius: 10
+                border.color: theme.subtleBorder
                 border.width: 1
 
                 RowLayout {
                     anchors.fill: parent
-                    anchors.margins: 6
+                    anchors.margins: 8
                     spacing: 8
 
                     TextField {
                         id: eventTitleInput
                         Layout.fillWidth: true
+                        implicitHeight: 36
                         placeholderText: i18n.tr("Event summary / title...")
                         color: theme.brightForeground
                         placeholderTextColor: theme.darkForeground
                         selectedTextColor: theme.brightForeground
                         selectionColor: theme.selection
+                        leftPadding: 10
+                        rightPadding: 10
                         background: Rectangle {
                             color: theme.darkBackground
-                            radius: 5
+                            radius: 8
                             border.width: 1
-                            border.color: eventTitleInput.activeFocus ? theme.accent : Qt.rgba(1, 1, 1, 0.14)
+                            border.color: eventTitleInput.activeFocus ? theme.accent : theme.subtleBorder
                         }
                     }
 
                     ThemedComboBox {
                         id: eventCalendarSelector
-                        Layout.preferredWidth: 120
+                        Layout.preferredWidth: 128
                         model: {
                             var cals = backend.icloudCalendars || []
                             var names = []
@@ -8762,7 +9391,24 @@ ApplicationWindow {
                     }
 
                     Button {
+                        implicitHeight: 34
+                        leftPadding: 12
+                        rightPadding: 12
                         text: "+1h"
+                        contentItem: Text {
+                            text: parent.text
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.brightForeground
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            radius: 17
+                            color: parent.hovered ? theme.selection : theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.subtleBorder
+                        }
                         onClicked: {
                             if (eventTitleInput.text.trim().length === 0) return
                             var now = Date.now()
@@ -8772,7 +9418,22 @@ ApplicationWindow {
                     }
 
                     Button {
+                        implicitHeight: 34
+                        leftPadding: 14
+                        rightPadding: 14
                         text: "+ " + i18n.tr("Add Event")
+                        contentItem: Text {
+                            text: parent.text
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.onAccent
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            radius: 17
+                            color: parent.hovered ? Qt.lighter(theme.accent, 1.1) : theme.accent
+                        }
                         onClicked: {
                             if (eventTitleInput.text.trim().length === 0) return
                             var now = Date.now()
@@ -8914,8 +9575,8 @@ ApplicationWindow {
         anchors.centerIn: parent
         property bool isFullScreen: false
         property var selectedPhotos: ({})
-        width: isFullScreen ? Math.max(520, root.width - 20) : Math.min(960, Math.max(560, root.width - 80))
-        height: isFullScreen ? Math.max(400, root.height - 20) : Math.min(580, Math.max(400, root.height - 80))
+        width: isFullScreen ? Math.max(520, root.width - 24) : Math.min(root.width - 24, Math.max(Math.min(680, root.width - 24), Math.min(Math.round(root.width * 0.90), 1400)))
+        height: isFullScreen ? Math.max(400, root.height - 24) : Math.min(root.height - 24, Math.max(Math.min(520, root.height - 24), Math.min(Math.round(root.height * 0.88), 960)))
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         onOpened: {
             if (backend.icloudPhotosEnabled) {
@@ -8949,22 +9610,22 @@ ApplicationWindow {
         }
         background: Rectangle {
             color: theme.darkBackground
-            radius: theme.radius + 4
+            radius: icloudPhotosPopup.isFullScreen ? 8 : 14
             border.width: 1
-            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.4)
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.35)
         }
 
         contentItem: ColumnLayout {
             anchors.fill: parent
-            anchors.margins: 14
-            spacing: 10
+            anchors.margins: 18
+            spacing: 12
 
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 6
+                spacing: 8
                 Text {
-                    text: "☁️ " + i18n.tr("iCloud Photos")
-                    font.pixelSize: theme.fontSize + 2
+                    text: "🖼 " + i18n.tr("Photos")
+                    font.pixelSize: theme.fontSize + 3
                     font.bold: true
                     color: theme.brightForeground
                     elide: Text.ElideRight
@@ -9042,9 +9703,9 @@ ApplicationWindow {
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 rightMargin: 12
-                readonly property int gridCols: Math.max(2, Math.floor(Math.max(180, width - 14) / 182))
-                cellWidth: Math.max(172, Math.floor(Math.max(180, width - 14) / gridCols))
-                cellHeight: 234
+                readonly property int gridCols: Math.max(2, Math.floor(Math.max(220, width - 16) / 236))
+                cellWidth: Math.max(200, Math.floor(Math.max(220, width - 16) / gridCols))
+                cellHeight: Math.round(cellWidth * 1.08) + 46
                 model: backend.icloudPhotos
                 ScrollBar.vertical: ScrollBar {
                     id: photosGridScrollBar
@@ -9060,13 +9721,13 @@ ApplicationWindow {
                 }
 
                 delegate: Rectangle {
-                    width: Math.max(162, photosGridView.cellWidth - 10)
-                    height: 224
+                    width: Math.max(190, photosGridView.cellWidth - 10)
+                    height: photosGridView.cellHeight - 10
                     clip: true
-                    radius: 8
+                    radius: 12
                     color: theme.background
                     readonly property bool isPhotoSelected: Boolean(modelData && modelData.guid && icloudPhotosPopup.selectedPhotos && icloudPhotosPopup.selectedPhotos[modelData.guid])
-                    border.color: isPhotoSelected ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                    border.color: isPhotoSelected ? theme.accent : theme.subtleBorder
                     border.width: isPhotoSelected ? 2 : 1
 
                     Connections {
@@ -9081,12 +9742,12 @@ ApplicationWindow {
                     ColumnLayout {
                         anchors.fill: parent
                         anchors.margins: 6
-                        spacing: 4
+                        spacing: 6
 
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: modelData.isPortrait ? 124 : 102
-                            radius: 6
+                            Layout.fillHeight: true
+                            radius: 10
                             color: theme.darkBackground
                             clip: true
 
@@ -9095,10 +9756,10 @@ ApplicationWindow {
                                 property string baseSourceUrl: modelData.previewUrl || modelData.localUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
                                 property int retryAttempt: 0
                                 anchors.fill: parent
-                                anchors.margins: 2
-                                fillMode: Image.PreserveAspectFit
+                                fillMode: Image.PreserveAspectCrop
                                 autoTransform: true
                                 smooth: true
+                                sourceSize.width: Math.ceil(320 * Math.max(1, Screen.devicePixelRatio))
                                 source: {
                                     if (!baseSourceUrl) return ""
                                     if (retryAttempt <= 0) return baseSourceUrl
@@ -9128,7 +9789,7 @@ ApplicationWindow {
                             Text {
                                 anchors.centerIn: parent
                                 text: (Boolean(modelData.isVideo) || modelData.mediaType === "video") ? "🎬" : "🖼"
-                                font.pixelSize: 24
+                                font.pixelSize: 28
                                 visible: thumbImg.status !== Image.Ready
                             }
 
@@ -9136,60 +9797,41 @@ ApplicationWindow {
                                 visible: Boolean(modelData.isVideo) || modelData.mediaType === "video"
                                 anchors.left: parent.left
                                 anchors.bottom: parent.bottom
-                                anchors.margins: 4
-                                height: 18
-                                width: vidDurationText.implicitWidth + 8
-                                radius: 4
-                                color: Qt.rgba(0, 0, 0, 0.78)
+                                anchors.margins: 6
+                                height: 20
+                                width: vidDurationText.implicitWidth + 10
+                                radius: 10
+                                color: Qt.rgba(0, 0, 0, 0.72)
                                 Text {
                                     id: vidDurationText
                                     anchors.centerIn: parent
-                                    font.pixelSize: 9
+                                    font.pixelSize: 10
                                     font.bold: true
                                     color: "#ffffff"
                                     text: {
                                         var sec = Math.max(0, Math.round(Number(modelData.duration || 0)))
-                                        if (sec <= 0) return "🎬 Video"
+                                        if (sec <= 0) return "▶ Video"
                                         var m = Math.floor(sec / 60)
                                         var s = sec % 60
-                                        return "🎬 " + m + ":" + (s < 10 ? "0" : "") + s
+                                        return "▶ " + m + ":" + (s < 10 ? "0" : "") + s
                                     }
                                 }
                             }
 
-                            RowLayout {
+                            Rectangle {
+                                visible: Boolean(modelData.isCloudEvicted)
                                 anchors.top: parent.top
                                 anchors.right: parent.right
-                                anchors.margins: 4
-                                spacing: 4
-
-                                Rectangle {
-                                    height: 18
-                                    width: orientText.implicitWidth + 8
-                                    radius: 4
-                                    color: Qt.rgba(theme.background.r, theme.background.g, theme.background.b, 0.85)
-                                    border.color: Qt.rgba(theme.foreground.r, theme.foreground.g, theme.foreground.b, 0.25)
-                                    border.width: 1
-                                    Text {
-                                        id: orientText
-                                        anchors.centerIn: parent
-                                        text: modelData.isPortrait ? "▯ Portrait" : "▭ Landscape"
-                                        font.pixelSize: 9
-                                        color: theme.foreground
-                                    }
-                                }
-
-                                Rectangle {
-                                    width: 18
-                                    height: 18
-                                    radius: 9
-                                    color: modelData.isCloudEvicted ? theme.accent : theme.green
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: modelData.isCloudEvicted ? "☁" : "✓"
-                                        font.pixelSize: 10
-                                        color: theme.brightForeground
-                                    }
+                                anchors.margins: 6
+                                width: 22
+                                height: 22
+                                radius: 11
+                                color: Qt.rgba(0, 0, 0, 0.65)
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "☁"
+                                    font.pixelSize: 11
+                                    color: "#ffffff"
                                 }
                             }
 
@@ -9221,14 +9863,14 @@ ApplicationWindow {
                                 readonly property bool checked: Boolean(modelData.guid && icloudPhotosPopup.selectedPhotos && icloudPhotosPopup.selectedPhotos[modelData.guid])
                                 anchors.top: parent.top
                                 anchors.left: parent.left
-                                anchors.margins: 4
-                                width: 22
-                                height: 22
-                                radius: 11
+                                anchors.margins: 6
+                                width: 24
+                                height: 24
+                                radius: 12
                                 z: 5
-                                color: checked ? theme.accent : Qt.rgba(0, 0, 0, 0.6)
+                                color: checked ? theme.accent : Qt.rgba(0, 0, 0, 0.55)
                                 border.width: 1.5
-                                border.color: checked ? "#ffffff" : Qt.rgba(1, 1, 1, 0.75)
+                                border.color: checked ? "#ffffff" : Qt.rgba(1, 1, 1, 0.8)
 
                                 Text {
                                     anchors.centerIn: parent
@@ -9257,17 +9899,9 @@ ApplicationWindow {
                             }
                         }
 
-                        Text {
-                            Layout.fillWidth: true
-                            text: modelData.name || "Photo"
-                            font.pixelSize: theme.fontSize - 2
-                            color: theme.foreground
-                            elide: Text.ElideMiddle
-                        }
-
                         RowLayout {
                             Layout.fillWidth: true
-                            spacing: 4
+                            spacing: 6
 
                             Button {
                                 Layout.fillWidth: true
@@ -9275,8 +9909,8 @@ ApplicationWindow {
                                 implicitHeight: 30
                                 topPadding: 4
                                 bottomPadding: 4
-                                leftPadding: 4
-                                rightPadding: 4
+                                leftPadding: 8
+                                rightPadding: 8
                                 font.pixelSize: theme.fontSize - 3
                                 enabled: !modelData.isCloudEvicted || modelData.canUnpurge !== false
                                 text: {
@@ -9287,7 +9921,22 @@ ApplicationWindow {
                                         }
                                         return "☁ Unpurge"
                                     }
-                                    return isVid ? "▶ Video" : "View"
+                                    return isVid ? "▶ Video" : i18n.tr("View")
+                                }
+                                contentItem: Text {
+                                    text: parent.text
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: parent.enabled ? theme.brightForeground : theme.darkForeground
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                    elide: Text.ElideRight
+                                }
+                                background: Rectangle {
+                                    radius: 15
+                                    color: parent.hovered ? theme.selection : theme.lighterBackground
+                                    border.width: 1
+                                    border.color: theme.subtleBorder
                                 }
                                 onClicked: {
                                     if (!modelData.guid) return
@@ -9313,11 +9962,23 @@ ApplicationWindow {
                                 implicitHeight: 30
                                 topPadding: 4
                                 bottomPadding: 4
-                                leftPadding: 6
-                                rightPadding: 6
+                                leftPadding: 10
+                                rightPadding: 10
                                 font.pixelSize: theme.fontSize - 2
                                 text: "＋ " + i18n.tr("Attach")
                                 enabled: backend.selectedChatGuid !== "" && !!modelData.guid && !modelData.isCloudEvicted
+                                contentItem: Text {
+                                    text: parent.text
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: parent.enabled ? theme.onAccent : theme.darkForeground
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                background: Rectangle {
+                                    radius: 15
+                                    color: parent.enabled ? (parent.hovered ? Qt.lighter(theme.accent, 1.1) : theme.accent) : theme.lighterBackground
+                                }
                                 ToolTip.visible: hovered && backend.selectedChatGuid !== ""
                                 ToolTip.text: modelData.isCloudEvicted
                                               ? i18n.tr("Download from iCloud before attaching")
@@ -9469,10 +10130,10 @@ ApplicationWindow {
         }
 
         Rectangle {
-            width: 500
-            height: root.newChatSuggestions.length > 0 ? 500 : 280
+            width: Math.min(540, root.width - 36)
+            height: Math.min(root.height - 36, (root.newChatSuggestions.length > 0 ? 440 : 230) + toFieldContainer.height)
             anchors.centerIn: parent
-            radius: theme.radius + 2
+            radius: theme.radius + 4
             color: theme.darkBackground
             border.width: 1
             border.color: theme.accent
@@ -9485,69 +10146,157 @@ ApplicationWindow {
                 RowLayout {
                     Layout.fillWidth: true
                     Text {
-                        text: i18n.tr("New Message")
+                        text: root.newChatRecipients.length >= 2 ? i18n.tr("New Group Message") : i18n.tr("New Message")
                         font.pixelSize: theme.fontSize + 2
                         font.bold: true
                         color: theme.brightForeground
                     }
                     Item { Layout.fillWidth: true }
                     Text {
-                        text: i18n.tr("Type a name, phone, or email")
+                        text: root.newChatRecipients.length > 0
+                              ? (root.newChatRecipients.length + " " + i18n.tr("recipient(s) · add more or type message"))
+                              : i18n.tr("Enter or comma to add multiple recipients")
                         font.pixelSize: theme.fontSize - 3
                         color: theme.darkForeground
                     }
                 }
 
                 Rectangle {
+                    id: toFieldContainer
                     Layout.fillWidth: true
-                    height: Math.max(48, theme.fontSize + 28)
-                    Layout.preferredHeight: Math.max(48, theme.fontSize + 28)
+                    implicitHeight: Math.max(48, Math.min(136, toFieldFlow.implicitHeight + 12))
+                    Layout.preferredHeight: implicitHeight
                     radius: 8
                     color: theme.background
                     border.width: 1
                     border.color: newChatRecipient.activeFocus ? theme.accent : theme.muted
+                    clip: true
 
-                    TextField {
-                        id: newChatRecipient
-                        anchors.fill: parent
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 10
-                        topPadding: 8
-                        bottomPadding: 12
-                        verticalAlignment: TextInput.AlignVCenter
-                        placeholderText: i18n.tr("To: Type a contact name (e.g. Alex), phone, or email...")
-                        placeholderTextColor: theme.darkForeground
-                        color: theme.brightForeground
-                        font.pixelSize: theme.fontSize
-                        background: Item {}
-                        onTextChanged: {
-                            root.newChatSelectedHandle = ""
-                            root.refreshNewChatSuggestions()
-                        }
-                        Keys.onDownPressed: (event) => {
-                            if (root.newChatSuggestions.length > 0) {
-                                root.newChatSelectedIndex = Math.min(root.newChatSuggestions.length - 1, root.newChatSelectedIndex + 1)
-                                newChatSuggestionsList.positionViewAtIndex(root.newChatSelectedIndex, ListView.Contain)
-                                event.accepted = true
+                    Flow {
+                        id: toFieldFlow
+                        objectName: "newChatRecipientsFlow"
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: 6
+                        spacing: 6
+
+                        Repeater {
+                            model: root.newChatRecipients
+                            delegate: Rectangle {
+                                required property var modelData
+                                required property int index
+                                objectName: "newChatRecipientChip"
+                                height: 28
+                                radius: 14
+                                implicitWidth: Math.min(toFieldFlow.width - 12, chipRow.implicitWidth + 16)
+                                color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
+                                border.width: 1
+                                border.color: theme.accent
+
+                                RowLayout {
+                                    id: chipRow
+                                    anchors.centerIn: parent
+                                    width: Math.min(implicitWidth, parent.width - 12)
+                                    spacing: 6
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: typeof modelData === "string" ? modelData : (modelData.label || modelData.address || "")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        text: "×"
+                                        font.pixelSize: theme.fontSize
+                                        font.bold: true
+                                        color: chipRemoveMouse.containsMouse ? "#f7768e" : theme.foreground
+                                        MouseArea {
+                                            id: chipRemoveMouse
+                                            anchors.fill: parent
+                                            anchors.margins: -4
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                root.removeNewChatRecipientAt(index)
+                                                newChatRecipient.forceActiveFocus()
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                        Keys.onUpPressed: (event) => {
-                            if (root.newChatSuggestions.length > 0) {
-                                root.newChatSelectedIndex = Math.max(0, root.newChatSelectedIndex - 1)
-                                newChatSuggestionsList.positionViewAtIndex(root.newChatSelectedIndex, ListView.Contain)
-                                event.accepted = true
+
+                        TextField {
+                            id: newChatRecipient
+                            objectName: "newChatRecipient"
+                            width: Math.max(170, toFieldFlow.width - 8)
+                            height: 36
+                            leftPadding: 6
+                            rightPadding: 6
+                            topPadding: 8
+                            bottomPadding: 12
+                            verticalAlignment: TextInput.AlignVCenter
+                            placeholderText: root.newChatRecipients.length > 0
+                                             ? i18n.tr("Add another recipient...")
+                                             : i18n.tr("To: Type a contact name, phone, or email...")
+                            placeholderTextColor: theme.darkForeground
+                            color: theme.brightForeground
+                            font.pixelSize: theme.fontSize
+                            background: Item {}
+                            onTextChanged: {
+                                root.newChatSelectedHandle = ""
+                                if (text.indexOf(",") !== -1) {
+                                    var trailingComma = /,\s*$/.test(text)
+                                    var chunks = text.split(",")
+                                    var lastChunk = trailingComma ? "" : chunks.pop()
+                                    for (var c = 0; c < chunks.length; ++c) {
+                                        var entry = chunks[c].trim()
+                                        if (entry.length > 0) {
+                                            root.addNewChatRecipient(entry, entry)
+                                        }
+                                    }
+                                    text = lastChunk.trim()
+                                }
+                                root.refreshNewChatSuggestions()
                             }
-                        }
-                        Keys.onTabPressed: (event) => {
-                            if (root.newChatSuggestions.length > 0) {
-                                var item = root.newChatSuggestions[root.newChatSelectedIndex] || root.newChatSuggestions[0]
-                                newChatRecipient.text = (item.displayName || item.name) + " <" + (item.address || item.handle) + ">"
-                                root.newChatSelectedHandle = item.address || item.handle
+                            Keys.onPressed: (event) => {
+                                if (event.key === Qt.Key_Backspace && newChatRecipient.text.length === 0 && root.newChatRecipients.length > 0) {
+                                    root.removeNewChatRecipientAt(root.newChatRecipients.length - 1)
+                                    event.accepted = true
+                                }
+                            }
+                            Keys.onDownPressed: (event) => {
+                                if (root.newChatSuggestions.length > 0) {
+                                    root.newChatSelectedIndex = Math.min(root.newChatSuggestions.length - 1, root.newChatSelectedIndex + 1)
+                                    newChatSuggestionsList.positionViewAtIndex(root.newChatSelectedIndex, ListView.Contain)
+                                    event.accepted = true
+                                }
+                            }
+                            Keys.onUpPressed: (event) => {
+                                if (root.newChatSuggestions.length > 0) {
+                                    root.newChatSelectedIndex = Math.max(0, root.newChatSelectedIndex - 1)
+                                    newChatSuggestionsList.positionViewAtIndex(root.newChatSelectedIndex, ListView.Contain)
+                                    event.accepted = true
+                                }
+                            }
+                            Keys.onTabPressed: (event) => {
+                                if (root.newChatSuggestions.length > 0) {
+                                    root.commitPendingNewChatInput(true)
+                                }
                                 newChatText.forceActiveFocus()
                                 event.accepted = true
                             }
+                            onAccepted: {
+                                if (newChatRecipient.text.trim().length > 0) {
+                                    root.commitPendingNewChatInput(true)
+                                    newChatRecipient.forceActiveFocus()
+                                } else if (root.newChatRecipients.length > 0) {
+                                    root.submitNewChat("")
+                                }
+                            }
                         }
-                        onAccepted: root.submitNewChat("")
                     }
                 }
 
@@ -9654,7 +10403,13 @@ ApplicationWindow {
                                 onEntered: root.newChatSelectedIndex = index
                                 onClicked: {
                                     var addr = modelData.address || modelData.handle || ""
-                                    root.submitNewChat(addr)
+                                    var disp = modelData.displayName || modelData.name || addr
+                                    root.addNewChatRecipient(addr, disp)
+                                    newChatRecipient.text = ""
+                                    root.newChatSelectedHandle = ""
+                                    root.newChatSelectedIndex = 0
+                                    root.refreshNewChatSuggestions()
+                                    newChatRecipient.forceActiveFocus()
                                 }
                             }
                         }
@@ -9718,7 +10473,13 @@ ApplicationWindow {
                         color: theme.accent
                         Text {
                             anchors.centerIn: parent
-                            text: newChatText.text.trim().length > 0 ? i18n.tr("Send Message") : i18n.tr("Open Conversation")
+                            text: {
+                                var hasMsg = newChatText.text.trim().length > 0
+                                if (root.newChatRecipients.length >= 2) {
+                                    return hasMsg ? i18n.tr("Send Group Message") : i18n.tr("Start Group Chat")
+                                }
+                                return hasMsg ? i18n.tr("Send Message") : i18n.tr("Open Conversation")
+                            }
                             color: theme.onAccent
                             font.pixelSize: theme.fontSize - 1
                             font.bold: true
@@ -12291,6 +13052,90 @@ ApplicationWindow {
                             }
                         }
                     }
+
+                    // Composer Writing & Spell Check Settings (#88)
+                    ColumnLayout {
+                        id: composerAssistSettingsCol
+                        objectName: "composerAssistSettingsCol"
+                        Layout.fillWidth: true
+                        spacing: 6
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "✍️ " + i18n.tr("Composer")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.foreground
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Rectangle {
+                                id: toggleSpellCheckBtn
+                                objectName: "toggleSpellCheckBtn"
+                                Layout.fillWidth: true
+                                height: 34
+                                radius: 6
+                                enabled: root.hasSpellChecker
+                                opacity: enabled ? 1.0 : 0.5
+                                readonly property bool spellOn: root.hasSpellChecker && spellChecker.spellCheckEnabled
+                                color: spellOn ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                                border.width: 1
+                                border.color: spellOn ? theme.accent : theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: (parent.spellOn ? "✓ " : "○ ") + i18n.tr("Spell Check")
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: parent.spellOn
+                                    color: parent.spellOn ? theme.brightForeground : theme.darkForeground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    enabled: parent.enabled
+                                    onClicked: {
+                                        if (root.hasSpellChecker) {
+                                            spellChecker.spellCheckEnabled = !spellChecker.spellCheckEnabled
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                id: toggleAutoSuggestBtn
+                                objectName: "toggleAutoSuggestBtn"
+                                Layout.fillWidth: true
+                                height: 34
+                                radius: 6
+                                enabled: root.hasSpellChecker
+                                opacity: enabled ? 1.0 : 0.5
+                                readonly property bool suggestOn: root.hasSpellChecker && spellChecker.autoSuggestEnabled
+                                color: suggestOn ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                                border.width: 1
+                                border.color: suggestOn ? theme.accent : theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: (parent.suggestOn ? "✓ " : "○ ") + i18n.tr("Auto-Suggest & Grammar")
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: parent.suggestOn
+                                    color: parent.suggestOn ? theme.brightForeground : theme.darkForeground
+                                    elide: Text.ElideRight
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    enabled: parent.enabled
+                                    onClicked: {
+                                        if (root.hasSpellChecker) {
+                                            spellChecker.autoSuggestEnabled = !spellChecker.autoSuggestEnabled
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Customizable Notifications & Audio Alert Settings
@@ -12460,6 +13305,65 @@ ApplicationWindow {
                                     ToolTip.visible: quickPrevMouse.containsMouse
                                     ToolTip.text: i18n.tr("Preview selected sound")
                                     ToolTip.delay: 300
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: 1
+                                Layout.preferredHeight: 1
+                                color: theme.subtleBorder
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 2
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: "📥 " + i18n.tr("Minimize to Tray on Close")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: i18n.tr("Keep BluePill running in the system tray when closing the window")
+                                        font.pixelSize: theme.fontSize - 3
+                                        color: theme.darkForeground
+                                        elide: Text.ElideRight
+                                    }
+                                }
+
+                                Rectangle {
+                                    id: toggleMinimizeToTrayBtn
+                                    objectName: "toggleMinimizeToTrayBtn"
+                                    implicitWidth: Math.max(104, trayToggleTxt.implicitWidth + 24)
+                                    Layout.preferredWidth: Math.max(104, trayToggleTxt.implicitWidth + 24)
+                                    implicitHeight: 30
+                                    Layout.preferredHeight: 30
+                                    height: 30
+                                    radius: 15
+                                    color: backend.minimizeToTrayOnClose ? theme.accent : theme.background
+                                    border.width: 1
+                                    border.color: backend.minimizeToTrayOnClose ? theme.accent : theme.muted
+                                    Text {
+                                        id: trayToggleTxt
+                                        anchors.centerIn: parent
+                                        text: backend.minimizeToTrayOnClose ? ("✓ " + i18n.tr("Enabled")) : ("○ " + i18n.tr("Disabled"))
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: backend.minimizeToTrayOnClose ? theme.onAccent : theme.darkForeground
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.minimizeToTrayOnClose = !backend.minimizeToTrayOnClose
+                                    }
                                 }
                             }
                         }
@@ -13932,17 +14836,17 @@ ApplicationWindow {
             id: photoViewerCard
             objectName: "photoViewerCard"
             anchors.centerIn: parent
-            width: root.photoViewerFullScreen ? parent.width : Math.min(1040, Math.max(Math.min(360, parent.width - 20), root.width - 80))
-            height: root.photoViewerFullScreen ? parent.height : Math.min(720, Math.max(Math.min(340, parent.height - 20), root.height - 80))
-            radius: root.photoViewerFullScreen ? 0 : 12
+            width: root.photoViewerFullScreen ? parent.width : Math.min(parent.width - 24, Math.max(Math.min(680, parent.width - 24), Math.min(Math.round(root.width * 0.90), 1400)))
+            height: root.photoViewerFullScreen ? parent.height : Math.min(parent.height - 24, Math.max(Math.min(520, parent.height - 24), Math.min(Math.round(root.height * 0.88), 960)))
+            radius: root.photoViewerFullScreen ? 0 : 14
             color: theme.darkBackground
             border.width: root.photoViewerFullScreen ? 0 : 1
-            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.45)
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.35)
             clip: true
 
             MouseArea { anchors.fill: parent }
 
-        // Top Header Bar (Filename, Index Counter, Zoom Controls, Send/Copy, Close Button)
+        // Top Header Bar (Calm Photo Title, Index Counter, Zoom Controls, Send/Copy, Close Button)
         Rectangle {
             id: photoViewerTopBar
             anchors.top: parent.top
@@ -13957,16 +14861,16 @@ ApplicationWindow {
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 12
-                anchors.rightMargin: 12
-                spacing: 6
+                anchors.leftMargin: 14
+                anchors.rightMargin: 14
+                spacing: 8
 
                 Text {
-                    text: "📷 " + (photoViewerModal.currentPhoto.name || i18n.tr("Photo"))
+                    text: "🖼 " + i18n.tr("Photo")
                     font.pixelSize: theme.fontSize + 1
                     font.bold: true
                     color: theme.brightForeground
-                    elide: Text.ElideMiddle
+                    elide: Text.ElideRight
                     Layout.fillWidth: true
                     Layout.minimumWidth: 40
                 }
@@ -14209,7 +15113,7 @@ ApplicationWindow {
             anchors.bottom: photoThumbBar.visible ? photoThumbBar.top : parent.bottom
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.margins: 8
+            anchors.margins: 4
             clip: true
 
             MouseArea {
@@ -14287,8 +15191,8 @@ ApplicationWindow {
                 anchors.centerIn: parent
                 anchors.horizontalCenterOffset: root.photoViewerPanX
                 anchors.verticalCenterOffset: root.photoViewerPanY
-                width: Math.max(80, parent.width - (root.photoViewerItems.length > 1 ? 116 : 16))
-                height: Math.max(80, parent.height - 8)
+                width: Math.max(120, parent.width - (root.photoViewerItems.length > 1 ? 96 : 8))
+                height: Math.max(120, parent.height - 4)
                 source: parent.fullPhotoIsAnimated ? "" : parent.fullPhotoSource
                 asynchronous: true
                 cache: true
@@ -14306,18 +15210,18 @@ ApplicationWindow {
                 anchors.centerIn: parent
                 width: 280
                 height: 84
-                radius: 10
+                radius: 12
                 color: theme.darkBackground
                 border.width: 1
-                border.color: theme.lighterBackground
+                border.color: theme.subtleBorder
                 ColumnLayout {
                     anchors.centerIn: parent
                     spacing: 6
                     Text {
                         Layout.alignment: Qt.AlignHCenter
                         text: photoViewerModal.currentPhoto.canRequestAttachment === false
-                              ? ("☁ " + i18n.tr("iCloud Only") + " — " + (photoViewerModal.currentPhoto.name || i18n.tr("Photo")))
-                              : ("📷 " + (photoViewerModal.currentPhoto.name || i18n.tr("Loading photo...")))
+                              ? ("☁ " + i18n.tr("iCloud Only"))
+                              : ("🖼 " + i18n.tr("Loading photo..."))
                         font.pixelSize: theme.fontSize
                         font.bold: true
                         color: theme.brightForeground
@@ -15793,6 +16697,122 @@ ApplicationWindow {
         }
     }
 
+    // Composer Spell-Check Context Popup Menu (#88)
+    Popup {
+        id: composerSpellMenu
+        objectName: "composerSpellMenu"
+        property string targetWord: ""
+        property int wordStart: 0
+        property int wordEnd: 0
+        property var suggestions: []
+        modal: false
+        focus: true
+        width: 210
+        padding: 6
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            color: theme.darkerBackground
+            radius: 10
+            border.width: 1
+            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.5)
+        }
+        contentItem: ColumnLayout {
+            spacing: 4
+
+            Repeater {
+                model: composerSpellMenu.suggestions
+                delegate: Rectangle {
+                    required property string modelData
+                    Layout.fillWidth: true
+                    height: 28
+                    radius: 6
+                    color: spellSugMouse.containsMouse ? theme.selection : "transparent"
+                    Text {
+                        anchors.fill: parent
+                        anchors.leftMargin: 8
+                        anchors.rightMargin: 8
+                        verticalAlignment: Text.AlignVCenter
+                        text: modelData
+                        font.pixelSize: theme.fontSize - 1
+                        font.bold: true
+                        color: theme.brightForeground
+                        elide: Text.ElideRight
+                    }
+                    MouseArea {
+                        id: spellSugMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            var full = composerInput.text
+                            var s = composerSpellMenu.wordStart
+                            var e = composerSpellMenu.wordEnd
+                            if (s >= 0 && e >= s && e <= full.length) {
+                                composerInput.text = full.slice(0, s) + modelData + full.slice(e)
+                                composerInput.cursorPosition = s + modelData.length
+                            }
+                            composerSpellMenu.close()
+                            composerInput.forceActiveFocus()
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                visible: composerSpellMenu.suggestions.length === 0
+                Layout.fillWidth: true
+                height: 26
+                color: "transparent"
+                Text {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    verticalAlignment: Text.AlignVCenter
+                    text: i18n.tr("No suggestions")
+                    font.pixelSize: theme.fontSize - 2
+                    color: theme.darkForeground
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                height: 1
+                color: theme.subtleBorder
+            }
+
+            Rectangle {
+                objectName: "spellAddToDictionaryBtn"
+                Layout.fillWidth: true
+                height: 28
+                radius: 6
+                color: addDictMouse.containsMouse ? theme.selection : "transparent"
+                Text {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 8
+                    verticalAlignment: Text.AlignVCenter
+                    text: "＋ " + i18n.tr("Add to Dictionary")
+                    font.pixelSize: theme.fontSize - 2
+                    font.bold: true
+                    color: theme.accent
+                    elide: Text.ElideRight
+                }
+                MouseArea {
+                    id: addDictMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        if (root.hasSpellChecker && composerSpellMenu.targetWord.length > 0) {
+                            spellChecker.addWordToDictionary(composerSpellMenu.targetWord)
+                        }
+                        composerSpellMenu.close()
+                        composerInput.forceActiveFocus()
+                    }
+                }
+            }
+        }
+    }
+
     // Full-Viewport Expressive Screen Effect Overlay (Confetti, Fireworks, Lasers, Balloons, Hearts)
     Item {
         id: screenEffectOverlay
@@ -15801,11 +16821,83 @@ ApplicationWindow {
         visible: root.activeScreenEffect.length > 0
         clip: true
 
+        // Dedicated Neon Laser Beams Stage (#82)
+        Item {
+            id: lasersStage
+            objectName: "lasersStage"
+            anchors.fill: parent
+            visible: root.activeScreenEffect === "lasers"
+            readonly property real pProgress: effectAnim.progress
+            readonly property real envelope: pProgress < 0.12 ? (pProgress / 0.12) : (pProgress > 0.78 ? Math.max(0.0, (1.0 - pProgress) / 0.22) : 1.0)
+
+            Rectangle {
+                anchors.fill: parent
+                color: Qt.rgba(0.01, 0.02, 0.08, 0.34 * lasersStage.envelope)
+            }
+
+            Repeater {
+                id: laserBeamsRepeater
+                objectName: "laserBeamsRepeater"
+                model: 16
+                delegate: Item {
+                    required property int index
+                    readonly property var laserPalette: ["#00F5FF", "#FF2E93", "#7CFF6B", "#A855F7", "#38BDF8", "#FFD60A"]
+                    readonly property color beamColor: laserPalette[index % laserPalette.length]
+                    readonly property real spanLength: Math.hypot(screenEffectOverlay.width, screenEffectOverlay.height) * 1.35
+                    readonly property int originSlot: index % 4
+                    x: originSlot === 0 ? -24
+                       : (originSlot === 1 ? screenEffectOverlay.width + 24
+                       : (originSlot === 2 ? screenEffectOverlay.width * (0.28 + (index % 3) * 0.22)
+                       : screenEffectOverlay.width * (0.20 + (index % 3) * 0.30)))
+                    y: (originSlot <= 2) ? -20 : (screenEffectOverlay.height + 20)
+                    width: spanLength
+                    height: 16
+                    transformOrigin: Item.Left
+                    rotation: {
+                        var baseAngle = originSlot === 0 ? 34 : (originSlot === 1 ? 146 : (originSlot === 2 ? 90 : -90))
+                        var fan = ((index % 5) - 2) * 11
+                        var sweep = Math.sin(lasersStage.pProgress * Math.PI * 3.2 + index * 0.7) * 28
+                        return baseAngle + fan + sweep
+                    }
+                    opacity: lasersStage.envelope * (0.62 + 0.38 * Math.abs(Math.sin(lasersStage.pProgress * Math.PI * 6.0 + index * 1.1)))
+
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        width: parent.width
+                        height: 14
+                        radius: 7
+                        color: beamColor
+                        opacity: 0.24
+                    }
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        width: parent.width
+                        height: 5
+                        radius: 2.5
+                        color: beamColor
+                        opacity: 0.85
+                    }
+                    Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        width: parent.width
+                        height: 1.6
+                        radius: 0.8
+                        color: "#ffffff"
+                        opacity: 0.95
+                    }
+                }
+            }
+        }
+
         Repeater {
             model: 40
             delegate: Item {
                 id: particleItem
                 required property int index
+                visible: root.activeScreenEffect !== "lasers"
                 property real pProgress: effectAnim.progress
                 property real randSeedX: ((index * 7919 + 1013) % 1000) / 1000.0
                 property real randSeedY: ((index * 6271 + 2017) % 1000) / 1000.0

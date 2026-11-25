@@ -84,13 +84,13 @@ flowchart TD
 
 ### Core Components
 
-1. **Native Linux Desktop Client (`bluepill`):**
-   - **Engine:** C++20 compiled binary with Qt 6.4+ / QML.
+1. **Native Linux & Windows Desktop Client (`bluepill`):**
+   - **Engine:** C++20 compiled binary with Qt 6.4+ (`Qt6::Multimedia`) / QML.
    - **Footprint:** ~48 MB RSS memory usage under active load.
-   - **Display:** Wayland native (Hyprland, Sway, KDE Plasma, GNOME) and X11 fallback.
-   - **Latency:** Instant 0ms startup using local SQLite WAL thread cache and asynchronous background delta synchronization.
+   - **Display & Tray Lifecycle:** Wayland native (Hyprland, Sway, KDE Plasma, GNOME), X11, and Windows 10/11; minimizes to the system tray on close (`minimizeToTrayOnClose: true`, `Ctrl+Q` to quit), wakes/raises the active window on second-instance launch, and focuses the conversation when clicking desktop notifications.
+   - **Latency:** Instant 0ms startup using local cache and asynchronous background delta synchronization.
    - **Push Transport:** Real-time push notifications over Engine.IO v4 / Socket.IO v4 WebSocket connections.
-   - **Features:** Pinned conversations avatar bar, 1-click 2FA OTP copy pill, inline photo viewer lightbox, multi-photo attachments gallery, `Ctrl+V` clipboard image pasting, theme hot-reloading (Omarchy / Catppuccin / Tokyo Night / Solarized).
+   - **Features:** Pinned conversations avatar bar, compact SMS/iMessage symbol badges, right-click Tapbacks anchored to upper bubble corners, `Ctrl+Click`/`Shift+Click` multi-message selection & `Ctrl+C` / **Copy with Names**, multi-recipient `To:` chip group chat creation, multi-image composer queuing + iCloud Photos compose embedding, proportionally sized decluttered Photo/Notes/Calendar viewers, all 8 expressive effects (`Slam`, `Loud`, `Gentle`, `Invisible Ink`, `Confetti`, `Lasers`, `Fireworks`, `Echo`) with right-click Send & effect arming pill, composer spell check + macOS grammar/auto-suggest (`POST /api/v1/text/check`), 1-click 2FA OTP copy pill, `Ctrl+V` clipboard image pasting, collapsible Settings accordions with header version badge, one-time onboarding wizard, and theme hot-reloading (Omarchy / Catppuccin / Tokyo Night / Solarized).
 
 2. **Headless macOS Relay Server (`bluepill-server`):**
    - **Engine:** Zero-Electron, single-file Python 3 standard library daemon (`sqlite3`, `plistlib`, `http.server`, `threading`).
@@ -364,16 +364,17 @@ sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
 
 ### Windows (10 / 11 `x86_64`)
 
-Download the per-user Inno Setup installer `BluePill-Setup-<version>-win64.exe` from [GitHub Releases](https://github.com/nertwork/bluepill/releases/latest) (~53 MB; installs to `%LOCALAPPDATA%\Programs\BluePill` with zero UAC prompt, native in-process `Qt6::Multimedia` audio playback, and `--demo` shortcut).
+Download the per-user Inno Setup installer `BluePill-Setup-<version>-win64.exe` from [GitHub Releases](https://github.com/nertwork/bluepill/releases/latest) (~53 MB; installs to `%LOCALAPPDATA%\Programs\BluePill` with zero UAC prompt, native in-process `Qt6::Multimedia` audio playback & voice memo recording via `QMediaCaptureSession`/`QAudioInput`/`QMediaRecorder` + bundled `ffmpeg.exe`, single-instance `BluePillSingleInstanceMutex` wake, and `--demo` shortcut).
 
-### Smart Cross-Platform Client Auto-Updates (BluePill Cloud)
+### Smart Cross-Platform Auto-Updates (ON by Default, Opt-Out Supported)
 
-When signed in to BluePill Cloud (`bluepill.nertwork.com`), the desktop client checks `https://api.bluepill.nertwork.com/api/v1/updates/latest` and applies confirmed client updates directly over an HTTPS host allowlist (`github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, `bluepill.nertwork.com`, `*.bluepill.nertwork.com`) with redirect verification (`UserVerifiedRedirectPolicy`), version regex validation, per-update `QTemporaryDir` isolation (`O_CREAT|O_EXCL|O_NOFOLLOW`), and mandatory `SHA256SUMS.txt` verification (including on-disk SHA256 re-verification):
+Automatic update checks are **enabled by default** on both the desktop client (`autoUpdateCheck: true`, toggleable in **⚙ Settings → Connection → Updates**) and the macOS relay (`autoUpdate: true` in `~/.config/bluepill/server.json`, opt-out via `"autoUpdate": false` or `BLUEPILL_AUTO_UPDATE=0`). When signed in to BluePill Cloud (`bluepill.nertwork.com`), the desktop client checks `https://api.bluepill.nertwork.com/api/v1/updates/latest` and applies confirmed client updates directly over an HTTPS host allowlist (`github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, `bluepill.nertwork.com`, `*.bluepill.nertwork.com`) with redirect verification (`UserVerifiedRedirectPolicy`), version regex validation, per-update `QTemporaryDir` isolation (`O_CREAT|O_EXCL|O_NOFOLLOW`), and mandatory `SHA256SUMS.txt` verification (including on-disk SHA256 re-verification):
 
-- **Windows (`x86_64`):** Downloads `BluePill-Setup-<version>-win64.exe` + `SHA256SUMS.txt` and runs silent Inno Setup (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS`) when installed in a user-writable directory, or interactive setup otherwise, followed by a guarded `QProcess::startDetached` relaunch.
+- **Windows (`x86_64`):** Downloads `BluePill-Setup-<version>-win64.exe` + `SHA256SUMS.txt` and runs silent in-place Inno Setup (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS`) when installed in a user-writable directory, or interactive setup otherwise, followed by automatic relaunch.
 - **Arch Linux / Omarchy (`x86_64`):** Downloads `bluepill-<version>-1-x86_64.pkg.tar.zst` + `SHA256SUMS.txt` and installs via `pkexec pacman -U --noconfirm` (with interactive terminal `sudo pacman -U` fallback on `pkexec` exit `127`, or `yay`/`paru -S --noconfirm bluepill-bin` / `bluepill` when using AUR).
 - **Debian / Ubuntu (`x86_64`):** Downloads `bluepill_<version>_amd64.deb` + `SHA256SUMS.txt` and installs via `pkexec apt-get install -y` (with terminal `sudo apt-get install -y` fallback).
 - **Fedora / RHEL (`x86_64`):** Downloads `bluepill-<version>-1.x86_64.rpm` + `SHA256SUMS.txt` and installs via `pkexec dnf install -y` (with terminal `sudo dnf install -y` fallback).
+- **macOS Relay (`bluepill-server`):** Checks on startup and every 6 hours, runs `brew upgrade nertwork/tap/bluepill` with `HOMEBREW_NO_AUTO_UPDATE=1` (preserving Python TCC/Full Disk Access permissions) or SHA256-verified bottle fallback, and restarts via `launchctl kickstart -k`.
 
 ---
 
@@ -473,8 +474,8 @@ If this prints an integer (e.g., `42`), Full Disk Access is working properly. If
 
 ### Configuration & Self-Test
 
-#### 1. Generate Configuration File
-Create `~/.config/bluepill/server.json` with strict `0600` permissions:
+#### Configuration (`server.json`) & Self-Test
+Create `~/.config/bluepill/server.json` with strict `0600` permissions (`autoUpdate` defaults to `true`; set `"autoUpdate": false` or `BLUEPILL_AUTO_UPDATE=0` to opt out):
 
 ```bash
 mkdir -p ~/.config/bluepill
@@ -484,7 +485,8 @@ cat << 'EOF_CONFIG' > ~/.config/bluepill/server.json
   "port": 1235,
   "password": "CHANGE_ME_TO_A_SECURE_TOKEN",
   "helperPort": 45670,
-  "enableBackgroundDaemons": true
+  "enableBackgroundDaemons": true,
+  "autoUpdate": true
 }
 EOF_CONFIG
 chmod 600 ~/.config/bluepill/server.json
@@ -716,8 +718,10 @@ All REST endpoints support authentication via the `X-BlueBubbles-Auth` header, `
 | Endpoint | Method | Auth | Request Payload / Params | Response Schema | Description |
 | :--- | :---: | :---: | :--- | :--- | :--- |
 | **`/api/v1/ping`** | `GET` | Yes | None | `{"status": 200, "message": "Success", "data": "pong"}` | Heartbeat check |
-| **`/api/v1/server/info`** | `GET` | Yes | None | `{"os_version": str, "server_version": str, "private_api": bool}` | Server version, OS, & Private API status |
+| **`/api/v1/server/info`** | `GET` | Yes | None | `{"os_version": str, "server_version": str, "private_api": bool, "chat_db_readable": bool}` | Server version, OS, FDA & Private API status |
 | **`/api/v1/server/logs`** | `GET` | Yes | `?lines=200` | `{"status": 200, "data": [str, ...]}` | Retrieve in-memory log buffer |
+| **`/api/v1/chat/new`** | `POST` | Yes | `{"addresses": [str, ...], "message": str?, "service": str?}` | `{"status": 200, "data": ChatObject}` | Create 1:1 or multi-recipient group chat |
+| **`/api/v1/text/check`** | `POST` | Yes | `{"text": str, "language": str?, "cursor": int?}` | `{"status": 200, "data": {"misspellings": [...], "grammar": [...], "completions": [...]}}` | macOS `NSSpellChecker` spelling, grammar & completions |
 | **`/api/v1/chat/query`** | `POST` | Yes | `{"limit": 250, "offset": 0, "chatGuid": str?}` | `{"status": 200, "data": [ChatObject, ...]}` | Query conversation threads |
 | **`/api/v1/chat/<guid>`** | `GET` | Yes | None | `{"status": 200, "data": ChatObject}` | Get single chat details |
 | **`/api/v1/chat/<guid>`** | `DELETE` | Yes | None | `{"status": 200, "data": {"deleted": true}}` | Delete a chat thread |
@@ -784,10 +788,11 @@ If `/api/v1/server/info` reports `private_api: false`:
 3. Restart the helper or reinstall via your Private API management package.
 
 ### Runbook 4: Verifying Full Disk Access After macOS Upgrades
-Major macOS updates (e.g. updating from Sonoma to Sequoia) frequently reset TCC privacy permissions. If messages stop syncing after an OS update:
+Major macOS updates (e.g. updating from Sonoma to Sequoia) frequently reset TCC privacy permissions. When `chat.db` cannot be read, `bluepill-server` responds with HTTP `503` (`"error": "chat_db_unreadable"`) and `"chat_db_readable": false` in `/api/v1/server/info`, and the desktop client displays a yellow **`Mac needs Full Disk Access`** banner instead of `Disconnected`:
 1. Re-open **System Settings -> Privacy & Security -> Full Disk Access**.
 2. Toggle your terminal / Python / sshd-keygen-wrapper entry off and back on.
 3. Test using: `sqlite3 ~/Library/Messages/chat.db "SELECT count(*) FROM message;" </dev/null`.
+4. The yellow **`Mac needs Full Disk Access`** banner clears automatically as soon as the next query succeeds.
 
 
 ### Runbook 5: iCloud Hub Preflight & Optional Module Toggles (Notes, Calendar, Photos)

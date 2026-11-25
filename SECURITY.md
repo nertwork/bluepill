@@ -4,9 +4,15 @@
 
 | Version | Supported |
 | :--- | :--- |
-| `1.2.x` (`main` / AUR `bluepill` / Homebrew `nertwork/tap/bluepill`) | :white_check_mark: |
+| `1.2.x` (`main` / AUR `bluepill` / Homebrew `nertwork/tap/bluepill` / Windows) | :white_check_mark: |
 | `1.1.x` | :white_check_mark: |
 | `< 1.1.0` | :x: |
+
+## Automated Security Controls
+
+- **Code Scanning:** GitHub CodeQL default setup continuously analyzes C++, Python, Ruby, and GitHub Actions workflows for security vulnerabilities.
+- **Secret Scanning & Push Protection:** Enabled on `nertwork/bluepill` to block leaked tokens and credentials before push.
+- **Dependabot Alerts & Security Updates:** Automated vulnerability monitoring and weekly GitHub Actions dependency updates via `.github/dependabot.yml`.
 
 ## Security Architecture Highlights
 

@@ -30,8 +30,9 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
-CloseApplications=yes
+CloseApplications=force
 RestartApplications=yes
+AppMutex=BluePillSingleInstanceMutex
 ChangesEnvironment=no
 
 [Languages]

@@ -607,6 +607,7 @@ class BluePillEngine:
         self.enable_calendar: bool = True
         self.enable_photos: bool = True
         self.enable_wav_caf_conversion: bool = True
+        self.auto_update: bool = True
         self._auto_update_pref: Optional[bool] = None
         self._relay_config_path_override: Optional[str] = None
         self._updates_feed_url: str = os.environ.get("BLUEPILL_UPDATES_FEED_URL", DEFAULT_UPDATES_FEED_URL).strip() or DEFAULT_UPDATES_FEED_URL
@@ -691,14 +692,22 @@ class BluePillEngine:
                     self.enable_notes = self._parse_bool_flag(data.get("enableNotes"), True)
                     self.enable_calendar = self._parse_bool_flag(data.get("enableCalendar"), True)
                     self.enable_photos = self._parse_bool_flag(data.get("enablePhotos"), True)
+                    if "autoUpdate" in data:
+                        self.auto_update = self._parse_bool_flag(data.get("autoUpdate"), True)
+                    elif "auto_update" in data:
+                        self.auto_update = self._parse_bool_flag(data.get("auto_update"), True)
                     if "autoUpdateCheck" in data:
                         self._auto_update_pref = self._parse_bool_flag(data.get("autoUpdateCheck"), True)
                     elif "auto_update_check" in data:
                         self._auto_update_pref = self._parse_bool_flag(data.get("auto_update_check"), True)
             except Exception:
                 pass
+        if "BLUEPILL_AUTO_UPDATE" in os.environ:
+            self.auto_update = self._parse_bool_flag(os.environ.get("BLUEPILL_AUTO_UPDATE"), self.auto_update)
         if "BLUEPILL_AUTO_UPDATE_CHECK" in os.environ:
             self._auto_update_pref = self._parse_bool_flag(os.environ.get("BLUEPILL_AUTO_UPDATE_CHECK"), True)
+            if "BLUEPILL_AUTO_UPDATE" not in os.environ and self._auto_update_pref is False:
+                self.auto_update = False
         if "BLUEPILL_ENABLE_NOTES" in os.environ:
             self.enable_notes = self._parse_bool_flag(os.environ.get("BLUEPILL_ENABLE_NOTES"), self.enable_notes)
         if "BLUEPILL_ENABLE_CALENDAR" in os.environ:
@@ -3703,7 +3712,7 @@ end run
                 "associatedMessageGuid": r["associated_message_guid"] or "",
                 "associatedMessageType": int(assoc_type) if assoc_type is not None else 0,
                 "associatedMessageEmoji": r["associated_message_emoji"] or "",
-                "expressiveSendStyleId": (
+                "expressiveSendStyleId": self._normalize_effect_id(
                     r["expressive_send_style_id"]
                     or self.message_effects.get(row_guid, "")
                     or self.message_effects.get(norm_guid_chk, "")
@@ -4388,6 +4397,153 @@ end run
             self.logger.warning("[applescript] exception: %s", exc)
             return False
 
+    def _create_group_chat_applescript(self, addresses: List[str], service: str, message: str) -> bool:
+        if sys.platform != "darwin" or len(addresses) < 2:
+            return False
+        service_type = "SMS" if str(service).upper() == "SMS" else "iMessage"
+        script_lines = [
+            'on run argv',
+            '  set targetService to item 1 of argv',
+            '  set targetMessage to item 2 of argv',
+            '  set rawAddrs to items 3 thru -1 of argv',
+            '  tell application "Messages"',
+            '    try',
+            '      if targetService is "SMS" then',
+            '        set targetAcct to account of (first chat whose id starts with "SMS;")',
+            '      else',
+            '        set targetAcct to account of (first chat whose id starts with "iMessage;")',
+            '      end if',
+            '    on error',
+            '      if targetService is "SMS" then',
+            '        set targetAcct to 1st account whose service type = SMS',
+            '      else',
+            '        set targetAcct to 1st account whose service type = iMessage',
+            '      end if',
+            '    end try',
+            '    set buddyList to {}',
+            '    repeat with addr in rawAddrs',
+            '      set end of buddyList to (participant (addr as text) of targetAcct)',
+            '    end repeat',
+            '    if targetMessage is not "" then',
+            '      send targetMessage to buddyList',
+            '    else',
+            '      make new text chat with properties {participants:buddyList}',
+            '    end if',
+            '  end tell',
+            'end run',
+        ]
+        try:
+            res = subprocess.run(
+                ["/usr/bin/osascript", "-e", "\n".join(script_lines), service_type, message or "", *addresses],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=10.0,
+                check=False,
+            )
+            if res.returncode != 0:
+                err_txt = (res.stderr or b"").decode("utf-8", errors="replace").strip()
+                self.logger.warning("[applescript] group chat create failed rc=%d err=%s", res.returncode, err_txt)
+            return res.returncode == 0
+        except Exception as exc:
+            self.logger.warning("[applescript] group chat create exception: %s", exc)
+            return False
+
+    def create_chat(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        raw_addrs = body.get("addresses") or []
+        if isinstance(raw_addrs, str):
+            raw_addrs = [p.strip() for p in re.split(r"[,;]+", raw_addrs) if p.strip()]
+        clean_addrs: List[str] = []
+        seen_lower: set[str] = set()
+        for item in raw_addrs:
+            addr = str(item or "").strip()
+            if addr and addr.lower() not in seen_lower:
+                seen_lower.add(addr.lower())
+                clean_addrs.append(addr)
+
+        service = str(body.get("service") or "iMessage").strip() or "iMessage"
+        msg_text = str(body.get("message") or "").strip()
+        method_req = str(body.get("method") or "private-api").strip().lower()
+        effect_id = self._normalize_effect_id(body.get("effectId") or body.get("expressiveSendStyleId") or "")
+
+        if not clean_addrs:
+            return {"guid": "", "chatIdentifier": "", "participants": [], "messages": []}
+
+        # Single recipient: standard 1:1 chat GUID
+        if len(clean_addrs) == 1:
+            first_addr = clean_addrs[0]
+            chat_guid = f"{service};-;{first_addr}"
+            sent_msgs: List[Dict[str, Any]] = []
+            if msg_text:
+                send_payload: Dict[str, Any] = {"chatGuid": chat_guid, "message": msg_text}
+                for opt_k in ("tempGuid", "effectId", "expressiveSendStyleId", "subject", "selectedMessageGuid", "partIndex", "method"):
+                    if opt_k in body and body.get(opt_k) is not None:
+                        send_payload[opt_k] = body.get(opt_k)
+                sent_msgs.append(self.send_text(send_payload))
+            return {
+                "guid": chat_guid,
+                "chatIdentifier": first_addr,
+                "participants": [{"address": first_addr, "service": service}],
+                "messages": sent_msgs,
+            }
+
+        # Multi-recipient (2+): create group chat via Private API helper or AppleScript fallback
+        chat_guid = ""
+        used_group_applescript = False
+        if method_req != "apple-script":
+            ok, helper_chat_guid = self._send_helper_payload_with_tx(
+                "create-chat",
+                {"addresses": clean_addrs, "service": service},
+                wait_timeout=2.0,
+            )
+            if ok and helper_chat_guid:
+                chat_guid = helper_chat_guid.strip()
+
+        if not chat_guid and sys.platform == "darwin" and os.path.exists(self.db_path):
+            if effect_id:
+                raise RuntimeError(
+                    "Expressive effects in new group chats require the Private API helper (BlueBubblesHelper)."
+                )
+            as_ok = self._create_group_chat_applescript(clean_addrs, service, msg_text)
+            if not as_ok:
+                raise RuntimeError(f"Failed to create group chat for {', '.join(clean_addrs)}")
+            used_group_applescript = True
+            # Poll chat.db briefly for the newly created group chat GUID
+            deadline = time.time() + 1.5
+            target_set = {a.lower() for a in clean_addrs}
+            while time.time() < deadline and not chat_guid:
+                try:
+                    for ch in self.query_chats(limit=25, offset=0, with_participants=True):
+                        parts = {str(p.get("address") or "").strip().lower() for p in (ch.get("participants") or []) if p.get("address")}
+                        if parts == target_set and ";+;" in str(ch.get("guid") or ""):
+                            chat_guid = str(ch["guid"])
+                            break
+                except Exception:
+                    pass
+                if not chat_guid:
+                    time.sleep(0.15)
+
+        if not chat_guid:
+            chat_guid = f"{service};+;chat{uuid.uuid4().hex[:16]}"
+            with self._chat_state_lock:
+                self.group_participants_override[chat_guid] = list(clean_addrs)
+                self._save_chat_state()
+
+        sent_msgs = []
+        if msg_text and not used_group_applescript:
+            send_payload = {"chatGuid": chat_guid, "message": msg_text}
+            for opt_k in ("tempGuid", "effectId", "expressiveSendStyleId", "subject", "selectedMessageGuid", "partIndex", "method"):
+                if opt_k in body and body.get(opt_k) is not None:
+                    send_payload[opt_k] = body.get(opt_k)
+            sent_msgs.append(self.send_text(send_payload))
+
+        chat_ident = chat_guid.split(";+;")[-1] if ";+;" in chat_guid else chat_guid.split(";-;")[-1]
+        return {
+            "guid": chat_guid,
+            "chatIdentifier": chat_ident,
+            "participants": [{"address": a, "service": service} for a in clean_addrs],
+            "messages": sent_msgs,
+        }
+
     def _send_helper_payload_with_tx(
         self, action: str, data: Dict[str, Any], wait_timeout: float = 0.8
     ) -> Tuple[bool, str]:
@@ -4868,6 +5024,75 @@ end run
             time.sleep(min(0.06, rem_sleep))
         return best_candidate
 
+    _EXPRESSIVE_EFFECT_ALIASES: Dict[str, str] = {
+        "slam": "com.apple.MobileSMS.expressivesend.impact",
+        "impact": "com.apple.MobileSMS.expressivesend.impact",
+        "sent with slam": "com.apple.MobileSMS.expressivesend.impact",
+        "loud": "com.apple.MobileSMS.expressivesend.loud",
+        "sent with loud": "com.apple.MobileSMS.expressivesend.loud",
+        "gentle": "com.apple.MobileSMS.expressivesend.gentle",
+        "sent with gentle": "com.apple.MobileSMS.expressivesend.gentle",
+        "invisible ink": "com.apple.MobileSMS.expressivesend.invisibleink",
+        "invisibleink": "com.apple.MobileSMS.expressivesend.invisibleink",
+        "sent with invisible ink": "com.apple.MobileSMS.expressivesend.invisibleink",
+        "confetti": "com.apple.messages.effect.CKConfettiEffect",
+        "ckconfettieffect": "com.apple.messages.effect.CKConfettiEffect",
+        "sent with confetti": "com.apple.messages.effect.CKConfettiEffect",
+        "com.apple.messages.effect.ckconfettieffect": "com.apple.messages.effect.CKConfettiEffect",
+        "com.apple.mobilesms.expressivesend.confetti": "com.apple.messages.effect.CKConfettiEffect",
+        "lasers": "com.apple.messages.effect.CKLasersEffect",
+        "laser": "com.apple.messages.effect.CKLasersEffect",
+        "cklaserseffect": "com.apple.messages.effect.CKLasersEffect",
+        "sent with lasers": "com.apple.messages.effect.CKLasersEffect",
+        "com.apple.messages.effect.cklaserseffect": "com.apple.messages.effect.CKLasersEffect",
+        "com.apple.mobilesms.expressivesend.lasers": "com.apple.messages.effect.CKLasersEffect",
+        "fireworks": "com.apple.messages.effect.CKFireworksEffect",
+        "ckfireworkseffect": "com.apple.messages.effect.CKFireworksEffect",
+        "sent with fireworks": "com.apple.messages.effect.CKFireworksEffect",
+        "com.apple.messages.effect.ckfireworkseffect": "com.apple.messages.effect.CKFireworksEffect",
+        "com.apple.mobilesms.expressivesend.fireworks": "com.apple.messages.effect.CKFireworksEffect",
+        "echo": "com.apple.messages.effect.CKEchoEffect",
+        "ckechoeffect": "com.apple.messages.effect.CKEchoEffect",
+        "sent with echo": "com.apple.messages.effect.CKEchoEffect",
+        "com.apple.messages.effect.ckechoeffect": "com.apple.messages.effect.CKEchoEffect",
+        "com.apple.mobilesms.expressivesend.echo": "com.apple.messages.effect.CKEchoEffect",
+        "balloons": "com.apple.messages.effect.CKHappyBirthdayEffect",
+        "balloon": "com.apple.messages.effect.CKHappyBirthdayEffect",
+        "happybirthday": "com.apple.messages.effect.CKHappyBirthdayEffect",
+        "ckhappybirthdayeffect": "com.apple.messages.effect.CKHappyBirthdayEffect",
+        "sent with balloons": "com.apple.messages.effect.CKHappyBirthdayEffect",
+        "com.apple.messages.effect.ckhappybirthdayeffect": "com.apple.messages.effect.CKHappyBirthdayEffect",
+        "love": "com.apple.messages.effect.CKHeartEffect",
+        "heart": "com.apple.messages.effect.CKHeartEffect",
+        "hearts": "com.apple.messages.effect.CKHeartEffect",
+        "ckhearteffect": "com.apple.messages.effect.CKHeartEffect",
+        "sent with love": "com.apple.messages.effect.CKHeartEffect",
+        "com.apple.messages.effect.ckhearteffect": "com.apple.messages.effect.CKHeartEffect",
+        "celebration": "com.apple.messages.effect.CKSparklesEffect",
+        "sparkles": "com.apple.messages.effect.CKSparklesEffect",
+        "cksparkleseffect": "com.apple.messages.effect.CKSparklesEffect",
+        "sent with celebration": "com.apple.messages.effect.CKSparklesEffect",
+        "com.apple.messages.effect.cksparkleseffect": "com.apple.messages.effect.CKSparklesEffect",
+        "spotlight": "com.apple.messages.effect.CKSpotlightEffect",
+        "ckspotlighteffect": "com.apple.messages.effect.CKSpotlightEffect",
+        "sent with spotlight": "com.apple.messages.effect.CKSpotlightEffect",
+        "com.apple.messages.effect.ckspotlighteffect": "com.apple.messages.effect.CKSpotlightEffect",
+        "shooting star": "com.apple.messages.effect.CKShootingStarEffect",
+        "shootingstar": "com.apple.messages.effect.CKShootingStarEffect",
+        "ckshootingstareffect": "com.apple.messages.effect.CKShootingStarEffect",
+        "sent with shooting star": "com.apple.messages.effect.CKShootingStarEffect",
+        "com.apple.messages.effect.ckshootingstareffect": "com.apple.messages.effect.CKShootingStarEffect",
+    }
+
+    @classmethod
+    def _normalize_effect_id(cls, raw_effect: Any) -> str:
+        eff = str(raw_effect or "").strip()
+        if not eff:
+            return ""
+        # Strip leading UI emoji prefixes (e.g. "✨ Lasers" -> "lasers")
+        cleaned = re.sub(r"^[^\w]+", "", eff).strip().lower()
+        return cls._EXPRESSIVE_EFFECT_ALIASES.get(eff.lower(), cls._EXPRESSIVE_EFFECT_ALIASES.get(cleaned, eff))
+
     def send_text(self, body: Dict[str, Any]) -> Dict[str, Any]:
         t0 = time.time()
         requested_chat_guid = (body.get("chatGuid") or "").strip()
@@ -4880,7 +5105,7 @@ end run
             )
         message = (body.get("message") or "").strip()
         temp_guid = (body.get("tempGuid") or f"temp-{uuid.uuid4()}").strip()
-        effect_id = (body.get("effectId") or "").strip()
+        effect_id = self._normalize_effect_id(body.get("effectId") or body.get("expressiveSendStyleId") or "")
         subject = (body.get("subject") or "").strip()
         selected_guid = (body.get("selectedMessageGuid") or "").strip()
         part_index = int(body.get("partIndex", 0) or 0)
@@ -4964,6 +5189,11 @@ end run
                             self.message_effects[helper_guid] = effect_id
 
             if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
+                if effect_id:
+                    raise RuntimeError(
+                        "Expressive effects require the Private API helper (BlueBubblesHelper); "
+                        "cannot fall back to AppleScript without stripping the effect."
+                    )
                 sent = self._send_via_applescript(chat_guid, message)
                 if sent:
                     used_method = "apple-script"
@@ -5475,6 +5705,7 @@ end run
         raw_name = str(fields.get("name") or "attachment.png").strip()
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(raw_name)) or "attachment.png"
         caption = str(fields.get("message") or "").strip()
+        effect_id = self._normalize_effect_id(fields.get("effectId") or fields.get("expressiveSendStyleId") or "")
         method_req = str(fields.get("method") or "private-api").strip().lower()
         att_bytes: bytes = fields.get("attachment_bytes") or b""
 
@@ -5579,7 +5810,7 @@ end run
                         "isAudioMessage": 1 if is_aud_att else 0,
                         "attributedBody": None,
                         "subject": None,
-                        "effectId": None,
+                        "effectId": effect_id or None,
                         "selectedMessageGuid": None,
                         "partIndex": 0,
                     },
@@ -5593,6 +5824,9 @@ end run
                         if temp_guid:
                             with self._claim_lock:
                                 self.temp_guid_by_guid[helper_guid] = temp_guid
+                        if effect_id:
+                            self.chat_state.setdefault("messageEffects", {})[helper_guid] = effect_id
+                            self.message_effects[helper_guid] = effect_id
 
             if sent and os.path.exists(self.db_path):
                 db_msg = self._poll_sent_message_from_db(
@@ -6240,7 +6474,7 @@ end run
         message = str(body.get("message") or body.get("text") or "").strip()
         now_ms = int(time.time() * 1000)
         send_at = int(body.get("sendAt") or body.get("sendAtMs") or body.get("scheduledAt") or (now_ms + 900_000))
-        effect_id = str(body.get("effectId") or "").strip()
+        effect_id = self._normalize_effect_id(body.get("effectId") or body.get("expressiveSendStyleId") or "")
         reply_to = str(body.get("selectedMessageGuid") or body.get("replyToGuid") or "").strip()
         sched_id = str(body.get("id") or f"sched-{uuid.uuid4().hex[:12]}").strip()
         item: Dict[str, Any] = {
@@ -8621,6 +8855,8 @@ end run
             return self.set_chat_pinned(str(params.get("chatGuid") or params.get("guid") or ""), bool(params.get("pinned", True)))
         if method in ("chat.unpin", "api.chat.unpin"):
             return self.set_chat_pinned(str(params.get("chatGuid") or params.get("guid") or ""), False)
+        if method in ("chat.new", "api.chat.new"):
+            return self.create_chat(params)
         if method in ("chat.query", "api.chat.query"):
             return self.query_chats(
                 limit=int(params.get("limit", 250) or 250),
@@ -8743,8 +8979,18 @@ end run
         host = (urllib.parse.urlparse(raw_url).hostname or "").strip().lower()
         return host == "bluepill.nertwork.com" or host.endswith(".bluepill.nertwork.com")
 
+    @staticmethod
+    def _find_brew_binary() -> str:
+        cand = shutil.which("brew")
+        if cand and os.path.exists(cand):
+            return cand
+        for p in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+            if os.path.exists(p):
+                return p
+        return ""
+
     def _detect_update_method(self) -> str:
-        brew_bin = shutil.which("brew")
+        brew_bin = self._find_brew_binary()
         if brew_bin:
             try:
                 proc = subprocess.run(
@@ -8762,7 +9008,7 @@ end run
 
     def get_update_status(self) -> Dict[str, Any]:
         cloud_logged_in = self._is_cloud_relay_logged_in()
-        auto_enabled = bool(cloud_logged_in and (self._auto_update_pref is not False))
+        auto_enabled = bool(self.auto_update and (self._auto_update_pref is not False))
         with self._update_lock:
             snap = dict(self._update_state)
         if not snap.get("method"):
@@ -8772,10 +9018,11 @@ end run
                     self._update_state["method"] = snap["method"]
         return {
             "cloud_logged_in": cloud_logged_in,
+            "auto_update": bool(self.auto_update),
             "auto_update_enabled": auto_enabled,
             "current_version": VERSION,
             "latest_version": snap.get("latest_version") or VERSION,
-            "update_available": bool(cloud_logged_in and snap.get("update_available")),
+            "update_available": bool(snap.get("update_available")),
             "method": snap.get("method") or "standalone",
             "release_url": snap.get("release_url") or f"https://github.com/nertwork/bluepill/releases/tag/v{VERSION}",
             "checksums_url": snap.get("checksums_url") or f"https://github.com/nertwork/bluepill/releases/download/v{VERSION}/SHA256SUMS.txt",
@@ -8839,9 +9086,7 @@ end run
             raise
         return resp
 
-    def check_for_updates(self) -> Dict[str, Any]:
-        if not self._is_cloud_relay_logged_in():
-            raise PermissionError("Cloud Managed Updates require BluePill Cloud login")
+    def _fetch_updates_feed(self) -> Dict[str, Any]:
         req = urllib.request.Request(
             self._updates_feed_url,
             headers={"User-Agent": f"bluepill-server/{VERSION}", "Accept": "application/json"},
@@ -8856,7 +9101,7 @@ end run
         chk_url = self._validate_update_url(
             str(payload.get("checksums_url") or f"https://github.com/nertwork/bluepill/releases/download/v{latest}/SHA256SUMS.txt").strip()
         )
-        avail = self._parse_semver(latest) > self._parse_semver(VERSION)
+        avail = ("-" not in latest) and (self._parse_semver(latest) > self._parse_semver(VERSION))
         method = self._detect_update_method()
         checked_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with self._update_lock:
@@ -8872,6 +9117,11 @@ end run
                 }
             )
         return self.get_update_status()
+
+    def check_for_updates(self) -> Dict[str, Any]:
+        if not self._is_cloud_relay_logged_in():
+            raise PermissionError("Cloud Managed Updates require BluePill Cloud login")
+        return self._fetch_updates_feed()
 
     @staticmethod
     def _extract_version_from_script(path: str) -> str:
@@ -9000,9 +9250,7 @@ end run
     def _run_server_update_worker(self, method: str, target_version: str, checksums_url: str) -> None:
         try:
             if method == "homebrew":
-                brew_bin = shutil.which("brew") or "/opt/homebrew/bin/brew"
-                if not os.path.exists(brew_bin) and os.path.exists("/usr/local/bin/brew"):
-                    brew_bin = "/usr/local/bin/brew"
+                brew_bin = self._find_brew_binary() or "/opt/homebrew/bin/brew"
                 brew_env = dict(os.environ)
                 brew_env.setdefault("HOME", os.path.expanduser("~"))
                 cur_path = brew_env.get("PATH", "")
@@ -9025,11 +9273,15 @@ end run
                         detail = (p_upd.stderr or p_upd.stdout or "").strip().splitlines()
                         brew_err = f"brew update failed (exit {p_upd.returncode})" + (f": {detail[-1]}" if detail else "")
                     else:
+                        # Never auto-upgrade python@3.14 (which resets macOS TCC/Full Disk Access permissions).
+                        upg_env = dict(brew_env)
+                        upg_env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+                        upg_env["HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK"] = "1"
                         p_upg = subprocess.run(
                             [brew_bin, "upgrade", "nertwork/tap/bluepill"],
                             capture_output=True,
                             text=True,
-                            env=brew_env,
+                            env=upg_env,
                             timeout=300,
                             check=False,
                         )
@@ -9106,14 +9358,34 @@ end run
             "target_version": target_version,
         }
 
+    def auto_update_once(self) -> Dict[str, Any]:
+        if not self.auto_update or self._auto_update_pref is False:
+            return {"checked": False, "applied": False, "reason": "disabled"}
+        st = self._fetch_updates_feed()
+        latest = str(st.get("latest_version") or VERSION)
+        if not st.get("update_available") or "-" in latest:
+            return {"checked": True, "applied": False, "status": st}
+        if sys.platform != "darwin" and os.environ.get("BLUEPILL_ALLOW_AUTO_UPDATE") != "1":
+            return {"checked": True, "applied": False, "reason": "non_darwin", "status": st}
+        with self._update_lock:
+            if self._update_state.get("applying"):
+                return {"checked": True, "applied": False, "reason": "already_applying", "status": st}
+            self._update_state["applying"] = True
+            self._update_state["last_error"] = ""
+        method = str(st.get("method") or "standalone")
+        checksums_url = str(st.get("checksums_url") or "")
+        self.logger.info("[updates] Auto-updating bluepill-server %s -> %s (%s)", VERSION, latest, method)
+        self._run_server_update_worker(method, latest, checksums_url)
+        return {"checked": True, "applied": True, "target_version": latest, "method": method}
+
     def _start_update_checker_loop(self) -> None:
         def _worker() -> None:
             if self._stop_event.wait(15.0):
                 return
             while not self._stop_event.is_set():
                 try:
-                    if self._is_cloud_relay_logged_in() and (self._auto_update_pref is not False):
-                        self.check_for_updates()
+                    if self.auto_update and (self._auto_update_pref is not False):
+                        self.auto_update_once()
                 except Exception as exc:
                     self.logger.debug("[updates] background update check skipped/failed: %s", exc)
                     with self._update_lock:
@@ -9122,6 +9394,202 @@ end run
                     break
 
         threading.Thread(target=_worker, name="bp-update-checker", daemon=True).start()
+
+    _TEXT_CHECK_JXA = r"""
+ObjC.import("AppKit");
+ObjC.import("Foundation");
+var env = $.NSProcessInfo.processInfo.environment;
+var text = ObjC.unwrap(env.objectForKey("BP_CHECK_TEXT")) || "";
+var lang = ObjC.unwrap(env.objectForKey("BP_CHECK_LANG")) || "";
+var cursorRaw = parseInt(ObjC.unwrap(env.objectForKey("BP_CHECK_CURSOR")) || "", 10);
+var nsText = $(text);
+var totalLen = Number(nsText.length);
+var sc = $.NSSpellChecker.sharedSpellChecker;
+var tag = 0;
+var nsLang = lang ? $(lang) : $();
+
+var misspellings = [];
+var pos = 0;
+while (pos < totalLen) {
+  var r = sc.checkSpellingOfStringStartingAtLanguageWrapInSpellDocumentWithTagWordCount(nsText, pos, nsLang, false, tag, null);
+  var loc = Number(r.location);
+  var len = Number(r.length);
+  if (len <= 0 || loc >= totalLen || (loc + len) <= pos) break;
+  var word = ObjC.unwrap(nsText.substringWithRange($.NSMakeRange(loc, len)));
+  var guessesRaw = sc.guessesForWordRangeInStringLanguageInSpellDocumentWithTag($.NSMakeRange(loc, len), nsText, nsLang, tag);
+  var suggestions = [];
+  if (guessesRaw) {
+    var gcnt = Number(guessesRaw.count);
+    for (var gi = 0; gi < Math.min(gcnt, 5); gi++) {
+      suggestions.push(ObjC.unwrap(guessesRaw.objectAtIndex(gi)));
+    }
+  }
+  misspellings.push({word: word, offset: loc, length: len, suggestions: suggestions});
+  pos = loc + len;
+}
+
+var grammar = [];
+var gpos = 0;
+while (gpos < totalLen) {
+  var detRef = Ref();
+  var gr = sc.checkGrammarOfStringStartingAtLanguageWrapInSpellDocumentWithTagDetails(nsText, gpos, nsLang, false, tag, detRef);
+  var gloc = Number(gr.location);
+  var glen = Number(gr.length);
+  if (glen <= 0 || gloc >= totalLen || (gloc + glen) <= gpos) break;
+  var descs = [];
+  if (detRef[0]) {
+    var dcnt = Number(detRef[0].count);
+    for (var di = 0; di < dcnt; di++) {
+      var item = detRef[0].objectAtIndex(di);
+      var descVal = item ? item.objectForKey("NSGrammarUserDescription") : null;
+      if (descVal) descs.push(ObjC.unwrap(descVal));
+    }
+  }
+  grammar.push({
+    text: ObjC.unwrap(nsText.substringWithRange($.NSMakeRange(gloc, glen))),
+    offset: gloc,
+    length: glen,
+    descriptions: descs
+  });
+  gpos = gloc + glen;
+}
+
+var completions = [];
+var cursor = isNaN(cursorRaw) ? totalLen : Math.max(0, Math.min(totalLen, cursorRaw));
+if (cursor > 0) {
+  var prefix = text.slice(0, cursor);
+  var m = prefix.match(/[A-Za-z'’-]+$/);
+  if (m && m[0].length > 0) {
+    var wStart = cursor - m[0].length;
+    var compRaw = sc.completionsForPartialWordRangeInStringLanguageInSpellDocumentWithTag(
+      $.NSMakeRange(wStart, m[0].length), nsText, nsLang, tag
+    );
+    if (compRaw) {
+      var ccnt = Number(compRaw.count);
+      for (var ci = 0; ci < Math.min(ccnt, 5); ci++) {
+        completions.push(ObjC.unwrap(compRaw.objectAtIndex(ci)));
+      }
+    }
+  }
+}
+JSON.stringify({misspellings: misspellings, grammar: grammar, completions: completions});
+"""
+
+    @staticmethod
+    def _empty_text_check_result() -> Dict[str, List[Any]]:
+        return {"misspellings": [], "grammar": [], "completions": []}
+
+    @classmethod
+    def _check_text_pyobjc(cls, text: str, language: str = "", cursor: Optional[int] = None) -> Optional[Dict[str, List[Any]]]:
+        try:
+            import AppKit  # type: ignore[import-not-found]
+            import Foundation  # type: ignore[import-not-found]
+        except Exception:
+            return None
+
+        sc = AppKit.NSSpellChecker.sharedSpellChecker()
+        ns_text = Foundation.NSString.stringWithString_(text)
+        total_len = int(ns_text.length())
+        ns_lang = language or None
+        tag = 0
+        misspellings: List[Dict[str, Any]] = []
+        pos = 0
+        while pos < total_len:
+            rng, _ = sc.checkSpellingOfString_startingAt_language_wrap_inSpellDocumentWithTag_wordCount_(
+                ns_text, pos, ns_lang, False, tag, None
+            )
+            loc, length = int(rng.location), int(rng.length)
+            if length <= 0 or loc >= total_len or (loc + length) <= pos:
+                break
+            word = str(ns_text.substringWithRange_(Foundation.NSMakeRange(loc, length)))
+            guesses = sc.guessesForWordRange_inString_language_inSpellDocumentWithTag_(
+                Foundation.NSMakeRange(loc, length), ns_text, ns_lang, tag
+            ) or []
+            misspellings.append(
+                {
+                    "word": word,
+                    "offset": loc,
+                    "length": length,
+                    "suggestions": [str(g) for g in list(guesses)[:5]],
+                }
+            )
+            pos = loc + length
+
+        grammar: List[Dict[str, Any]] = []
+        gpos = 0
+        while gpos < total_len:
+            grng, details = sc.checkGrammarOfString_startingAt_language_wrap_inSpellDocumentWithTag_details_(
+                ns_text, gpos, ns_lang, False, tag, None
+            )
+            gloc, glen = int(grng.location), int(grng.length)
+            if glen <= 0 or gloc >= total_len or (gloc + glen) <= gpos:
+                break
+            descs = []
+            for d in list(details or []):
+                desc = d.get("NSGrammarUserDescription") if hasattr(d, "get") else None
+                if desc:
+                    descs.append(str(desc))
+            grammar.append(
+                {
+                    "text": str(ns_text.substringWithRange_(Foundation.NSMakeRange(gloc, glen))),
+                    "offset": gloc,
+                    "length": glen,
+                    "descriptions": descs,
+                }
+            )
+            gpos = gloc + glen
+
+        completions: List[str] = []
+        eff_cursor = total_len if cursor is None else max(0, min(total_len, int(cursor)))
+        if eff_cursor > 0:
+            m = re.search(r"[A-Za-z'’-]+$", text[:eff_cursor])
+            if m:
+                w_start = eff_cursor - len(m.group(0))
+                comp_raw = sc.completionsForPartialWordRange_inString_language_inSpellDocumentWithTag_(
+                    Foundation.NSMakeRange(w_start, len(m.group(0))), ns_text, ns_lang, tag
+                ) or []
+                completions = [str(c) for c in list(comp_raw)[:5]]
+        return {"misspellings": misspellings, "grammar": grammar, "completions": completions}
+
+    def _check_text_jxa(self, text: str, language: str = "", cursor: Optional[int] = None) -> Dict[str, List[Any]]:
+        env = dict(os.environ)
+        env["BP_CHECK_TEXT"] = text
+        env["BP_CHECK_LANG"] = language
+        env["BP_CHECK_CURSOR"] = "" if cursor is None else str(int(cursor))
+        proc = subprocess.run(
+            ["/usr/bin/osascript", "-l", "JavaScript", "-e", self._TEXT_CHECK_JXA],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=5.0,
+            check=False,
+        )
+        if proc.returncode != 0 or not (proc.stdout or "").strip():
+            raise RuntimeError((proc.stderr or "").strip() or f"osascript exited {proc.returncode}")
+        parsed = json.loads(proc.stdout.strip())
+        return {
+            "misspellings": list(parsed.get("misspellings") or []),
+            "grammar": list(parsed.get("grammar") or []),
+            "completions": list(parsed.get("completions") or []),
+        }
+
+    def check_text(self, body: Dict[str, Any]) -> Dict[str, List[Any]]:
+        text = str(body.get("text") or "")
+        if not text.strip() or len(text) > 16384:
+            return self._empty_text_check_result()
+        language = str(body.get("language") or "").strip()
+        cursor_raw = body.get("cursor")
+        cursor: Optional[int] = int(cursor_raw) if isinstance(cursor_raw, int) and not isinstance(cursor_raw, bool) else None
+        if sys.platform != "darwin":
+            return self._empty_text_check_result()
+        try:
+            pyobjc_res = self._check_text_pyobjc(text, language=language, cursor=cursor)
+            if pyobjc_res is not None:
+                return pyobjc_res
+            return self._check_text_jxa(text, language=language, cursor=cursor)
+        except Exception as exc:
+            self.logger.debug("[text/check] macOS NSSpellChecker unavailable/failed: %s", exc)
+            return self._empty_text_check_result()
 
 
 BluePillBackend = BluePillEngine
@@ -12890,19 +13358,14 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/v1/chat/new":
-            addrs = body.get("addresses") or []
-            first_addr = str(addrs[0]).strip() if addrs else ""
-            service = str(body.get("service") or "iMessage")
-            chat_guid = f"{service};-;{first_addr}" if first_addr else ""
-            msg_text = str(body.get("message") or "").strip()
-            sent_msgs = []
-            if chat_guid and msg_text:
-                try:
-                    sent_msgs.append(self.engine.send_text({"chatGuid": chat_guid, "message": msg_text}))
-                except RuntimeError as exc:
-                    self._send_json(500, None, str(exc))
-                    return
-            self._send_json(200, {"guid": chat_guid, "chatIdentifier": first_addr, "participants": [{"address": first_addr}], "messages": sent_msgs})
+            try:
+                self._send_json(200, self.engine.create_chat(body))
+            except RuntimeError as exc:
+                self._send_json(500, None, str(exc))
+            return
+
+        if path == "/api/v1/text/check":
+            self._send_json(200, self.engine.check_text(body))
             return
 
         if path == "/api/v1/message/query":
@@ -17054,6 +17517,198 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+
+    # --- Selftest: #82 CKLasersEffect normalization & propagation, #83 autoUpdate, #88 /api/v1/text/check ---
+    assert BluePillEngine._normalize_effect_id("lasers") == "com.apple.messages.effect.CKLasersEffect"
+    assert BluePillEngine._normalize_effect_id("Sent with Lasers") == "com.apple.messages.effect.CKLasersEffect"
+    assert BluePillEngine._normalize_effect_id("✨ Lasers") == "com.apple.messages.effect.CKLasersEffect"
+    assert BluePillEngine._normalize_effect_id("CKLasersEffect") == "com.apple.messages.effect.CKLasersEffect"
+    assert BluePillEngine._normalize_effect_id("com.apple.MobileSMS.expressivesend.lasers") == "com.apple.messages.effect.CKLasersEffect"
+    assert BluePillEngine._normalize_effect_id("confetti") == "com.apple.messages.effect.CKConfettiEffect"
+    assert BluePillEngine._normalize_effect_id("echo") == "com.apple.messages.effect.CKEchoEffect"
+
+    with tempfile.TemporaryDirectory(prefix="bp_82_83_88_") as feat82_dir:
+        srv_cfg_path = os.path.join(feat82_dir, "server.json")
+        with open(srv_cfg_path, "w", encoding="utf-8") as cf:
+            json.dump({"password": "pw82", "autoUpdate": False}, cf)
+        eng82 = BluePillEngine(db_path="/nonexistent/feat82.db", password="pw82", enable_background_daemons=False)
+        eng82.server_config_path = srv_cfg_path
+        eng82._load_module_config()
+        assert eng82.auto_update is False, "Expected autoUpdate=False opt-out from server.json"
+
+        with open(srv_cfg_path, "w", encoding="utf-8") as cf:
+            json.dump({"password": "pw82"}, cf)
+        eng82.auto_update = True
+        eng82._load_module_config()
+        assert eng82.auto_update is True, "Expected autoUpdate default True"
+
+        captured_helper_payloads: List[Tuple[str, Dict[str, Any]]] = []
+        eng82._send_helper_payload_with_tx = lambda act, data, wait_timeout=0.8: (
+            captured_helper_payloads.append((act, dict(data))) or (True, "laser-guid-1")
+        )
+        sent_laser = eng82.send_text({
+            "chatGuid": "iMessage;-;+14155550191",
+            "message": "Pew pew!",
+            "effectId": "Sent with Lasers",
+        })
+        assert sent_laser.get("expressiveSendStyleId") == "com.apple.messages.effect.CKLasersEffect", sent_laser
+        assert captured_helper_payloads[-1][1].get("effectId") == "com.apple.messages.effect.CKLasersEffect", captured_helper_payloads
+
+        # #88 POST /api/v1/text/check auth + graceful empty lists on non-macOS + mocked macOS bridge
+        BluePillHTTPHandler.engine = eng82
+        srv82 = FastThreadingHTTPServer(("127.0.0.1", 0), BluePillHTTPHandler)
+        port82 = srv82.server_address[1]
+        threading.Thread(target=srv82.serve_forever, daemon=True).start()
+        try:
+            # 401 unauthenticated
+            req_unauth = urllib.request.Request(
+                f"http://127.0.0.1:{port82}/api/v1/text/check",
+                data=json.dumps({"text": "Helo"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                urllib.request.urlopen(req_unauth, timeout=5.0)
+                raise AssertionError("Expected 401 on /api/v1/text/check without password")
+            except urllib.error.HTTPError as herr:
+                assert herr.code == 401
+
+            # 200 authenticated /api/v1/chat/new forwards effectId
+            req_new_chat = urllib.request.Request(
+                f"http://127.0.0.1:{port82}/api/v1/chat/new?password=pw82",
+                data=json.dumps({"addresses": ["+14155550192"], "message": "Laser new", "effectId": "lasers"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req_new_chat, timeout=5.0) as resp_nc:
+                nc_body = json.loads(resp_nc.read().decode("utf-8"))
+                assert nc_body["data"]["messages"][0]["expressiveSendStyleId"] == "com.apple.messages.effect.CKLasersEffect", nc_body
+
+            # #91 POST /api/v1/chat/new with 2+ recipients (dedup + Private API create-chat + send-message)
+            captured_helper_payloads.clear()
+            eng82._send_helper_payload_with_tx = lambda act, data, wait_timeout=0.8: (
+                captured_helper_payloads.append((act, dict(data)))
+                or (True, "iMessage;+;chatgroup91" if act == "create-chat" else "grp-msg-91")
+            )
+            req_grp = urllib.request.Request(
+                f"http://127.0.0.1:{port82}/api/v1/chat/new?password=pw82",
+                data=json.dumps({
+                    "addresses": ["+14155550101", "+14155550102", "+14155550101"],
+                    "message": "Group hello",
+                    "effectId": "lasers",
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req_grp, timeout=5.0) as resp_grp:
+                grp_body = json.loads(resp_grp.read().decode("utf-8"))
+                assert grp_body["data"]["guid"] == "iMessage;+;chatgroup91", grp_body
+                assert [p["address"] for p in grp_body["data"]["participants"]] == ["+14155550101", "+14155550102"], grp_body
+                assert grp_body["data"]["messages"][0]["expressiveSendStyleId"] == "com.apple.messages.effect.CKLasersEffect", grp_body
+                assert captured_helper_payloads[0] == ("create-chat", {"addresses": ["+14155550101", "+14155550102"], "service": "iMessage"}), captured_helper_payloads
+
+            # #91 AppleScript fallback on 2+ recipients (mocked darwin + db_path)
+            grp_as_calls: List[Tuple[List[str], str, str]] = []
+            orig_plat_grp = sys.platform
+            orig_exists_grp = os.path.exists
+            orig_db_grp = eng82.db_path
+            eng82.db_path = os.path.join(feat82_dir, "fake_chat.db")
+            with open(eng82.db_path, "wb") as fdb:
+                fdb.write(b"")
+            eng82._create_group_chat_applescript = lambda addrs, svc, msg: grp_as_calls.append((list(addrs), svc, msg)) or True  # type: ignore[method-assign]
+            eng82.query_chats = lambda **kw: [{"guid": "iMessage;+;chatas91", "participants": [{"address": "+14155550101"}, {"address": "+14155550102"}]}]  # type: ignore[method-assign]
+            try:
+                sys.platform = "darwin"  # type: ignore[misc]
+                as_grp = eng82.create_chat({
+                    "addresses": ["+14155550101", "+14155550102"],
+                    "message": "AS group",
+                    "method": "apple-script",
+                })
+                assert as_grp["guid"] == "iMessage;+;chatas91", as_grp
+                assert grp_as_calls == [(["+14155550101", "+14155550102"], "iMessage", "AS group")], grp_as_calls
+
+                # #82 Effect must NOT silently strip via AppleScript when helper is unavailable
+                eng82._send_helper_payload_with_tx = lambda act, data, wait_timeout=0.8: (False, "")
+                try:
+                    eng82.send_text({"chatGuid": "iMessage;-;+14155550191", "message": "Laser fail", "effectId": "lasers"})
+                    raise AssertionError("Expected RuntimeError when expressive effect helper is unavailable")
+                except RuntimeError as r_exc:
+                    assert "Private API helper" in str(r_exc), r_exc
+            finally:
+                sys.platform = orig_plat_grp  # type: ignore[misc]
+                os.path.exists = orig_exists_grp  # type: ignore[assignment]
+                eng82.db_path = orig_db_grp
+
+            # 200 authenticated /api/v1/text/check (non-macOS graceful empty + mocked macOS bridge)
+            req_tc = urllib.request.Request(
+                f"http://127.0.0.1:{port82}/api/v1/text/check?password=pw82",
+                data=json.dumps({"text": "Helo wrld"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req_tc, timeout=5.0) as resp_tc:
+                tc_body = json.loads(resp_tc.read().decode("utf-8"))
+                assert tc_body.get("status") == 200 and set(tc_body.get("data", {}).keys()) == {"misspellings", "grammar", "completions"}, tc_body
+
+            orig_plat_tc = sys.platform
+            eng82._check_text_jxa = lambda t, language="", cursor=None: {  # type: ignore[method-assign]
+                "misspellings": [{"word": "wrld", "offset": 5, "length": 4, "suggestions": ["world"]}],
+                "grammar": [],
+                "completions": ["world"],
+            }
+            try:
+                sys.platform = "darwin"  # type: ignore[misc]
+                mock_tc = eng82.check_text({"text": "Helo wrld"})
+                assert mock_tc["misspellings"][0]["suggestions"] == ["world"] and mock_tc["completions"] == ["world"], mock_tc
+            finally:
+                sys.platform = orig_plat_tc  # type: ignore[misc]
+        finally:
+            srv82.shutdown()
+            srv82.server_close()
+            shutil.rmtree(eng82._config_dir, ignore_errors=True)
+
+        # #83 auto_update_once with mock feed and Homebrew upgrade flags check
+        class _MockFeedHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *log_args: Any) -> None:  # noqa: A002
+                return
+
+            def do_GET(self) -> None:
+                body_b = json.dumps({
+                    "version": "9.9.9",
+                    "release_url": "https://github.com/nertwork/bluepill/releases/tag/v9.9.9",
+                    "checksums_url": "https://github.com/nertwork/bluepill/releases/download/v9.9.9/SHA256SUMS.txt",
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body_b)))
+                self.end_headers()
+                self.wfile.write(body_b)
+
+        feed_srv = HTTPServer(("127.0.0.1", 0), _MockFeedHandler)
+        feed_port = feed_srv.server_address[1]
+        threading.Thread(target=feed_srv.serve_forever, daemon=True).start()
+        orig_allow_auto = os.environ.get("BLUEPILL_ALLOW_AUTO_UPDATE")
+        try:
+            os.environ["BLUEPILL_ALLOW_AUTO_UPDATE"] = "1"
+            eng83 = BluePillEngine(db_path="/nonexistent/feat83.db", password="pw83", enable_background_daemons=False)
+            eng83._updates_feed_url = f"http://127.0.0.1:{feed_port}/api/v1/updates/latest"
+            eng83._detect_update_method = lambda: "homebrew"  # type: ignore[method-assign]
+            applied_calls: List[Tuple[str, str, str]] = []
+            eng83._run_server_update_worker = lambda m, v, c: applied_calls.append((m, v, c))  # type: ignore[method-assign]
+            au_res = eng83.auto_update_once()
+            assert au_res.get("applied") is True and applied_calls == [(
+                "homebrew",
+                "9.9.9",
+                "https://github.com/nertwork/bluepill/releases/download/v9.9.9/SHA256SUMS.txt",
+            )], (au_res, applied_calls)
+            shutil.rmtree(eng83._config_dir, ignore_errors=True)
+        finally:
+            if orig_allow_auto is None:
+                os.environ.pop("BLUEPILL_ALLOW_AUTO_UPDATE", None)
+            else:
+                os.environ["BLUEPILL_ALLOW_AUTO_UPDATE"] = orig_allow_auto
+            feed_srv.shutdown()
+            feed_srv.server_close()
 
     info = engine.get_server_info()
     print(
