@@ -20,6 +20,7 @@
 #include <QImageReader>
 #include <QImageWriter>
 #include <QLocalSocket>
+#include <QProcessEnvironment>
 #include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QWindow>
@@ -114,6 +115,28 @@ static bool attachmentGuidsMatch(const QString &g1, const QString &g2) {
     if (b1.size() >= 16 && b2.size() >= 16 && b1.left(16) == b2.left(16)) return true;
     if (b1.size() >= 11 && b2.size() >= 11 && b1.left(11) == b2.left(11)) return true;
     return false;
+}
+
+static QString sanitizeCacheComponent(const QString &raw, int maxLen = 64) {
+    static const QRegularExpression reUnsafe(QStringLiteral(R"([^A-Za-z0-9._-])"));
+    QString s = raw;
+    s.replace(reUnsafe, QStringLiteral("_"));
+    while (s.contains(QStringLiteral(".."))) {
+        s.replace(QStringLiteral(".."), QStringLiteral("_"));
+    }
+    while (s.startsWith(QLatin1Char('.'))) {
+        s.remove(0, 1);
+    }
+    if (maxLen > 0 && s.size() > maxLen) {
+        s = s.left(maxLen);
+    }
+    return s.isEmpty() ? QStringLiteral("item") : s;
+}
+
+static bool isPathWithinDir(const QString &path, const QString &dir) {
+    const QString cleanDir = QDir::cleanPath(dir);
+    const QString cleanPath = QDir::cleanPath(path);
+    return !cleanDir.isEmpty() && cleanPath.startsWith(cleanDir + QLatin1Char('/'));
 }
 
 static QString lookupCachedAttachmentPath(const QHash<QString, QString> &cache, const QString &guid) {
@@ -744,7 +767,7 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
         emit notificationsChanged();
     };
     connect(&m_omarchyWatcher, &QFileSystemWatcher::fileChanged, this, [this, onOmarchyChanged](const QString &path) {
-        if (!QFile::exists(path)) {
+        if (QFile::exists(path) && !m_omarchyWatcher.files().contains(path)) {
             m_omarchyWatcher.addPath(path);
         }
         onOmarchyChanged();
@@ -799,6 +822,10 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
 }
 
 Backend::~Backend() {
+    {
+        std::lock_guard<std::mutex> lk(m_cacheFlushState->lifecycleMutex);
+        m_cacheFlushState->owner = nullptr;
+    }
     if (m_singleInstanceServer) {
         m_singleInstanceServer->close();
         m_singleInstanceServer->deleteLater();
@@ -806,6 +833,11 @@ Backend::~Backend() {
     }
     if (m_trayIcon) {
         m_trayIcon->hide();
+        m_trayIcon->setContextMenu(nullptr);
+    }
+    if (m_trayMenu) {
+        delete m_trayMenu;
+        m_trayMenu = nullptr;
     }
     stopCloudSignInListener();
     if (m_cloudExchangeReply) {
@@ -1457,9 +1489,13 @@ void Backend::flushMessagesCacheNow(bool async) const {
 
     if (async) {
         bool expected = false;
-        if (!m_cacheFlushInFlight.compare_exchange_strong(expected, true)) {
-            m_cacheFlushPending.store(true);
+        if (!m_cacheFlushState->inFlight.compare_exchange_strong(expected, true)) {
+            m_cacheFlushState->pending.store(true);
             return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(m_cacheFlushState->lifecycleMutex);
+            m_cacheFlushState->owner = const_cast<Backend *>(this);
         }
     }
 
@@ -1468,9 +1504,9 @@ void Backend::flushMessagesCacheNow(bool async) const {
     const int historySyncDays = m_historySyncDays;
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     const qint64 cutoffMs = nowMs - (static_cast<qint64>(historySyncDays) * 86400LL * 1000LL);
-    QPointer<const Backend> selfGuard(this);
+    auto flushState = m_cacheFlushState;
 
-    auto buildAndWriteFn = [selfGuard, async, cachePath, cacheSnapshot, chatsSnapshot, historySyncDays, nowMs, cutoffMs]() {
+    auto buildAndWriteFn = [flushState, async, cachePath, cacheSnapshot, chatsSnapshot, historySyncDays, nowMs, cutoffMs]() {
         QHash<QString, QJsonObject> chatMetaMap;
         chatMetaMap.reserve(chatsSnapshot.size());
         for (const ChatEntry &ce : chatsSnapshot) {
@@ -1597,12 +1633,19 @@ void Backend::flushMessagesCacheNow(bool async) const {
                 f.cancelWriting();
             }
         }
-        if (async && selfGuard) {
-            selfGuard->m_cacheFlushInFlight.store(false);
-            if (selfGuard->m_cacheFlushPending.exchange(false)) {
-                QMetaObject::invokeMethod(const_cast<Backend *>(selfGuard.data()), [selfGuard]() {
-                    if (selfGuard) selfGuard->saveMessagesCache();
-                }, Qt::QueuedConnection);
+        if (async) {
+            flushState->inFlight.store(false);
+            if (flushState->pending.exchange(false)) {
+                std::lock_guard<std::mutex> lk(flushState->lifecycleMutex);
+                if (flushState->owner) {
+                    Backend *owner = flushState->owner;
+                    QMetaObject::invokeMethod(owner, [flushState]() {
+                        std::lock_guard<std::mutex> guiLk(flushState->lifecycleMutex);
+                        if (flushState->owner) {
+                            flushState->owner->saveMessagesCache();
+                        }
+                    }, Qt::QueuedConnection);
+                }
             }
         }
     };
@@ -3551,7 +3594,8 @@ void Backend::launchLinuxCommandInTerminal(const QString &shellCmd,
         }
     });
 
-    auto finishWithCode = [this, pollTimer, termProc, doneDir, finishedHandled, cleanupTempDirs](int rc) {
+    QPointer<QProcess> safeTermProc(termProc);
+    auto finishWithCode = [this, pollTimer, safeTermProc, doneDir, finishedHandled, cleanupTempDirs](int rc) {
         if (*finishedHandled) return;
         *finishedHandled = true;
         pollTimer->stop();
@@ -3570,8 +3614,8 @@ void Backend::launchLinuxCommandInTerminal(const QString &shellCmd,
             }
         } else {
             // Detach parent so closing BluePill does not kill the terminal while user reads the error
-            if (termProc && termProc->state() != QProcess::NotRunning) {
-                termProc->setParent(nullptr);
+            if (safeTermProc && safeTermProc->state() != QProcess::NotRunning) {
+                safeTermProc->setParent(nullptr);
             }
             m_updateStatusText = QStringLiteral("Update command exited with code %1.").arg(rc);
             emit updateStateChanged();
@@ -10558,6 +10602,9 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
     QDir().mkpath(cacheDir);
     QString safeName = transferName;
     safeName.replace(QRegularExpression(QStringLiteral(R"([/\\:])")), QStringLiteral("_"));
+    while (safeName.contains(QStringLiteral(".."))) {
+        safeName.replace(QStringLiteral(".."), QStringLiteral("_"));
+    }
     if (safeName.isEmpty()) safeName = QStringLiteral("attachment.jpg");
 
     auto notifyAttachmentResolved = [this](const QString &attGuid, const QString &effectivePath) {
@@ -10693,7 +10740,11 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
         notifyAttachmentResolved(attGuid, srcPath);
     };
 
-    const QString destPath = cacheDir + QLatin1Char('/') + attachmentGuid.left(16) + QLatin1Char('_') + safeName;
+    const QString safeGuid = sanitizeCacheComponent(attachmentGuid, 16);
+    const QString destPath = cacheDir + QLatin1Char('/') + safeGuid + QLatin1Char('_') + safeName;
+    if (!isPathWithinDir(destPath, cacheDir)) {
+        return;
+    }
     if (QFileInfo::exists(destPath) && QFileInfo(destPath).size() >= 100) {
         m_attemptedAttachments.insert(attachmentGuid);
         resolveOrConvertAsync(attachmentGuid, destPath);
@@ -12641,16 +12692,14 @@ bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString 
                     }
                 }
                 if (!img.isNull()) {
-                    const QString clipPngPath = QDir::tempPath() + QStringLiteral("/bluepill-clipboard-image.png");
-                    QImageWriter writer(clipPngPath, QByteArrayLiteral("png"));
-                    writer.setCompression(1); // Fast zlib level 1 (~6x faster than default)
-                    if (writer.write(img)) {
-                        QFile::setPermissions(clipPngPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-                        QFile pngFile(clipPngPath);
-                        if (pngFile.open(QIODevice::ReadOnly)) {
-                            pngBytes = pngFile.readAll();
-                            pngFile.close();
+                    QBuffer buf(&pngBytes);
+                    if (buf.open(QIODevice::WriteOnly)) {
+                        QImageWriter writer(&buf, QByteArrayLiteral("png"));
+                        writer.setCompression(1); // Fast zlib level 1 (~6x faster than default)
+                        if (!writer.write(img)) {
+                            pngBytes.clear();
                         }
+                        buf.close();
                     }
                 }
             }
@@ -15825,18 +15874,17 @@ bool Backend::startLocalAudioProcess(const QString &localFile, quint64 playbackG
                 }
             }
             bin = psBin;
-            QString escapedPath = playPath;
-            escapedPath.replace(QLatin1Char('\''), QStringLiteral("''"));
+            env.insert(QStringLiteral("BLUEPILL_AUDIO_PATH"), playPath);
             const QString psScript = QStringLiteral(
                 "Add-Type -AssemblyName PresentationCore; "
                 "$p = New-Object System.Windows.Media.MediaPlayer; "
-                "$p.Open([Uri]'%1'); "
+                "$p.Open([Uri]$env:BLUEPILL_AUDIO_PATH); "
                 "$p.Play(); "
                 "$w = 0; while (-not $p.NaturalDuration.HasTimeSpan -and $w -lt 50) { Start-Sleep -Milliseconds 100; $w++ }; "
                 "$ms = if ($p.NaturalDuration.HasTimeSpan) { [int]$p.NaturalDuration.TimeSpan.TotalMilliseconds } else { 15000 }; "
                 "Start-Sleep -Milliseconds ([Math]::Min([Math]::Max($ms + 250, 500), 600000)); "
                 "$p.Stop(); $p.Close()"
-            ).arg(escapedPath);
+            );
             args << QStringLiteral("-NoProfile") << QStringLiteral("-NonInteractive") << QStringLiteral("-WindowStyle") << QStringLiteral("Hidden") << QStringLiteral("-Command") << psScript;
         } else {
             m_audioPlaying = false;
@@ -16055,7 +16103,15 @@ void Backend::toggleAudioPlayback(const QString &attachmentGuid, const QString &
         if (m_audioPlaying) {
             ++m_audioPlaybackGen;
             if (canSeekLocalAudioPlayback()) {
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+                if (m_mediaPlayer) {
+                    m_audioSeekOffsetMs = qBound(0, int(m_mediaPlayer->position()), m_audioPlaybackDurationMs);
+                } else {
+                    m_audioSeekOffsetMs = qBound(0, m_audioSeekOffsetMs + m_audioPlaybackElapsedMs, m_audioPlaybackDurationMs);
+                }
+#else
                 m_audioSeekOffsetMs = qBound(0, m_audioSeekOffsetMs + m_audioPlaybackElapsedMs, m_audioPlaybackDurationMs);
+#endif
             } else {
                 m_audioSeekOffsetMs = 0;
                 m_audioProgress = 0.0;
@@ -16169,9 +16225,10 @@ void Backend::toggleAudioPlayback(const QString &attachmentGuid, const QString &
             }
         }
     } else if (!m_serverUrl.isEmpty()) {
+        const QString encodedGuid = QString::fromUtf8(QUrl::toPercentEncoding(attachmentGuid));
         const QString apiPath = effectiveSourceUrl.startsWith(QStringLiteral("/api/"))
                                     ? effectiveSourceUrl
-                                    : (QStringLiteral("/api/v1/attachment/") + attachmentGuid + QStringLiteral("/download"));
+                                    : (QStringLiteral("/api/v1/attachment/") + encodedGuid + QStringLiteral("/download"));
         downloadUrl = buildApiUrl(apiPath);
         if (!downloadUrl.isValid() || downloadUrl.isEmpty()) {
             emit audioPlaybackChanged();
@@ -16229,7 +16286,11 @@ void Backend::toggleAudioPlayback(const QString &attachmentGuid, const QString &
 
         const QString cacheDir = effectiveHomePath() + QStringLiteral("/.cache/imsg/attachments");
         QDir().mkpath(cacheDir);
-        const QString destPath = cacheDir + QLatin1Char('/') + attachmentGuid.left(16) + QStringLiteral("_voice") + ext;
+        const QString safeGuid = sanitizeCacheComponent(attachmentGuid, 16);
+        const QString destPath = cacheDir + QLatin1Char('/') + safeGuid + QStringLiteral("_voice") + ext;
+        if (!isPathWithinDir(destPath, cacheDir)) {
+            return;
+        }
         QFile f(destPath);
         if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             f.write(bytes);
@@ -16669,15 +16730,11 @@ void Backend::scheduleMessage(const QString &text, qint64 sendAtMs) {
         payload.insert(QStringLiteral("message"), text.trimmed());
         payload.insert(QStringLiteral("sendAt"), sendAtMs);
         payload.insert(QStringLiteral("scheduleId"), scheduleId);
-        QUrl url(m_serverUrl + QStringLiteral("/api/v1/message/schedule"));
-        if (!m_password.isEmpty()) {
-            QUrlQuery query(url);
-            query.addQueryItem(QStringLiteral("password"), m_password);
-            url.setQuery(query);
+        QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/message/schedule"));
+        if (!req.url().isEmpty()) {
+            QNetworkReply *reply = m_sendNam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+            connect(reply, &QNetworkReply::finished, reply, &QObject::deleteLater);
         }
-        QNetworkRequest req(url);
-        req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-        m_sendNam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
     }
 }
 
@@ -16692,14 +16749,12 @@ void Backend::cancelScheduledMessage(const QString &scheduleId) {
     }
 
     if (!m_demoMode && !m_serverUrl.isEmpty()) {
-        QUrl url(m_serverUrl + QStringLiteral("/api/v1/message/schedule/") + scheduleId);
-        if (!m_password.isEmpty()) {
-            QUrlQuery query(url);
-            query.addQueryItem(QStringLiteral("password"), m_password);
-            url.setQuery(query);
+        const QString encodedScheduleId = QString::fromUtf8(QUrl::toPercentEncoding(scheduleId));
+        QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/message/schedule/") + encodedScheduleId);
+        if (!req.url().isEmpty()) {
+            QNetworkReply *reply = m_sendNam.deleteResource(req);
+            connect(reply, &QNetworkReply::finished, reply, &QObject::deleteLater);
         }
-        QNetworkRequest req(url);
-        m_sendNam.deleteResource(req);
     }
 }
 
@@ -16726,15 +16781,12 @@ void Backend::addParticipantToActiveChat(const QString &address) {
     if (!m_demoMode && !m_serverUrl.isEmpty()) {
         QJsonObject payload;
         payload.insert(QStringLiteral("address"), cleanAddr);
-        QUrl url(m_serverUrl + QStringLiteral("/api/v1/chat/") + m_selectedChatGuid + QStringLiteral("/participant/add"));
-        if (!m_password.isEmpty()) {
-            QUrlQuery query(url);
-            query.addQueryItem(QStringLiteral("password"), m_password);
-            url.setQuery(query);
+        const QString encodedChatGuid = QString::fromUtf8(QUrl::toPercentEncoding(m_selectedChatGuid));
+        QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/chat/") + encodedChatGuid + QStringLiteral("/participant/add"));
+        if (!req.url().isEmpty()) {
+            QNetworkReply *reply = m_sendNam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+            connect(reply, &QNetworkReply::finished, reply, &QObject::deleteLater);
         }
-        QNetworkRequest req(url);
-        req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-        m_sendNam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
     }
 }
 
@@ -16758,15 +16810,12 @@ void Backend::removeParticipantFromActiveChat(const QString &address) {
     if (!m_demoMode && !m_serverUrl.isEmpty()) {
         QJsonObject payload;
         payload.insert(QStringLiteral("address"), cleanAddr);
-        QUrl url(m_serverUrl + QStringLiteral("/api/v1/chat/") + m_selectedChatGuid + QStringLiteral("/participant/remove"));
-        if (!m_password.isEmpty()) {
-            QUrlQuery query(url);
-            query.addQueryItem(QStringLiteral("password"), m_password);
-            url.setQuery(query);
+        const QString encodedChatGuid = QString::fromUtf8(QUrl::toPercentEncoding(m_selectedChatGuid));
+        QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/chat/") + encodedChatGuid + QStringLiteral("/participant/remove"));
+        if (!req.url().isEmpty()) {
+            QNetworkReply *reply = m_sendNam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+            connect(reply, &QNetworkReply::finished, reply, &QObject::deleteLater);
         }
-        QNetworkRequest req(url);
-        req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-        m_sendNam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
     }
 }
 
@@ -18693,10 +18742,11 @@ void Backend::shareIcloudPhotoToChat(const QString &chatGuid, const QString &att
         QDir().mkpath(cacheDir);
         QString safeName = QFileInfo(fileName.isEmpty() ? QStringLiteral("photo.jpg") : fileName).fileName();
         if (safeName.isEmpty()) safeName = QStringLiteral("photo.jpg");
-        QString safeGuid = attachmentGuid;
-        safeGuid.replace(QLatin1Char('/'), QLatin1Char('_'));
-        safeGuid.replace(QLatin1Char(':'), QLatin1Char('_'));
+        const QString safeGuid = sanitizeCacheComponent(attachmentGuid);
         const QString destPath = cacheDir + QLatin1Char('/') + safeGuid + QLatin1Char('_') + safeName;
+        if (!isPathWithinDir(destPath, cacheDir)) {
+            return;
+        }
         QFile out(destPath);
         if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             out.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
@@ -18835,10 +18885,11 @@ void Backend::stageIcloudPhotoForChat(const QString &chatGuid, const QString &at
         }
         const QString cacheDir = effectiveHomePath() + QStringLiteral("/.cache/imsg/attachments");
         QDir().mkpath(cacheDir);
-        QString safeGuid = attachmentGuid;
-        safeGuid.replace(QLatin1Char('/'), QLatin1Char('_'));
-        safeGuid.replace(QLatin1Char(':'), QLatin1Char('_'));
+        const QString safeGuid = sanitizeCacheComponent(attachmentGuid);
         const QString destPath = cacheDir + QLatin1Char('/') + safeGuid + QLatin1Char('_') + safeName;
+        if (!isPathWithinDir(destPath, cacheDir)) {
+            return;
+        }
         QSaveFile out(destPath);
         if (!out.open(QIODevice::WriteOnly)) {
             emit toastMessage(QStringLiteral("⚠ Failed to save iCloud photo to cache"));

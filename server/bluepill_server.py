@@ -514,6 +514,7 @@ class BluePillEngine:
 
         self._helper_clients: List[socket.socket] = []
         self._helper_lock = threading.Lock()
+        self._helper_write_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._last_max_rowid: Optional[int] = None
         self._detected_account: str = ""
@@ -1113,7 +1114,7 @@ class BluePillEngine:
         if not os.path.exists(photos_db):
             return None
         try:
-            pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+            pconn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(photos_db))}?mode=ro", uri=True)
             try:
                 zcols = {c[1] for c in pconn.execute("PRAGMA table_info(ZASSET)").fetchall()}
                 if "ZADDEDDATE" in zcols:
@@ -1228,7 +1229,7 @@ class BluePillEngine:
         if self.enable_notes:
             if os.path.exists(notes_db):
                 try:
-                    nconn = sqlite3.connect(f"file:{notes_db}?mode=ro", uri=True)
+                    nconn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(notes_db))}?mode=ro", uri=True)
                     try:
                         row = nconn.execute(
                             "SELECT count(*) FROM ZICCLOUDSYNCINGOBJECT WHERE ZTITLE1 IS NOT NULL AND COALESCE(ZMARKEDFORDELETION, 0) = 0;"
@@ -1253,7 +1254,7 @@ class BluePillEngine:
         if self.enable_calendar:
             if os.path.exists(cal_db):
                 try:
-                    cconn = sqlite3.connect(f"file:{cal_db}?mode=ro", uri=True)
+                    cconn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(cal_db))}?mode=ro", uri=True)
                     try:
                         row = cconn.execute("SELECT count(*) FROM CalendarItem;").fetchone()
                         cal_events_count = int(row[0] or 0) if row else 0
@@ -1297,7 +1298,7 @@ class BluePillEngine:
 
             if os.path.exists(photos_db):
                 try:
-                    pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+                    pconn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(photos_db))}?mode=ro", uri=True)
                     try:
                         row = pconn.execute(
                             "SELECT count(*) FROM ZASSET WHERE ZFILENAME IS NOT NULL AND (ZTRASHEDSTATE IS NULL OR ZTRASHEDSTATE = 0);"
@@ -1314,7 +1315,7 @@ class BluePillEngine:
             masters_dir = os.path.join(photos_lib, "resources", "derivatives", "masters")
             if os.path.isdir(masters_dir):
                 try:
-                    for root_d, _, files in os.walk(masters_dir):
+                    for _root_d, _, files in os.walk(masters_dir):
                         photos_local_derivatives += sum(
                             1 for fn in files if fn.lower().endswith((".jpeg", ".jpg", ".heic", ".png"))
                         )
@@ -1654,10 +1655,12 @@ class BluePillEngine:
             try:
                 uri = f"file:{urllib.parse.quote(os.path.abspath(self.bb_config_db_path))}?mode=ro"
                 conn = sqlite3.connect(uri, uri=True, timeout=2.0)
-                row = conn.execute(
-                    "SELECT value FROM config WHERE name = 'password' LIMIT 1;"
-                ).fetchone()
-                conn.close()
+                try:
+                    row = conn.execute(
+                        "SELECT value FROM config WHERE name = 'password' LIMIT 1;"
+                    ).fetchone()
+                finally:
+                    conn.close()
                 if row and row[0]:
                     return str(row[0]).strip()
             except Exception:
@@ -1729,9 +1732,9 @@ class BluePillEngine:
                                 evt.get("error") or "-",
                             )
                             with self._tx_lock:
-                                self._tx_results[tx_id] = evt
                                 ev = self._tx_events.get(tx_id)
-                                if ev:
+                                if ev is not None:
+                                    self._tx_results[tx_id] = evt
                                     ev.set()
                         event_type = str(evt.get("event") or "")
                         if event_type in ("started-typing", "stopped-typing"):
@@ -1761,9 +1764,11 @@ class BluePillEngine:
             return
         try:
             conn = self._open_chat_db()
-            row = conn.execute("SELECT COALESCE(MAX(ROWID), 0) FROM message;").fetchone()
-            self._last_max_rowid = int(row[0] or 0) if row else 0
-            conn.close()
+            try:
+                row = conn.execute("SELECT COALESCE(MAX(ROWID), 0) FROM message;").fetchone()
+                self._last_max_rowid = int(row[0] or 0) if row else 0
+            finally:
+                conn.close()
         except Exception:
             self._last_max_rowid = None
 
@@ -2094,10 +2099,12 @@ class BluePillEngine:
         if os.path.exists(self.db_path):
             try:
                 conn = self._open_chat_db()
-                row = conn.execute(
-                    "SELECT account_login FROM chat WHERE account_login LIKE 'E:%' ORDER BY ROWID DESC LIMIT 1;"
-                ).fetchone()
-                conn.close()
+                try:
+                    row = conn.execute(
+                        "SELECT account_login FROM chat WHERE account_login LIKE 'E:%' ORDER BY ROWID DESC LIMIT 1;"
+                    ).fetchone()
+                finally:
+                    conn.close()
                 if row and row[0]:
                     acct = str(row[0])
                     if acct.startswith("E:"):
@@ -2148,14 +2155,16 @@ class BluePillEngine:
             try:
                 uri = f"file:{urllib.parse.quote(os.path.abspath(self.bb_config_db_path))}?mode=ro"
                 conn = sqlite3.connect(uri, uri=True, timeout=2.0)
-                conn.row_factory = sqlite3.Row
-                c_rows = conn.execute(
-                    "SELECT id, first_name, last_name, display_name, avatar FROM contact;"
-                ).fetchall()
-                a_rows = conn.execute(
-                    "SELECT contactId, address, type FROM contact_address WHERE address IS NOT NULL;"
-                ).fetchall()
-                conn.close()
+                try:
+                    conn.row_factory = sqlite3.Row
+                    c_rows = conn.execute(
+                        "SELECT id, first_name, last_name, display_name, avatar FROM contact;"
+                    ).fetchall()
+                    a_rows = conn.execute(
+                        "SELECT contactId, address, type FROM contact_address WHERE address IS NOT NULL;"
+                    ).fetchall()
+                finally:
+                    conn.close()
 
                 phones_by_cid: Dict[int, List[Dict[str, str]]] = {}
                 emails_by_cid: Dict[int, List[Dict[str, str]]] = {}
@@ -2212,142 +2221,145 @@ class BluePillEngine:
             try:
                 uri = f"file:{urllib.parse.quote(os.path.abspath(db_file))}?mode=ro"
                 conn = sqlite3.connect(uri, uri=True, timeout=2.0)
-                conn.row_factory = sqlite3.Row
-                rec_cols = _sqlite_columns(conn, "ZABCDRECORD")
-                photo_cols = [c for c in ("ZTHUMBNAILIMAGEDATA", "ZIMAGEDATA") if c in rec_cols]
-                optional = [c for c in ("ZMIDDLENAME", "ZNICKNAME", "ZORGANIZATION", "ZNAME", "ZJOBTITLE",
-                                        "ZDEPARTMENT", "ZBIRTHDAY", "ZBIRTHDAYYEARLESS") if c in rec_cols]
-                where = " OR ".join(f"{c} IS NOT NULL" for c in ("ZFIRSTNAME", "ZLASTNAME", "ZORGANIZATION", "ZNICKNAME")
-                                    if c in rec_cols) or "1"
-                records = conn.execute(
-                    f"SELECT Z_PK, ZUNIQUEID, ZFIRSTNAME, ZLASTNAME{''.join(', ' + c for c in optional)} "
-                    f"FROM ZABCDRECORD WHERE {where}"
-                ).fetchall()
-                if not records:
-                    conn.close()
-                    continue
+                try:
+                    conn.row_factory = sqlite3.Row
+                    rec_cols = _sqlite_columns(conn, "ZABCDRECORD")
+                    photo_cols = [c for c in ("ZTHUMBNAILIMAGEDATA", "ZIMAGEDATA") if c in rec_cols]
+                    optional = [c for c in ("ZMIDDLENAME", "ZNICKNAME", "ZORGANIZATION", "ZNAME", "ZJOBTITLE",
+                                            "ZDEPARTMENT", "ZBIRTHDAY", "ZBIRTHDAYYEARLESS") if c in rec_cols]
+                    where = " OR ".join(f"{c} IS NOT NULL" for c in ("ZFIRSTNAME", "ZLASTNAME", "ZORGANIZATION", "ZNICKNAME")
+                                        if c in rec_cols) or "1"
+                    records = conn.execute(
+                        f"SELECT Z_PK, ZUNIQUEID, ZFIRSTNAME, ZLASTNAME{''.join(', ' + c for c in optional)} "
+                        f"FROM ZABCDRECORD WHERE {where}"
+                    ).fetchall()
+                    if not records:
+                        continue
 
-                def labeled(table: str, value_col: str) -> Dict[int, List[Dict[str, str]]]:
-                    out: Dict[int, List[Dict[str, str]]] = {}
-                    cols = _sqlite_columns(conn, table)
-                    if not cols or value_col not in cols or "ZOWNER" not in cols:
+                    def labeled(
+                        table: str, value_col: str, _conn: sqlite3.Connection = conn
+                    ) -> Dict[int, List[Dict[str, str]]]:
+                        out: Dict[int, List[Dict[str, str]]] = {}
+                        cols = _sqlite_columns(_conn, table)
+                        if not cols or value_col not in cols or "ZOWNER" not in cols:
+                            return out
+                        label_sel = ", ZLABEL" if "ZLABEL" in cols else ""
+                        try:
+                            for row in _conn.execute(
+                                f"SELECT ZOWNER, {value_col}{label_sel} FROM {table} WHERE {value_col} IS NOT NULL"
+                            ):
+                                owner = row["ZOWNER"]
+                                val = str(row[value_col] or "").strip()
+                                if owner and val:
+                                    entry = {"address": val}
+                                    label = _clean_ab_label(row["ZLABEL"] if label_sel else "")
+                                    if label:
+                                        entry["label"] = label
+                                    out.setdefault(int(owner), []).append(entry)
+                        except sqlite3.Error:
+                            pass
                         return out
-                    label_sel = ", ZLABEL" if "ZLABEL" in cols else ""
-                    try:
-                        for row in conn.execute(
-                            f"SELECT ZOWNER, {value_col}{label_sel} FROM {table} WHERE {value_col} IS NOT NULL"
-                        ):
-                            owner = row["ZOWNER"]
-                            val = str(row[value_col] or "").strip()
-                            if owner and val:
-                                entry = {"address": val}
-                                label = _clean_ab_label(row["ZLABEL"] if label_sel else "")
-                                if label:
-                                    entry["label"] = label
-                                out.setdefault(int(owner), []).append(entry)
-                    except sqlite3.Error:
-                        pass
-                    return out
 
-                phones_by_owner = labeled("ZABCDPHONENUMBER", "ZFULLNUMBER")
-                emails_by_owner = labeled("ZABCDEMAILADDRESS", "ZADDRESS")
-                urls_by_owner = labeled("ZABCDURLADDRESS", "ZURL")
+                    phones_by_owner = labeled("ZABCDPHONENUMBER", "ZFULLNUMBER")
+                    emails_by_owner = labeled("ZABCDEMAILADDRESS", "ZADDRESS")
+                    urls_by_owner = labeled("ZABCDURLADDRESS", "ZURL")
 
-                addresses_by_owner: Dict[int, List[Dict[str, str]]] = {}
-                pa_cols = _sqlite_columns(conn, "ZABCDPOSTALADDRESS")
-                parts = [c for c in ("ZSTREET", "ZCITY", "ZSTATE", "ZZIPCODE", "ZCOUNTRYNAME") if c in pa_cols]
-                if "ZOWNER" in pa_cols and parts:
-                    label_sel = ", ZLABEL" if "ZLABEL" in pa_cols else ""
-                    try:
-                        for row in conn.execute(f"SELECT ZOWNER, {', '.join(parts)}{label_sel} FROM ZABCDPOSTALADDRESS"):
-                            street = str(row["ZSTREET"] or "").strip() if "ZSTREET" in parts else ""
-                            city_line = " ".join(
-                                str(row[c] or "").strip() for c in ("ZCITY", "ZSTATE", "ZZIPCODE") if c in parts and row[c]
-                            )
-                            country = str(row["ZCOUNTRYNAME"] or "").strip() if "ZCOUNTRYNAME" in parts else ""
-                            formatted = ", ".join(x for x in (street.replace("\n", ", "), city_line, country) if x)
-                            if row["ZOWNER"] and formatted:
-                                entry = {"address": formatted}
-                                label = _clean_ab_label(row["ZLABEL"] if label_sel else "")
-                                if label:
-                                    entry["label"] = label
-                                addresses_by_owner.setdefault(int(row["ZOWNER"]), []).append(entry)
-                    except sqlite3.Error:
-                        pass
+                    addresses_by_owner: Dict[int, List[Dict[str, str]]] = {}
+                    pa_cols = _sqlite_columns(conn, "ZABCDPOSTALADDRESS")
+                    parts = [c for c in ("ZSTREET", "ZCITY", "ZSTATE", "ZZIPCODE", "ZCOUNTRYNAME") if c in pa_cols]
+                    if "ZOWNER" in pa_cols and parts:
+                        label_sel = ", ZLABEL" if "ZLABEL" in pa_cols else ""
+                        try:
+                            for row in conn.execute(f"SELECT ZOWNER, {', '.join(parts)}{label_sel} FROM ZABCDPOSTALADDRESS"):
+                                street = str(row["ZSTREET"] or "").strip() if "ZSTREET" in parts else ""
+                                city_line = " ".join(
+                                    str(row[c] or "").strip() for c in ("ZCITY", "ZSTATE", "ZZIPCODE") if c in parts and row[c]
+                                )
+                                country = str(row["ZCOUNTRYNAME"] or "").strip() if "ZCOUNTRYNAME" in parts else ""
+                                formatted = ", ".join(x for x in (street.replace("\n", ", "), city_line, country) if x)
+                                if row["ZOWNER"] and formatted:
+                                    entry = {"address": formatted}
+                                    label = _clean_ab_label(row["ZLABEL"] if label_sel else "")
+                                    if label:
+                                        entry["label"] = label
+                                    addresses_by_owner.setdefault(int(row["ZOWNER"]), []).append(entry)
+                        except sqlite3.Error:
+                            pass
 
-                notes_by_owner: Dict[int, str] = {}
-                note_cols = _sqlite_columns(conn, "ZABCDNOTE")
-                if "ZTEXT" in note_cols and "ZCONTACT" in note_cols:
-                    try:
-                        for row in conn.execute("SELECT ZCONTACT, ZTEXT FROM ZABCDNOTE WHERE ZTEXT IS NOT NULL"):
-                            text = str(row["ZTEXT"] or "").strip()
-                            if row["ZCONTACT"] and text:
-                                notes_by_owner[int(row["ZCONTACT"])] = text
-                    except sqlite3.Error:
-                        pass
+                    notes_by_owner: Dict[int, str] = {}
+                    note_cols = _sqlite_columns(conn, "ZABCDNOTE")
+                    if "ZTEXT" in note_cols and "ZCONTACT" in note_cols:
+                        try:
+                            for row in conn.execute("SELECT ZCONTACT, ZTEXT FROM ZABCDNOTE WHERE ZTEXT IS NOT NULL"):
+                                text = str(row["ZTEXT"] or "").strip()
+                                if row["ZCONTACT"] and text:
+                                    notes_by_owner[int(row["ZCONTACT"])] = text
+                        except sqlite3.Error:
+                            pass
 
-                def col(r: sqlite3.Row, name: str) -> str:
-                    return str(r[name] or "").strip() if name in optional else ""
+                    def col(r: sqlite3.Row, name: str, _optional: List[str] = optional) -> str:
+                        return str(r[name] or "").strip() if name in _optional else ""
 
-                for r in records:
-                    pk = int(r["Z_PK"])
-                    phones = phones_by_owner.get(pk, [])
-                    emails = emails_by_owner.get(pk, [])
-                    if not phones and not emails:
-                        continue
-                    first = (r["ZFIRSTNAME"] or "").strip()
-                    last = (r["ZLASTNAME"] or "").strip()
-                    org = col(r, "ZORGANIZATION")
-                    nick = col(r, "ZNICKNAME")
-                    display = f"{first} {last}".strip() or org or nick or col(r, "ZNAME")
-                    if not display:
-                        continue
-                    uid = (r["ZUNIQUEID"] or str(pk)).strip()
-                    dedup_key = (
-                        display.lower(),
-                        tuple(sorted(p["address"] for p in phones)),
-                        tuple(sorted(e["address"] for e in emails)),
-                    )
-                    existing = seen_keys.get(dedup_key)
-                    avatar = ""
-                    if photo_cols:
-                        avatar_index[uid] = (db_file, pk)
-                        avatar = f"/api/v1/contact/{urllib.parse.quote(uid, safe='')}/avatar"
-                    birthday = ""
-                    if "ZBIRTHDAY" in optional and r["ZBIRTHDAY"] is not None:
-                        birthday = _ab_birthday(r["ZBIRTHDAY"], "ZBIRTHDAYYEARLESS" in optional and bool(r["ZBIRTHDAYYEARLESS"]))
-                    ab_contact = {
-                            "id": uid,
-                            "firstName": first,
-                            "lastName": last,
-                            "middleName": col(r, "ZMIDDLENAME"),
-                            "displayName": display,
-                            "nickname": nick,
-                            "organization": org,
-                            "jobTitle": col(r, "ZJOBTITLE"),
-                            "department": col(r, "ZDEPARTMENT"),
-                            "phoneNumbers": phones,
-                            "emails": emails,
-                            "addresses": addresses_by_owner.get(pk, []),
-                            "urls": urls_by_owner.get(pk, []),
-                            "note": notes_by_owner.get(pk, ""),
-                            "birthday": birthday,
-                            "avatar": avatar,
-                        }
-                    if existing is not None:
-                        # Same person as a BlueBubbles (or earlier source) entry: keep one
-                        # contact, filling in whatever the Mac adds (birthday, note, photo...)
-                        for key, value in ab_contact.items():
-                            if key == "id":
-                                continue
-                            if key in ("phoneNumbers", "emails") and value:
-                                existing[key] = value  # same addresses, but with the Mac's labels
-                            elif value and not existing.get(key):
-                                existing[key] = value
-                        continue
-                    seen_keys[dedup_key] = ab_contact
-                    contacts.append(ab_contact)
-                conn.close()
+                    for r in records:
+                        pk = int(r["Z_PK"])
+                        phones = phones_by_owner.get(pk, [])
+                        emails = emails_by_owner.get(pk, [])
+                        if not phones and not emails:
+                            continue
+                        first = (r["ZFIRSTNAME"] or "").strip()
+                        last = (r["ZLASTNAME"] or "").strip()
+                        org = col(r, "ZORGANIZATION")
+                        nick = col(r, "ZNICKNAME")
+                        display = f"{first} {last}".strip() or org or nick or col(r, "ZNAME")
+                        if not display:
+                            continue
+                        uid = (r["ZUNIQUEID"] or str(pk)).strip()
+                        dedup_key = (
+                            display.lower(),
+                            tuple(sorted(p["address"] for p in phones)),
+                            tuple(sorted(e["address"] for e in emails)),
+                        )
+                        existing = seen_keys.get(dedup_key)
+                        avatar = ""
+                        if photo_cols:
+                            avatar_index[uid] = (db_file, pk)
+                            avatar = f"/api/v1/contact/{urllib.parse.quote(uid, safe='')}/avatar"
+                        birthday = ""
+                        if "ZBIRTHDAY" in optional and r["ZBIRTHDAY"] is not None:
+                            birthday = _ab_birthday(r["ZBIRTHDAY"], "ZBIRTHDAYYEARLESS" in optional and bool(r["ZBIRTHDAYYEARLESS"]))
+                        ab_contact = {
+                                "id": uid,
+                                "firstName": first,
+                                "lastName": last,
+                                "middleName": col(r, "ZMIDDLENAME"),
+                                "displayName": display,
+                                "nickname": nick,
+                                "organization": org,
+                                "jobTitle": col(r, "ZJOBTITLE"),
+                                "department": col(r, "ZDEPARTMENT"),
+                                "phoneNumbers": phones,
+                                "emails": emails,
+                                "addresses": addresses_by_owner.get(pk, []),
+                                "urls": urls_by_owner.get(pk, []),
+                                "note": notes_by_owner.get(pk, ""),
+                                "birthday": birthday,
+                                "avatar": avatar,
+                            }
+                        if existing is not None:
+                            # Same person as a BlueBubbles (or earlier source) entry: keep one
+                            # contact, filling in whatever the Mac adds (birthday, note, photo...)
+                            for key, value in ab_contact.items():
+                                if key == "id":
+                                    continue
+                                if key in ("phoneNumbers", "emails") and value:
+                                    existing[key] = value  # same addresses, but with the Mac's labels
+                                elif value and not existing.get(key):
+                                    existing[key] = value
+                            continue
+                        seen_keys[dedup_key] = ab_contact
+                        contacts.append(ab_contact)
+                finally:
+                    conn.close()
             except Exception:
                 continue
 
@@ -2749,45 +2761,47 @@ end run
         if os.path.exists(self.db_path) and raw_identifiers:
             try:
                 conn = self._open_chat_db()
-                for ident in raw_identifiers:
-                    if ident in unpinned:
-                        continue
-                    row = conn.execute(
-                        """
-                        SELECT ROWID, guid, chat_identifier, display_name, style, service_name
-                        FROM chat
-                        WHERE guid = ? OR chat_identifier = ? OR group_id = ? OR original_group_id = ?
-                        ORDER BY ROWID DESC LIMIT 1
-                        """,
-                        (ident, ident, ident, ident),
-                    ).fetchone()
-                    if row:
-                        g = row["guid"]
-                        if g not in seen_guids and g not in unpinned:
-                            seen_guids.add(g)
-                            pins.append(
-                                {
-                                    "pinIndex": len(pins),
-                                    "guid": g,
-                                    "chatIdentifier": row["chat_identifier"] or ident,
-                                    "displayName": row["display_name"] or "",
-                                    "style": int(row["style"] or 45),
-                                }
-                            )
-                    else:
-                        cand_guid = ident if ";" in ident else f"iMessage;-;{ident}"
-                        if cand_guid not in seen_guids and cand_guid not in unpinned:
-                            seen_guids.add(cand_guid)
-                            pins.append(
-                                {
-                                    "pinIndex": len(pins),
-                                    "guid": cand_guid,
-                                    "chatIdentifier": ident,
-                                    "displayName": "",
-                                    "style": 45,
-                                }
-                            )
-                conn.close()
+                try:
+                    for ident in raw_identifiers:
+                        if ident in unpinned:
+                            continue
+                        row = conn.execute(
+                            """
+                            SELECT ROWID, guid, chat_identifier, display_name, style, service_name
+                            FROM chat
+                            WHERE guid = ? OR chat_identifier = ? OR group_id = ? OR original_group_id = ?
+                            ORDER BY ROWID DESC LIMIT 1
+                            """,
+                            (ident, ident, ident, ident),
+                        ).fetchone()
+                        if row:
+                            g = row["guid"]
+                            if g not in seen_guids and g not in unpinned:
+                                seen_guids.add(g)
+                                pins.append(
+                                    {
+                                        "pinIndex": len(pins),
+                                        "guid": g,
+                                        "chatIdentifier": row["chat_identifier"] or ident,
+                                        "displayName": row["display_name"] or "",
+                                        "style": int(row["style"] or 45),
+                                    }
+                                )
+                        else:
+                            cand_guid = ident if ";" in ident else f"iMessage;-;{ident}"
+                            if cand_guid not in seen_guids and cand_guid not in unpinned:
+                                seen_guids.add(cand_guid)
+                                pins.append(
+                                    {
+                                        "pinIndex": len(pins),
+                                        "guid": cand_guid,
+                                        "chatIdentifier": ident,
+                                        "displayName": "",
+                                        "style": 45,
+                                    }
+                                )
+                finally:
+                    conn.close()
             except Exception:
                 pass
         elif raw_identifiers:
@@ -4148,6 +4162,8 @@ end run
             "image/heif",
             "image/tiff",
         )
+        if resize is not None and resize > 0:
+            resize = max(16, min(int(resize), 4096))
         if (
             sys.platform == "darwin"
             and (convert_heic or resize)
@@ -4156,17 +4172,33 @@ end run
         ):
             cached_jpg = self._cached_converted_jpeg_path(real_path, resize)
             if not os.path.exists(cached_jpg) or os.path.getsize(cached_jpg) < 64:
-                cmd = ["/usr/bin/sips", "-s", "format", "jpeg"]
-                if resize and resize > 0:
-                    cmd.extend(["-Z", str(int(resize))])
-                cmd.extend([real_path, "--out", cached_jpg])
-                subprocess.run(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=10.0,
-                    check=False,
-                )
+                tmp_jpg = ""
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        dir=self.icloud_photos_cache_dir, suffix=".jpg", delete=False
+                    ) as tf:
+                        tmp_jpg = tf.name
+                    cmd = ["/usr/bin/sips", "-s", "format", "jpeg"]
+                    if resize and resize > 0:
+                        cmd.extend(["-Z", str(int(resize))])
+                    cmd.extend([real_path, "--out", tmp_jpg])
+                    subprocess.run(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10.0,
+                        check=False,
+                    )
+                    if os.path.exists(tmp_jpg) and os.path.getsize(tmp_jpg) >= 64:
+                        os.chmod(tmp_jpg, 0o600)
+                        os.replace(tmp_jpg, cached_jpg)
+                        tmp_jpg = ""
+                finally:
+                    if tmp_jpg and os.path.exists(tmp_jpg):
+                        try:
+                            os.unlink(tmp_jpg)
+                        except OSError:
+                            pass
             if os.path.exists(cached_jpg) and os.path.getsize(cached_jpg) >= 64:
                 return cached_jpg, "image/jpeg"
         if transcode_audio and (lower_ext == ".caf" or lower_mime == "audio/x-caf"):
@@ -4231,17 +4263,31 @@ end run
         conn = self._open_chat_db()
         try:
             suffix_uuid = clean_guid.split("_")[-1] if "_" in clean_guid else clean_guid
-            rows = conn.execute(
-                """
-                SELECT filename, mime_type, transfer_name, transfer_state, total_bytes
-                FROM attachment
-                WHERE guid = ? OR original_guid = ? OR guid LIKE ?
-                ORDER BY CASE WHEN guid = ? THEN 0 ELSE 1 END,
-                         CASE WHEN filename IS NOT NULL AND filename != '' THEN 0 ELSE 1 END,
-                         ROWID DESC
-                """,
-                (clean_guid, clean_guid, f"%{suffix_uuid}", clean_guid),
-            ).fetchall()
+            if len(suffix_uuid) >= 8:
+                escaped_suffix = suffix_uuid.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                rows = conn.execute(
+                    """
+                    SELECT filename, mime_type, transfer_name, transfer_state, total_bytes
+                    FROM attachment
+                    WHERE guid = ? OR original_guid = ? OR guid LIKE ? ESCAPE '\\'
+                    ORDER BY CASE WHEN guid = ? THEN 0 ELSE 1 END,
+                             CASE WHEN filename IS NOT NULL AND filename != '' THEN 0 ELSE 1 END,
+                             ROWID DESC
+                    """,
+                    (clean_guid, clean_guid, f"%{escaped_suffix}", clean_guid),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT filename, mime_type, transfer_name, transfer_state, total_bytes
+                    FROM attachment
+                    WHERE guid = ? OR original_guid = ?
+                    ORDER BY CASE WHEN guid = ? THEN 0 ELSE 1 END,
+                             CASE WHEN filename IS NOT NULL AND filename != '' THEN 0 ELSE 1 END,
+                             ROWID DESC
+                    """,
+                    (clean_guid, clean_guid, clean_guid),
+                ).fetchall()
             row = None
             for cand in rows:
                 cand_raw = os.path.expanduser(str(cand["filename"] or ""))
@@ -4619,7 +4665,8 @@ end run
         tx_state = "disconnected"
         for sock in reversed(clients):
             try:
-                sock.sendall(payload)
+                with self._helper_write_lock:
+                    sock.sendall(payload)
                 sent = True
                 tx_state = "sent_no_wait"
                 break
@@ -5190,8 +5237,9 @@ end run
         used_method = "none"
 
         if effect_id:
-            self.chat_state.setdefault("messageEffects", {})[temp_guid] = effect_id
-            self.message_effects[temp_guid] = effect_id
+            with self._chat_state_lock:
+                self.chat_state.setdefault("messageEffects", {})[temp_guid] = effect_id
+                self.message_effects[temp_guid] = effect_id
             if chat_guid:
                 self._recent_effects[(chat_guid, message.strip())] = (time.time(), effect_id)
             self._save_chat_state()
@@ -5246,8 +5294,9 @@ end run
                             with self._claim_lock:
                                 self.temp_guid_by_guid[helper_guid] = temp_guid
                         if effect_id:
-                            self.chat_state.setdefault("messageEffects", {})[helper_guid] = effect_id
-                            self.message_effects[helper_guid] = effect_id
+                            with self._chat_state_lock:
+                                self.chat_state.setdefault("messageEffects", {})[helper_guid] = effect_id
+                                self.message_effects[helper_guid] = effect_id
 
             if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
                 if effect_id:
@@ -5309,8 +5358,9 @@ end run
             if effect_id:
                 mguid = db_msg.get("guid") or ""
                 if mguid:
-                    self.chat_state.setdefault("messageEffects", {})[mguid] = effect_id
-                    self.message_effects[mguid] = effect_id
+                    with self._chat_state_lock:
+                        self.chat_state.setdefault("messageEffects", {})[mguid] = effect_id
+                        self.message_effects[mguid] = effect_id
                 if not db_msg.get("expressiveSendStyleId"):
                     db_msg["expressiveSendStyleId"] = effect_id
                 self._save_chat_state()
@@ -5357,8 +5407,9 @@ end run
         has_chat_db = os.path.exists(self.db_path)
         resolved_guid = (helper_guid or temp_guid) if has_chat_db else (helper_guid or f"msg-{uuid.uuid4().hex[:12]}")
         if effect_id and resolved_guid and not resolved_guid.startswith("temp-"):
-            self.chat_state.setdefault("messageEffects", {})[resolved_guid] = effect_id
-            self.message_effects[resolved_guid] = effect_id
+            with self._chat_state_lock:
+                self.chat_state.setdefault("messageEffects", {})[resolved_guid] = effect_id
+                self.message_effects[resolved_guid] = effect_id
             self._save_chat_state()
         if temp_guid and (helper_guid or not has_chat_db):
             with self._claim_lock:
@@ -5886,8 +5937,9 @@ end run
                             with self._claim_lock:
                                 self.temp_guid_by_guid[helper_guid] = temp_guid
                         if effect_id:
-                            self.chat_state.setdefault("messageEffects", {})[helper_guid] = effect_id
-                            self.message_effects[helper_guid] = effect_id
+                            with self._chat_state_lock:
+                                self.chat_state.setdefault("messageEffects", {})[helper_guid] = effect_id
+                                self.message_effects[helper_guid] = effect_id
 
             if sent and os.path.exists(self.db_path):
                 db_msg = self._poll_sent_message_from_db(
@@ -6365,42 +6417,45 @@ end run
         if ";-;" in cg and chat_ident:
             for svc in ("iMessage", "SMS", "RCS"):
                 target_guids.add(f"{svc};-;{chat_ident}")
-        self.deleted_chat_guids.update(target_guids)
+        with self._chat_state_lock:
+            self.deleted_chat_guids.update(target_guids)
         self._save_deleted_state()
 
         db_deleted_chats = 0
         if os.path.exists(self.db_path):
             try:
                 conn = sqlite3.connect(self.db_path, timeout=5.0)
-                conn.create_function("after_delete_message_plugin", -1, lambda *a: None)
-                conn.create_function("delete_attachment_path", -1, lambda *a: None)
-                conn.create_function("before_delete_attachment_path", -1, lambda *a: None)
-                placeholders = ",".join("?" for _ in target_guids)
-                params = list(target_guids)
-                c_rows = conn.execute(
-                    f"SELECT ROWID, guid FROM chat WHERE guid IN ({placeholders})",
-                    params,
-                ).fetchall()
-                chat_ids = [int(r[0]) for r in c_rows]
-                if chat_ids:
-                    id_ph = ",".join("?" for _ in chat_ids)
-                    m_rows = conn.execute(
-                        f"SELECT message_id FROM chat_message_join WHERE chat_id IN ({id_ph})",
-                        chat_ids,
+                try:
+                    conn.create_function("after_delete_message_plugin", -1, lambda *a: None)
+                    conn.create_function("delete_attachment_path", -1, lambda *a: None)
+                    conn.create_function("before_delete_attachment_path", -1, lambda *a: None)
+                    placeholders = ",".join("?" for _ in target_guids)
+                    params = list(target_guids)
+                    c_rows = conn.execute(
+                        f"SELECT ROWID, guid FROM chat WHERE guid IN ({placeholders})",
+                        params,
                     ).fetchall()
-                    msg_ids = [int(r[0]) for r in m_rows]
-                    conn.execute(f"DELETE FROM chat_message_join WHERE chat_id IN ({id_ph})", chat_ids)
-                    conn.execute(f"DELETE FROM chat_handle_join WHERE chat_id IN ({id_ph})", chat_ids)
-                    if msg_ids:
-                        m_ph = ",".join("?" for _ in msg_ids)
-                        conn.execute(
-                            f"DELETE FROM message WHERE ROWID IN ({m_ph}) AND ROWID NOT IN (SELECT message_id FROM chat_message_join)",
-                            msg_ids,
-                        )
-                    cur = conn.execute(f"DELETE FROM chat WHERE ROWID IN ({id_ph})", chat_ids)
-                    db_deleted_chats = cur.rowcount if cur.rowcount is not None else len(chat_ids)
-                    conn.commit()
-                conn.close()
+                    chat_ids = [int(r[0]) for r in c_rows]
+                    if chat_ids:
+                        id_ph = ",".join("?" for _ in chat_ids)
+                        m_rows = conn.execute(
+                            f"SELECT message_id FROM chat_message_join WHERE chat_id IN ({id_ph})",
+                            chat_ids,
+                        ).fetchall()
+                        msg_ids = [int(r[0]) for r in m_rows]
+                        conn.execute(f"DELETE FROM chat_message_join WHERE chat_id IN ({id_ph})", chat_ids)
+                        conn.execute(f"DELETE FROM chat_handle_join WHERE chat_id IN ({id_ph})", chat_ids)
+                        if msg_ids:
+                            m_ph = ",".join("?" for _ in msg_ids)
+                            conn.execute(
+                                f"DELETE FROM message WHERE ROWID IN ({m_ph}) AND ROWID NOT IN (SELECT message_id FROM chat_message_join)",
+                                msg_ids,
+                            )
+                        cur = conn.execute(f"DELETE FROM chat WHERE ROWID IN ({id_ph})", chat_ids)
+                        db_deleted_chats = cur.rowcount if cur.rowcount is not None else len(chat_ids)
+                        conn.commit()
+                finally:
+                    conn.close()
             except Exception as exc:
                 self.logger.warning("[delete_chat] db delete warning for %s: %s", cg, exc)
 
@@ -6429,29 +6484,32 @@ end run
         norm_mg = mg.split("/", 1)[-1] if "/" in mg else mg
         if norm_mg.startswith("bp:"):
             norm_mg = norm_mg[3:]
-        self.deleted_message_guids.add(mg)
-        self.deleted_message_guids.add(norm_mg)
+        with self._chat_state_lock:
+            self.deleted_message_guids.add(mg)
+            self.deleted_message_guids.add(norm_mg)
         self._save_deleted_state()
 
         db_deleted = 0
         if os.path.exists(self.db_path):
             try:
                 conn = sqlite3.connect(self.db_path, timeout=5.0)
-                conn.create_function("after_delete_message_plugin", -1, lambda *a: None)
-                conn.create_function("delete_attachment_path", -1, lambda *a: None)
-                conn.create_function("before_delete_attachment_path", -1, lambda *a: None)
-                m_rows = conn.execute(
-                    "SELECT ROWID FROM message WHERE guid IN (?, ?)",
-                    (mg, norm_mg),
-                ).fetchall()
-                m_ids = [int(r[0]) for r in m_rows]
-                if m_ids:
-                    m_ph = ",".join("?" for _ in m_ids)
-                    conn.execute(f"DELETE FROM chat_message_join WHERE message_id IN ({m_ph})", m_ids)
-                    cur = conn.execute(f"DELETE FROM message WHERE ROWID IN ({m_ph})", m_ids)
-                    db_deleted = cur.rowcount if cur.rowcount is not None else len(m_ids)
-                    conn.commit()
-                conn.close()
+                try:
+                    conn.create_function("after_delete_message_plugin", -1, lambda *a: None)
+                    conn.create_function("delete_attachment_path", -1, lambda *a: None)
+                    conn.create_function("before_delete_attachment_path", -1, lambda *a: None)
+                    m_rows = conn.execute(
+                        "SELECT ROWID FROM message WHERE guid IN (?, ?)",
+                        (mg, norm_mg),
+                    ).fetchall()
+                    m_ids = [int(r[0]) for r in m_rows]
+                    if m_ids:
+                        m_ph = ",".join("?" for _ in m_ids)
+                        conn.execute(f"DELETE FROM chat_message_join WHERE message_id IN ({m_ph})", m_ids)
+                        cur = conn.execute(f"DELETE FROM message WHERE ROWID IN ({m_ph})", m_ids)
+                        db_deleted = cur.rowcount if cur.rowcount is not None else len(m_ids)
+                        conn.commit()
+                finally:
+                    conn.close()
             except Exception as exc:
                 self.logger.warning("[delete_message] db delete warning for %s: %s", mg, exc)
 
@@ -6674,40 +6732,43 @@ end run
                 cur_list.append(addr)
         else:
             cur_list = [x for x in cur_list if x.lower() != addr.lower()]
-        self.group_participants_override[cg] = cur_list
+        with self._chat_state_lock:
+            self.group_participants_override[cg] = cur_list
         self._save_chat_state()
 
         if os.path.exists(self.db_path):
             try:
                 conn = sqlite3.connect(self.db_path, timeout=5.0)
-                c_row = conn.execute("SELECT ROWID, service_name FROM chat WHERE guid = ?", (cg,)).fetchone()
-                if c_row:
-                    cid = int(c_row[0])
-                    svc = str(c_row[1] or "iMessage")
-                    h_row = conn.execute("SELECT ROWID FROM handle WHERE id = ?", (addr,)).fetchone()
-                    if act == "add":
-                        if not h_row:
-                            cur = conn.execute(
-                                "INSERT INTO handle (id, service, uncanonicalized_id) VALUES (?, ?, ?)",
-                                (addr, svc, addr),
-                            )
-                            hid = int(cur.lastrowid or 0)
-                        else:
+                try:
+                    c_row = conn.execute("SELECT ROWID, service_name FROM chat WHERE guid = ?", (cg,)).fetchone()
+                    if c_row:
+                        cid = int(c_row[0])
+                        svc = str(c_row[1] or "iMessage")
+                        h_row = conn.execute("SELECT ROWID FROM handle WHERE id = ?", (addr,)).fetchone()
+                        if act == "add":
+                            if not h_row:
+                                cur = conn.execute(
+                                    "INSERT INTO handle (id, service, uncanonicalized_id) VALUES (?, ?, ?)",
+                                    (addr, svc, addr),
+                                )
+                                hid = int(cur.lastrowid or 0)
+                            else:
+                                hid = int(h_row[0])
+                            if hid > 0:
+                                conn.execute(
+                                    "INSERT OR IGNORE INTO chat_handle_join (chat_id, handle_id) VALUES (?, ?)",
+                                    (cid, hid),
+                                )
+                                conn.commit()
+                        elif h_row:
                             hid = int(h_row[0])
-                        if hid > 0:
                             conn.execute(
-                                "INSERT OR IGNORE INTO chat_handle_join (chat_id, handle_id) VALUES (?, ?)",
+                                "DELETE FROM chat_handle_join WHERE chat_id = ? AND handle_id = ?",
                                 (cid, hid),
                             )
                             conn.commit()
-                    elif h_row:
-                        hid = int(h_row[0])
-                        conn.execute(
-                            "DELETE FROM chat_handle_join WHERE chat_id = ? AND handle_id = ?",
-                            (cid, hid),
-                        )
-                        conn.commit()
-                conn.close()
+                finally:
+                    conn.close()
             except Exception as exc:
                 self.logger.warning("[manage_participant] db update warning for %s: %s", cg, exc)
 
@@ -6728,14 +6789,17 @@ end run
         cg = (chat_guid or "").strip()
         dname = (display_name or "").strip()
         if cg:
-            self.chat_display_names_override[cg] = dname
+            with self._chat_state_lock:
+                self.chat_display_names_override[cg] = dname
             self._save_chat_state()
         if os.path.exists(self.db_path) and cg:
             try:
                 conn = sqlite3.connect(self.db_path, timeout=5.0)
-                conn.execute("UPDATE chat SET display_name = ? WHERE guid = ?", (dname, cg))
-                conn.commit()
-                conn.close()
+                try:
+                    conn.execute("UPDATE chat SET display_name = ? WHERE guid = ?", (dname, cg))
+                    conn.commit()
+                finally:
+                    conn.close()
             except Exception as exc:
                 self.logger.warning("[rename_chat] db update warning for %s: %s", cg, exc)
         self._send_helper_payload("set-display-name", {"chatGuid": cg, "newName": dname})
@@ -7012,7 +7076,7 @@ end run
         if not os.path.exists(photos_db):
             return None
         try:
-            pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+            pconn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(photos_db))}?mode=ro", uri=True)
             try:
                 pconn.row_factory = sqlite3.Row
                 zcols = {c[1] for c in pconn.execute("PRAGMA table_info(ZASSET)").fetchall()}
@@ -7069,10 +7133,17 @@ end run
             conn = self._open_chat_db()
             try:
                 suffix_uuid = clean_guid.split("_")[-1] if "_" in clean_guid else clean_guid
-                row = conn.execute(
-                    "SELECT 1 FROM attachment WHERE guid = ? OR original_guid = ? OR guid LIKE ? LIMIT 1",
-                    (clean_guid, clean_guid, f"%{suffix_uuid}"),
-                ).fetchone()
+                if len(suffix_uuid) >= 8:
+                    escaped_suffix = suffix_uuid.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    row = conn.execute(
+                        "SELECT 1 FROM attachment WHERE guid = ? OR original_guid = ? OR guid LIKE ? ESCAPE '\\' LIMIT 1",
+                        (clean_guid, clean_guid, f"%{escaped_suffix}"),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT 1 FROM attachment WHERE guid = ? OR original_guid = ? LIMIT 1",
+                        (clean_guid, clean_guid),
+                    ).fetchone()
                 return row is not None
             finally:
                 conn.close()
@@ -7088,7 +7159,7 @@ end run
         if not os.path.exists(photos_db):
             return False
         try:
-            pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+            pconn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(photos_db))}?mode=ro", uri=True)
             try:
                 zcols = {c[1] for c in pconn.execute("PRAGMA table_info(ZASSET)").fetchall()}
                 date_expr = (
@@ -7136,14 +7207,25 @@ end run
                     conn = self._open_chat_db()
                     try:
                         suffix_uuid = clean_guid.split("_")[-1] if "_" in clean_guid else clean_guid
-                        row = conn.execute(
-                            """
-                            SELECT filename FROM attachment
-                            WHERE guid = ? OR original_guid = ? OR guid LIKE ?
-                            ORDER BY ROWID DESC LIMIT 1
-                            """,
-                            (clean_guid, clean_guid, f"%{suffix_uuid}"),
-                        ).fetchone()
+                        if len(suffix_uuid) >= 8:
+                            escaped_suffix = suffix_uuid.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                            row = conn.execute(
+                                """
+                                SELECT filename FROM attachment
+                                WHERE guid = ? OR original_guid = ? OR guid LIKE ? ESCAPE '\\'
+                                ORDER BY ROWID DESC LIMIT 1
+                                """,
+                                (clean_guid, clean_guid, f"%{escaped_suffix}"),
+                            ).fetchone()
+                        else:
+                            row = conn.execute(
+                                """
+                                SELECT filename FROM attachment
+                                WHERE guid = ? OR original_guid = ?
+                                ORDER BY ROWID DESC LIMIT 1
+                                """,
+                                (clean_guid, clean_guid),
+                            ).fetchone()
                         if row and row["filename"]:
                             raw_p = os.path.realpath(os.path.expanduser(str(row["filename"])))
                             att_root = os.path.realpath(os.path.expanduser("~/Library/Messages/Attachments"))
@@ -7165,7 +7247,7 @@ end run
             photos_db = os.path.join(photos_lib, "database", "Photos.sqlite")
             if not fallback_used and os.path.exists(photos_db) and os.path.exists("/usr/bin/brctl"):
                 try:
-                    pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+                    pconn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(photos_db))}?mode=ro", uri=True)
                     try:
                         pconn.row_factory = sqlite3.Row
                         prow = pconn.execute(
@@ -7473,7 +7555,7 @@ end run
         # 2. Query Photos.sqlite with reserved capacity so chat attachments never starve Photos library assets
         if has_photos_db and len(lib_photos) < window_limit and (not use_cursor or not _cursor_state.get("lib_exhausted")):
             try:
-                pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+                pconn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(photos_db))}?mode=ro", uri=True)
                 try:
                     pconn.row_factory = sqlite3.Row
                     zcols = {c[1] for c in pconn.execute("PRAGMA table_info(ZASSET)").fetchall()}
@@ -7711,7 +7793,7 @@ end run
         total = 0
         if os.path.exists(photos_db):
             try:
-                pconn = sqlite3.connect(f"file:{photos_db}?mode=ro", uri=True)
+                pconn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(photos_db))}?mode=ro", uri=True)
                 try:
                     row = pconn.execute(
                         """
@@ -8334,7 +8416,7 @@ end run
             macos_notes_db = os.path.expanduser("~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")
             if os.path.exists(macos_notes_db):
                 try:
-                    conn = sqlite3.connect(f"file:{macos_notes_db}?mode=ro", uri=True)
+                    conn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(macos_notes_db))}?mode=ro", uri=True)
                     try:
                         conn.row_factory = sqlite3.Row
                         rows = conn.execute(
@@ -8474,7 +8556,7 @@ end run
             macos_notes_db = os.path.expanduser("~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")
             if not found_local and clean_id not in del_map and os.path.exists(macos_notes_db):
                 try:
-                    conn = sqlite3.connect(f"file:{macos_notes_db}?mode=ro", uri=True)
+                    conn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(macos_notes_db))}?mode=ro", uri=True)
                     try:
                         row = conn.execute(
                             "SELECT 1 FROM ZICCLOUDSYNCINGOBJECT WHERE ZIDENTIFIER = ? LIMIT 1",
@@ -8539,7 +8621,7 @@ end run
             cal_db = os.path.expanduser("~/Library/Calendars/Calendar.sqlitedb")
         if os.path.exists(cal_db):
             try:
-                conn = sqlite3.connect(f"file:{cal_db}?mode=ro", uri=True)
+                conn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(cal_db))}?mode=ro", uri=True)
                 try:
                     conn.row_factory = sqlite3.Row
                     rows = conn.execute("SELECT ROWID, title, color FROM Calendar WHERE title IS NOT NULL").fetchall()
@@ -8613,7 +8695,7 @@ end run
                 cal_db = os.path.expanduser("~/Library/Calendars/Calendar.sqlitedb")
             if os.path.exists(cal_db):
                 try:
-                    conn = sqlite3.connect(f"file:{cal_db}?mode=ro", uri=True)
+                    conn = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(cal_db))}?mode=ro", uri=True)
                     try:
                         conn.row_factory = sqlite3.Row
                         now_apple_ts = time.time() - 978307200.0
@@ -12066,7 +12148,7 @@ def save_relay_config(cfg: Dict[str, Any], path: Optional[str] = None) -> str:
 
 
 def save_server_password(password: str, path: Optional[str] = None) -> str:
-    cfg_path = os.path.expanduser(path or "~/.config/bluepill/server.json")
+    cfg_path = os.path.expanduser(path or os.environ.get("BLUEPILL_SERVER_CONFIG") or "~/.config/bluepill/server.json")
     cfg_dir = os.path.dirname(cfg_path)
     if cfg_dir:
         os.makedirs(cfg_dir, exist_ok=True)
@@ -12250,7 +12332,28 @@ def encode_ws_frame(payload: bytes, opcode: int = WS_OPCODE_TEXT, mask: bool = T
     return bytes(header) + payload
 
 
-def _ws_recv_exact(sock: socket.socket, n: int) -> bytes:
+MAX_WS_FRAME_BYTES = 16 * 1024 * 1024
+
+
+class _BufferedSocket:
+    """Thin socket wrapper that serves leftover handshake bytes before delegating recv()."""
+
+    def __init__(self, sock: socket.socket, initial_buf: bytes) -> None:
+        self._sock = sock
+        self._buf = bytearray(initial_buf)
+
+    def recv(self, n: int) -> bytes:
+        if self._buf:
+            out = bytes(self._buf[:n])
+            del self._buf[:n]
+            return out
+        return self._sock.recv(n)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sock, name)
+
+
+def _ws_recv_exact(sock: Any, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
@@ -12260,7 +12363,7 @@ def _ws_recv_exact(sock: socket.socket, n: int) -> bytes:
     return bytes(buf)
 
 
-def decode_ws_frame(sock: socket.socket) -> Tuple[bool, int, bytes]:
+def decode_ws_frame(sock: Any) -> Tuple[bool, int, bytes]:
     """Read and decode one RFC 6455 WebSocket frame from a connected socket."""
     b1, b2 = _ws_recv_exact(sock, 2)
     fin = bool(b1 & 0x80)
@@ -12271,6 +12374,8 @@ def decode_ws_frame(sock: socket.socket) -> Tuple[bool, int, bytes]:
         (length,) = struct.unpack("!H", _ws_recv_exact(sock, 2))
     elif length == 127:
         (length,) = struct.unpack("!Q", _ws_recv_exact(sock, 8))
+    if length > MAX_WS_FRAME_BYTES:
+        raise ValueError(f"WebSocket frame length {length} exceeds maximum {MAX_WS_FRAME_BYTES}")
     mask_key = _ws_recv_exact(sock, 4) if masked else b""
     payload = _ws_recv_exact(sock, length) if length else b""
     if masked:
@@ -12386,7 +12491,8 @@ class BluePillTunnelClient:
                 sock.close()
                 raise ConnectionError("Oversized WebSocket handshake response")
 
-        header_block = resp_buf.split(b"\r\n\r\n", 1)[0].decode("iso-8859-1")
+        header_bytes, leftover = resp_buf.split(b"\r\n\r\n", 1)
+        header_block = header_bytes.decode("iso-8859-1")
         lines = header_block.split("\r\n")
         status_line = lines[0] if lines else ""
         if " 101 " not in status_line:
@@ -12403,6 +12509,8 @@ class BluePillTunnelClient:
             raise ConnectionError("Invalid Sec-WebSocket-Accept from server")
 
         sock.settimeout(None)
+        if leftover:
+            return _BufferedSocket(sock, bytes(leftover))  # type: ignore[return-value]
         return sock
 
     def _send_json(self, sock: socket.socket, data: Dict[str, Any]) -> None:
@@ -12502,9 +12610,39 @@ class BluePillTunnelClient:
         path = str(frame_msg.get("path", "/"))
         headers = frame_msg.get("headers") or {}
         body_b64 = frame_msg.get("body_b64") or ""
-        body = base64.b64decode(body_b64.encode("ascii")) if body_b64 else None
+
+        def _send_bad_req(err_code: str, message: str) -> None:
+            try:
+                self._send_json(
+                    sock,
+                    {
+                        "type": "http_res",
+                        "id": req_id,
+                        "status": 400,
+                        "headers": {"Content-Type": "application/json"},
+                        "body_b64": base64.b64encode(
+                            json.dumps({"status": 400, "error": err_code, "message": message}).encode("utf-8")
+                        ).decode("ascii"),
+                    },
+                )
+            except OSError:
+                pass
+
+        if not path.startswith("/") or path.startswith("//"):
+            _send_bad_req("invalid_path", "Invalid request path")
+            return
 
         target_url = f"{self.local_url}{path}"
+        if urllib.parse.urlparse(target_url).netloc != urllib.parse.urlparse(self.local_url).netloc:
+            _send_bad_req("invalid_path", "Invalid request path")
+            return
+
+        try:
+            body = base64.b64decode(body_b64.encode("ascii")) if body_b64 else None
+        except (ValueError, UnicodeEncodeError):
+            _send_bad_req("invalid_body", "Invalid base64 request body")
+            return
+
         fwd_headers = {
             str(k): str(v)
             for k, v in headers.items()
@@ -12512,15 +12650,17 @@ class BluePillTunnelClient:
         }
         req = urllib.request.Request(target_url, data=body, headers=fwd_headers, method=method)
         ctx = self._local_ssl_context()
+        chunk_threshold = 262_144  # 256 KiB raw -> ~349 KiB base64 per WS frame
+        max_ws = max(1_048_576, int(self._max_ws_bytes))
         try:
             with urllib.request.urlopen(req, timeout=40.0, context=ctx) as resp:
                 resp_status = resp.status
                 resp_headers = dict(resp.headers.items())
-                resp_body = resp.read()
+                resp_body = resp.read(max_ws + 1)
         except urllib.error.HTTPError as err:
             resp_status = err.code
             resp_headers = dict(err.headers.items()) if err.headers else {}
-            resp_body = err.read() if err.fp else b""
+            resp_body = err.read(max_ws + 1) if err.fp else b""
         except Exception as exc:
             resp_status = 502
             resp_headers = {"Content-Type": "application/json"}
@@ -12531,9 +12671,6 @@ class BluePillTunnelClient:
                     "message": f"Local bluepill-server at {self.local_url} unreachable: {exc}",
                 }
             ).encode("utf-8")
-
-        chunk_threshold = 262_144  # 256 KiB raw -> ~349 KiB base64 per WS frame
-        max_ws = max(1_048_576, int(self._max_ws_bytes))
         try:
             if self._supports_chunked_res and len(resp_body) > chunk_threshold:
                 if len(resp_body) > max_ws:
@@ -12783,6 +12920,44 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         if not head_only:
             self.wfile.write(body)
 
+    MAX_JSON_BODY = 16 * 1024 * 1024
+    MAX_UPLOAD_BODY = 128 * 1024 * 1024
+
+    class _HTTPPayloadError(Exception):
+        def __init__(self, status: int, message: str) -> None:
+            super().__init__(message)
+            self.status = status
+            self.message = message
+
+    @staticmethod
+    def _parse_int(val: Any, default: int, lo: Optional[int] = None, hi: Optional[int] = None) -> int:
+        if val is None or (isinstance(val, str) and not val.strip()):
+            out = default
+        else:
+            try:
+                out = int(val)
+            except (TypeError, ValueError):
+                out = default
+        if lo is not None and out < lo:
+            out = lo
+        if hi is not None and out > hi:
+            out = hi
+        return out
+
+    def _read_content_length(self, max_bytes: int) -> int:
+        raw_cl = self.headers.get("Content-Length")
+        if raw_cl is None or not str(raw_cl).strip():
+            return 0
+        try:
+            length = int(str(raw_cl).strip())
+        except ValueError:
+            raise self._HTTPPayloadError(400, "Invalid Content-Length")
+        if length < 0:
+            raise self._HTTPPayloadError(400, "Invalid Content-Length")
+        if length > max_bytes:
+            raise self._HTTPPayloadError(413, "Payload Too Large")
+        return length
+
     def _check_auth(self, parsed_url: urllib.parse.ParseResult) -> bool:
         expected = self.engine.password
         if not expected:
@@ -12790,11 +12965,12 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(parsed_url.query)
         for key in ("password", "guid", "token", "api_key"):
             vals = qs.get(key)
-            if vals and vals[0] == expected:
+            if vals and secrets.compare_digest(vals[0], expected):
                 return True
+        bearer_expected = f"Bearer {expected}"
         for hdr in ("X-BlueBubbles-Auth", "X-Password", "Authorization"):
             val = self.headers.get(hdr, "").strip()
-            if val == expected or val == f"Bearer {expected}":
+            if secrets.compare_digest(val, expected) or secrets.compare_digest(val, bearer_expected):
                 return True
         return False
 
@@ -12808,10 +12984,8 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             return True
         trusted_env = os.environ.get("BLUEPILL_TRUSTED_PROXIES", "")
         trusted_ips = {ip.strip() for ip in trusted_env.split(",") if ip.strip()}
-        if client_ip in trusted_ips:
-            return True
         xfp = str(self.headers.get("X-Forwarded-Proto", "") or "").strip().lower()
-        if xfp == "https" and (client_ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1") or client_ip in trusted_ips):
+        if xfp == "https" and client_ip in trusted_ips:
             return True
         return False
 
@@ -12834,7 +13008,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         return True
 
     def _read_json_body(self) -> Any:
-        length = int(self.headers.get("Content-Length", "0") or "0")
+        length = self._read_content_length(self.MAX_JSON_BODY)
         if length <= 0:
             return {}
         raw = self.rfile.read(length)
@@ -12845,7 +13019,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
 
     def _read_multipart_form(self) -> Dict[str, Any]:
         content_type = self.headers.get("Content-Type", "")
-        length = int(self.headers.get("Content-Length", "0") or "0")
+        length = self._read_content_length(self.MAX_UPLOAD_BODY)
         if length <= 0:
             return {}
         raw = self.rfile.read(length)
@@ -12924,6 +13098,9 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         self._response_started = False
         try:
             impl()
+        except self._HTTPPayloadError as exc:
+            if not getattr(self, "_response_started", False):
+                self._send_json(exc.status, None, exc.message)
         except sqlite3.DatabaseError as exc:
             if getattr(self, "_response_started", False) or not self._is_chat_db_denial(exc):
                 raise
@@ -13022,7 +13199,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/server/logs":
             qs = urllib.parse.parse_qs(parsed.query)
-            lines = int((qs.get("lines") or ["200"])[0] or 200)
+            lines = self._parse_int((qs.get("lines") or [None])[0], 200, lo=1, hi=5000)
             self._send_json(200, self.engine.get_recent_logs(lines))
             return
 
@@ -13052,8 +13229,8 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         if m_chat_msg:
             chat_guid = urllib.parse.unquote(m_chat_msg.group(1))
             qs = urllib.parse.parse_qs(parsed.query)
-            limit = int((qs.get("limit") or ["100"])[0])
-            offset = int((qs.get("offset") or ["0"])[0])
+            limit = self._parse_int((qs.get("limit") or [None])[0], 100, lo=1, hi=5000)
+            offset = self._parse_int((qs.get("offset") or [None])[0], 0, lo=0)
             sort_dir = (qs.get("sort") or ["DESC"])[0]
             try:
                 msgs = self.engine.query_messages(
@@ -13084,7 +13261,8 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             original_flag = str((qs.get("raw_heic") or ["false"])[0]).lower() == "true"
             preview_flag = str((qs.get("preview") or ["0"])[0] or "0").strip().lower() in ("1", "true", "yes")
             transcode_flag = str((qs.get("transcode") or ["0"])[0] or "0").strip().lower() in ("1", "true", "yes")
-            resize_val = int((qs.get("height") or qs.get("width") or ["0"])[0] or 0) or None
+            parsed_resize = self._parse_int((qs.get("height") or qs.get("width") or [None])[0], 0, lo=0)
+            resize_val = max(16, min(parsed_resize, 4096)) if parsed_resize > 0 else None
             try:
                 resolved = self.engine.resolve_attachment_file(
                     att_guid,
@@ -13097,6 +13275,12 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 resolved = None
             if not resolved:
+                photos_db_cand = os.path.join(
+                    os.path.expanduser(self.engine.photos_library_path), "database", "Photos.sqlite"
+                )
+                if not self.engine.enable_photos or not os.path.exists(photos_db_cand):
+                    self._send_json(404, None, "Attachment not found")
+                    return
                 # Photos-library assets require iCloud Hub authentication & transport security
                 if not self._check_icloud_auth_and_transport(parsed):
                     return
@@ -13211,7 +13395,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/message/search":
             qs = urllib.parse.parse_qs(parsed.query)
             q = (qs.get("query") or qs.get("q") or [""])[0]
-            limit = int((qs.get("limit") or ["50"])[0])
+            limit = self._parse_int((qs.get("limit") or [None])[0], 50, lo=1, hi=250)
             cg = (qs.get("chatGuid") or [""])[0]
             self._send_json(200, self.engine.search_messages(q, limit=limit, chat_guid=cg or None))
             return
@@ -13238,8 +13422,8 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             if not self._check_icloud_auth_and_transport(parsed):
                 return
             qs = urllib.parse.parse_qs(parsed.query)
-            lim = max(1, min(int((qs.get("limit") or [48])[0] or 48), 250))
-            off = max(0, int((qs.get("offset") or [0])[0] or 0))
+            lim = self._parse_int((qs.get("limit") or [None])[0], 48, lo=1, hi=250)
+            off = self._parse_int((qs.get("offset") or [None])[0], 0, lo=0)
             src_param = str((qs.get("source") or [""])[0] or "").strip().lower()
             if not src_param:
                 photos_db_cand = os.path.join(
@@ -13298,9 +13482,9 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             all_notes = self.engine.query_icloud_notes()
             total_notes = len(all_notes)
             raw_lim = (qs.get("limit") or [None])[0]
-            off = max(0, int((qs.get("offset") or [0])[0] or 0))
+            off = self._parse_int((qs.get("offset") or [None])[0], 0, lo=0)
             if raw_lim is not None and str(raw_lim).strip():
-                lim = max(1, min(int(raw_lim), 5000))
+                lim = self._parse_int(raw_lim, 100, lo=1, hi=5000)
                 page_notes = all_notes[off : off + lim]
                 has_more = (off + lim) < total_notes
             else:
@@ -13324,8 +13508,8 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             if not self._check_icloud_auth_and_transport(parsed):
                 return
             qs = urllib.parse.parse_qs(parsed.query)
-            lim = max(1, min(int((qs.get("limit") or [250])[0] or 250), 2500))
-            off = max(0, int((qs.get("offset") or [0])[0] or 0))
+            lim = self._parse_int((qs.get("limit") or [None])[0], 250, lo=1, hi=2500)
+            off = self._parse_int((qs.get("offset") or [None])[0], 0, lo=0)
             all_evts = self.engine.query_icloud_events(limit=off + lim + 1, max_limit=max(250, off + lim + 1))
             all_evts = sorted(all_evts, key=lambda e: (int(e.get("startMs") or 0), str(e.get("id") or "")))
             has_more = len(all_evts) > (off + lim)
@@ -13360,7 +13544,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             if not self._check_auth(parsed):
                 self._send_json(401, None, "Unauthorized")
                 return
-            length = int(self.headers.get("Content-Length", "0") or "0")
+            length = self._read_content_length(self.MAX_JSON_BODY)
             body_text = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else ""
             qs = urllib.parse.parse_qs(parsed.query)
             sid = (qs.get("sid") or [""])[0]
@@ -13427,8 +13611,8 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/chat/query":
             try:
                 chats = self.engine.query_chats(
-                    limit=int(body.get("limit", 250) or 250),
-                    offset=int(body.get("offset", 0) or 0),
+                    limit=self._parse_int(body.get("limit"), 250, lo=1, hi=5000),
+                    offset=self._parse_int(body.get("offset"), 0, lo=0),
                     chat_guid=body.get("chatGuid"),
                     with_participants=True,
                 )
@@ -13517,7 +13701,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/message/search":
             q = str(body.get("query") or body.get("q") or body.get("text") or "")
-            limit = int(body.get("limit", 50) or 50)
+            limit = self._parse_int(body.get("limit"), 50, lo=1, hi=250)
             cg = body.get("chatGuid")
             self._send_json(200, self.engine.search_messages(q, limit=limit, chat_guid=cg))
             return
@@ -13564,8 +13748,8 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/icloud/photos/sync":
             if not self._check_icloud_auth_and_transport(parsed):
                 return
-            limit = int(body.get("limit", 250) or 250)
-            offset = int(body.get("offset", 0) or 0)
+            limit = self._parse_int(body.get("limit"), 250, lo=1, hi=5000)
+            offset = self._parse_int(body.get("offset"), 0, lo=0)
             sync_all = bool(body.get("syncAll", True))
             job = self.engine.start_icloud_photos_sync_job(limit=limit, offset=offset, sync_all=sync_all)
             self._send_json(202, job, "Photo sync started")
@@ -17965,8 +18149,15 @@ def run_relay_setup_cli(args: argparse.Namespace, engine: BluePillEngine) -> int
                 auth_done.set()
 
         cb_server = HTTPServer(("127.0.0.1", 0), _LoginCallbackHandler)
+        cb_server.timeout = 0.5
         cb_port = cb_server.server_address[1]
-        cb_thread = threading.Thread(target=lambda: cb_server.handle_request(), daemon=True)
+        stop_event = threading.Event()
+
+        def _serve_login_callback() -> None:
+            while not auth_done.is_set() and not stop_event.is_set():
+                cb_server.handle_request()
+
+        cb_thread = threading.Thread(target=_serve_login_callback, daemon=True)
         cb_thread.start()
 
         cloud_web_base = os.environ.get("BLUEPILL_CLOUD_WEB_URL", "https://bluepill.app").rstrip("/")
@@ -17980,6 +18171,8 @@ def run_relay_setup_cli(args: argparse.Namespace, engine: BluePillEngine) -> int
             subprocess.run(["xdg-open", auth_url], check=False)
 
         if auth_done.wait(timeout=180.0) and auth_result.get("code"):
+            stop_event.set()
+            cb_thread.join(timeout=1.5)
             cb_server.server_close()
             try:
                 ex_req = urllib.request.Request(
@@ -18000,6 +18193,8 @@ def run_relay_setup_cli(args: argparse.Namespace, engine: BluePillEngine) -> int
             except Exception as exc:
                 print(f"Cloud login exchange failed: {exc}", file=sys.stderr)
         else:
+            stop_event.set()
+            cb_thread.join(timeout=1.5)
             cb_server.server_close()
             print("Timed out waiting for browser login — falling back to manual token prompt.")
 

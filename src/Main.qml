@@ -498,7 +498,7 @@ ApplicationWindow {
                 root.pendingSendEffectId = ""
                 root.pendingSendEffectName = ""
                 backend.sendMessageWithEffect(txtToSend, effId, root.replyTargetGuid)
-                root.triggerExpressiveEffect(effName)
+                root.triggerExpressiveEffect(effId || effName)
             } else {
                 backend.sendMessage(backend.selectedChatGuid, composerInput.text, root.replyTargetGuid)
             }
@@ -2068,6 +2068,8 @@ ApplicationWindow {
                 audioInputDeviceCombo.popup.close()
             } else if (audioOutputDeviceCombo.popup.visible) {
                 audioOutputDeviceCombo.popup.close()
+            } else if (root.showUpdateModal) {
+                root.showUpdateModal = false
             } else if (root.showServerConfigModal) {
                 root.showServerConfigModal = false
             } else if (root.showDeleteChatModal) {
@@ -2125,13 +2127,21 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+Shift+Delete"
-        enabled: !firstRunOnboardingModal.visible && backend.selectedChatGuid.length > 0
-        onActivated: backend.deleteChat(backend.selectedChatGuid)
+        enabled: !firstRunOnboardingModal.visible && !root.showDeleteChatModal && backend.selectedChatGuid.length > 0
+        onActivated: {
+            root.pendingDeleteChatGuid = backend.selectedChatGuid
+            root.pendingDeleteChatTitle = backend.selectedChatTitle || backend.selectedChatGuid
+            root.showDeleteChatModal = true
+        }
     }
     Shortcut {
         sequence: "Delete"
-        enabled: !firstRunOnboardingModal.visible && !composerInput.activeFocus && !searchInput.activeFocus && !root.showNewChatModal && !root.showContactModal && backend.selectedChatGuid.length > 0
-        onActivated: backend.deleteChat(backend.selectedChatGuid)
+        enabled: !firstRunOnboardingModal.visible && !composerInput.activeFocus && !searchInput.activeFocus && !root.showNewChatModal && !root.showContactModal && !root.showServerConfigModal && !root.showUpdateModal && !root.showPhotoViewer && !root.showThreadView && !root.showContactInfo && !root.showShortcutsModal && !root.showDeleteChatModal && !renameChatPopup.visible && !icloudNotesPopup.visible && !icloudCalendarPopup.visible && !icloudPhotosPopup.visible && !chatContextMenuPopup.visible && !composerSpellMenu.visible && backend.selectedChatGuid.length > 0
+        onActivated: {
+            root.pendingDeleteChatGuid = backend.selectedChatGuid
+            root.pendingDeleteChatTitle = backend.selectedChatTitle || backend.selectedChatGuid
+            root.showDeleteChatModal = true
+        }
     }
 
     ColumnLayout {
@@ -3096,6 +3106,7 @@ ApplicationWindow {
                                         Text {
                                             Layout.fillWidth: true
                                             text: (modelData.muted ? "🔕 " : "") + modelData.title
+                                            textFormat: Text.PlainText
                                             font.pixelSize: theme.fontSize + 1
                                             font.weight: modelData.unreadCount > 0 ? Font.Bold : Font.DemiBold
                                             color: theme.brightForeground
@@ -3142,6 +3153,7 @@ ApplicationWindow {
                                         Text {
                                             Layout.fillWidth: true
                                             text: modelData.lastMessagePreview
+                                            textFormat: Text.PlainText
                                             font.pixelSize: theme.fontSize - 1
                                             color: modelData.unreadCount > 0 ? theme.brightForeground : theme.foreground
                                             opacity: modelData.unreadCount > 0 ? 0.95 : 0.8
@@ -3269,7 +3281,9 @@ ApplicationWindow {
                                                 onClicked: {
                                                     var targetGuid = modelData.guid || ""
                                                     if (targetGuid.length > 0) {
-                                                        backend.deleteChat(targetGuid)
+                                                        root.pendingDeleteChatGuid = targetGuid
+                                                        root.pendingDeleteChatTitle = modelData.title || targetGuid
+                                                        root.showDeleteChatModal = true
                                                     }
                                                 }
                                             }
@@ -3870,6 +3884,7 @@ ApplicationWindow {
                                         id: contactTitleText
                                         objectName: "contactTitleText"
                                         text: backend.selectedChatTitle
+                                        textFormat: Text.PlainText
                                         font.pixelSize: theme.fontSize + 2
                                         font.bold: true
                                         color: theme.brightForeground
@@ -4636,8 +4651,10 @@ ApplicationWindow {
                         property string downloadedAttachmentUrl: ""
                         property var downloadedAttachmentUrls: ({})
                         readonly property string liveAttachmentUrl: (downloadedAttachmentUrl.length > 0) ? downloadedAttachmentUrl : (modelData.attachmentLocalUrl || "")
-                        property var liveLinkPreview: modelData.linkPreview || null
-                        property bool liveHasPreview: modelData.hasLinkPreview || (liveLinkPreview !== null && liveLinkPreview !== undefined && (liveLinkPreview.url || "").length > 0)
+                        property var updatedLinkPreview: null
+                        property string updatedLinkPreviewGuid: ""
+                        readonly property var liveLinkPreview: (updatedLinkPreviewGuid.length > 0 && updatedLinkPreviewGuid === (modelData.guid || "") && updatedLinkPreview !== null) ? updatedLinkPreview : (modelData.linkPreview || null)
+                        readonly property bool liveHasPreview: (updatedLinkPreviewGuid.length > 0 && updatedLinkPreviewGuid === (modelData.guid || "") && updatedLinkPreview !== null) ? ((updatedLinkPreview.url || "").length > 0) : (Boolean(modelData.hasLinkPreview) || (liveLinkPreview !== null && liveLinkPreview !== undefined && (liveLinkPreview.url || "").length > 0))
 
                         // Like iOS Messages: photos and up to three emoji sent without
                         // text are shown on their own, without a bubble.
@@ -4705,8 +4722,8 @@ ApplicationWindow {
                             }
                             function onLinkPreviewUpdated(guid, previewData) {
                                 if (modelData.guid === guid) {
-                                    msgDelegate.liveLinkPreview = previewData
-                                    msgDelegate.liveHasPreview = (previewData !== null && previewData !== undefined && (previewData.url || "").length > 0)
+                                    msgDelegate.updatedLinkPreviewGuid = guid
+                                    msgDelegate.updatedLinkPreview = previewData
                                 }
                             }
                         }
@@ -4737,6 +4754,7 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignLeft
                             Layout.leftMargin: 24
                             text: modelData.senderName
+                            textFormat: Text.PlainText
                             font.pixelSize: theme.fontSize - 3
                             font.bold: true
                             color: modelData.senderColor || theme.accent
@@ -4783,6 +4801,7 @@ ApplicationWindow {
                                     id: replySenderTxt
                                     Layout.fillWidth: true
                                     text: "↳ " + (modelData.replyToSender || "")
+                                    textFormat: Text.PlainText
                                     font.pixelSize: theme.fontSize - 4
                                     font.bold: true
                                     color: theme.accent
@@ -4794,6 +4813,7 @@ ApplicationWindow {
                                     objectName: "replyBodyTxt"
                                     Layout.fillWidth: true
                                     text: (modelData.replyToText || "").replace(/[\r\n]+/g, " ").trim()
+                                    textFormat: Text.PlainText
                                     font.pixelSize: theme.fontSize - 3
                                     color: theme.darkForeground
                                     wrapMode: Text.Wrap
@@ -5795,6 +5815,7 @@ ApplicationWindow {
                                                     Text {
                                                         Layout.fillWidth: true
                                                         text: (msgDelegate.liveLinkPreview && msgDelegate.liveLinkPreview.title) ? msgDelegate.liveLinkPreview.title : (msgDelegate.liveLinkPreview ? (msgDelegate.liveLinkPreview.url || "") : "")
+                                                        textFormat: Text.PlainText
                                                         font.pixelSize: theme.fontSize
                                                         font.bold: true
                                                         color: theme.brightForeground
@@ -5807,6 +5828,7 @@ ApplicationWindow {
                                                         visible: (text || "").length > 0
                                                         Layout.fillWidth: true
                                                         text: (msgDelegate.liveLinkPreview && msgDelegate.liveLinkPreview.description) ? msgDelegate.liveLinkPreview.description : ""
+                                                        textFormat: Text.PlainText
                                                         font.pixelSize: theme.fontSize - 4
                                                         color: theme.darkForeground
                                                         elide: Text.ElideRight
@@ -6368,6 +6390,7 @@ ApplicationWindow {
 
                         Text {
                             text: i18n.tr("Replying to") + " " + root.replyTargetSender + ":"
+                            textFormat: Text.PlainText
                             font.pixelSize: theme.fontSize - 2
                             font.bold: true
                             color: root.selectedChatIsGreen ? "#30D158" : theme.accent
@@ -6375,6 +6398,7 @@ ApplicationWindow {
                         Text {
                             Layout.fillWidth: true
                             text: (root.replyTargetText || "").replace(/[\r\n]+/g, " ").trim()
+                            textFormat: Text.PlainText
                             font.pixelSize: theme.fontSize - 2
                             color: theme.foreground
                             maximumLineCount: 1
@@ -7303,8 +7327,8 @@ ApplicationWindow {
                             visible: composerAssistBar.activeGrammarHint.length > 0
                             height: 24
                             radius: 12
-                            Layout.maximumWidth: composerAssistBar.width - (inlineSuggestionChip.visible ? inlineSuggestionChip.width + 36 : 28)
-                            implicitWidth: Math.min(Layout.maximumWidth, grammarHintTxt.implicitWidth + 18)
+                            Layout.maximumWidth: Math.max(0, composerAssistBar.width - (inlineSuggestionChip.visible ? inlineSuggestionChip.width + 36 : 28))
+                            implicitWidth: Math.max(0, Math.min(Layout.maximumWidth, grammarHintTxt.implicitWidth + 18))
                             color: theme.lighterBackground
                             border.width: 1
                             border.color: theme.muted
@@ -7312,7 +7336,7 @@ ApplicationWindow {
                             Text {
                                 id: grammarHintTxt
                                 anchors.centerIn: parent
-                                width: Math.min(implicitWidth, parent.width - 12)
+                                width: Math.max(0, Math.min(implicitWidth, parent.width - 12))
                                 text: "💡 " + composerAssistBar.activeGrammarHint
                                 font.pixelSize: theme.fontSize - 3
                                 color: theme.foreground
@@ -7460,8 +7484,11 @@ ApplicationWindow {
                                         composerSpellMenu.targetDraftSnapshot = txt
                                         composerSpellMenu.suggestions = spellChecker.spellingSuggestions(word) || []
                                         var pt = composerInput.mapToItem(root.contentItem, mouse.x, mouse.y)
+                                        var menuH = Math.max(composerSpellMenu.implicitHeight, composerSpellMenu.height, 84)
+                                        composerSpellMenu.anchorPtX = pt.x
+                                        composerSpellMenu.anchorPtY = pt.y
                                         composerSpellMenu.x = Math.max(12, Math.min(pt.x, root.width - composerSpellMenu.width - 12))
-                                        composerSpellMenu.y = Math.max(12, Math.min(pt.y - composerSpellMenu.height - 6, root.height - composerSpellMenu.height - 12))
+                                        composerSpellMenu.y = Math.max(12, Math.min(pt.y - menuH - 6, root.height - menuH - 12))
                                         composerSpellMenu.open()
                                     }
                                 }
@@ -9663,7 +9690,7 @@ ApplicationWindow {
                     onActivated: {
                         var chosen = Number(model[currentIndex] || 60)
                         photosGridView.positionViewAtBeginning()
-                        backend.setIcloudPhotosPageSize(chosen)
+                        backend.icloudPhotosPageSize = chosen
                     }
                 }
                 Button {
@@ -9728,11 +9755,14 @@ ApplicationWindow {
                 }
 
                 delegate: Rectangle {
+                    id: photoTileDelegate
                     width: Math.max(190, photosGridView.cellWidth - 10)
                     height: photosGridView.cellHeight - 10
                     clip: true
                     radius: 12
                     color: theme.background
+                    property string readyLocalUrl: ""
+                    property string readyLocalGuid: ""
                     readonly property bool isPhotoSelected: Boolean(modelData && modelData.guid && icloudPhotosPopup.selectedPhotos && icloudPhotosPopup.selectedPhotos[modelData.guid])
                     border.color: isPhotoSelected ? theme.accent : theme.subtleBorder
                     border.width: isPhotoSelected ? 2 : 1
@@ -9741,7 +9771,8 @@ ApplicationWindow {
                         target: backend
                         function onAttachmentReady(guid, localUrl) {
                             if (modelData && modelData.guid === guid && localUrl && localUrl.length > 0) {
-                                thumbImg.source = localUrl
+                                photoTileDelegate.readyLocalGuid = guid
+                                photoTileDelegate.readyLocalUrl = localUrl
                             }
                         }
                     }
@@ -9760,7 +9791,12 @@ ApplicationWindow {
 
                             Image {
                                 id: thumbImg
-                                property string baseSourceUrl: modelData.previewUrl || modelData.localUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
+                                property string baseSourceUrl: {
+                                    if (photoTileDelegate.readyLocalUrl.length > 0 && modelData && modelData.guid === photoTileDelegate.readyLocalGuid) {
+                                        return photoTileDelegate.readyLocalUrl
+                                    }
+                                    return modelData.previewUrl || modelData.localUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
+                                }
                                 property int retryAttempt: 0
                                 anchors.fill: parent
                                 fillMode: Image.PreserveAspectCrop
@@ -10572,6 +10608,7 @@ ApplicationWindow {
                         Text {
                             Layout.fillWidth: true
                             text: backend.selectedChatTitle
+                            textFormat: Text.PlainText
                             font.pixelSize: theme.fontSize + 3
                             font.bold: true
                             color: theme.brightForeground
@@ -10580,6 +10617,7 @@ ApplicationWindow {
                         Text {
                             Layout.fillWidth: true
                             text: backend.selectedChatSubtitle
+                            textFormat: Text.PlainText
                             font.pixelSize: theme.fontSize - 2
                             color: theme.darkForeground
                             elide: Text.ElideRight
@@ -10794,6 +10832,7 @@ ApplicationWindow {
                                     Text {
                                         Layout.fillWidth: true
                                         text: modelData.title || modelData.host || modelData.url
+                                        textFormat: Text.PlainText
                                         font.pixelSize: theme.fontSize - 1
                                         font.bold: true
                                         color: theme.brightForeground
@@ -10802,6 +10841,7 @@ ApplicationWindow {
                                     Text {
                                         Layout.fillWidth: true
                                         text: modelData.url + "  ·  " + Qt.formatDate(new Date(Number(modelData.date || 0)), "MMM d, yyyy")
+                                        textFormat: Text.PlainText
                                         font.pixelSize: theme.fontSize - 3
                                         color: theme.accent
                                         elide: Text.ElideMiddle
@@ -10989,6 +11029,7 @@ ApplicationWindow {
                                 Text {
                                     Layout.fillWidth: true
                                     text: threadItem.modelData.isFromMe ? i18n.tr("You") : (threadItem.modelData.senderName || "")
+                                    textFormat: Text.PlainText
                                     font.pixelSize: theme.fontSize - 3
                                     font.bold: true
                                     color: threadItem.modelData.isFromMe ? theme.accent : (threadItem.modelData.senderColor || theme.accent)
@@ -11675,7 +11716,7 @@ ApplicationWindow {
                         }
 
                         Text {
-                            visible: !backend.connected && backend.cloudAccountEmail.length === 0
+                            visible: backend.cloudAccountEmail.length === 0
                             Layout.fillWidth: true
                             text: "☁️ " + i18n.tr("BluePill Cloud (Recommended)")
                             font.pixelSize: theme.fontSize - 1
@@ -11683,7 +11724,7 @@ ApplicationWindow {
                             color: theme.brightForeground
                         }
                         Text {
-                            visible: !backend.connected && backend.cloudAccountEmail.length === 0
+                            visible: backend.cloudAccountEmail.length === 0
                             Layout.fillWidth: true
                             text: i18n.tr("Sign in with BluePill Cloud to connect automatically, or try the live demo.")
                             font.pixelSize: theme.fontSize - 2
@@ -11693,7 +11734,7 @@ ApplicationWindow {
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 8
-                            visible: !backend.connected && !backend.cloudSignInPending && backend.cloudAccountEmail.length === 0
+                            visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length === 0
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 8
@@ -13647,6 +13688,17 @@ ApplicationWindow {
                                     textRole: "label"
                                     valueRole: "id"
                                     currentIndex: root.findAudioDeviceIndex(backend.audioInputDevices, backend.selectedAudioInputDevice)
+                                    onModelChanged: {
+                                        var idx = root.findAudioDeviceIndex(backend.audioInputDevices, backend.selectedAudioInputDevice)
+                                        if (currentIndex !== idx) currentIndex = idx
+                                    }
+                                    Connections {
+                                        target: backend
+                                        function onAudioDevicesChanged() {
+                                            var idx = root.findAudioDeviceIndex(backend.audioInputDevices, backend.selectedAudioInputDevice)
+                                            if (audioInputDeviceCombo.currentIndex !== idx) audioInputDeviceCombo.currentIndex = idx
+                                        }
+                                    }
                                     onActivated: {
                                         if (currentIndex >= 0 && currentIndex < backend.audioInputDevices.length) {
                                             backend.selectedAudioInputDevice = backend.audioInputDevices[currentIndex].id || ""
@@ -13671,6 +13723,17 @@ ApplicationWindow {
                                     textRole: "label"
                                     valueRole: "id"
                                     currentIndex: root.findAudioDeviceIndex(backend.audioOutputDevices, backend.selectedAudioOutputDevice)
+                                    onModelChanged: {
+                                        var idx = root.findAudioDeviceIndex(backend.audioOutputDevices, backend.selectedAudioOutputDevice)
+                                        if (currentIndex !== idx) currentIndex = idx
+                                    }
+                                    Connections {
+                                        target: backend
+                                        function onAudioDevicesChanged() {
+                                            var idx = root.findAudioDeviceIndex(backend.audioOutputDevices, backend.selectedAudioOutputDevice)
+                                            if (audioOutputDeviceCombo.currentIndex !== idx) audioOutputDeviceCombo.currentIndex = idx
+                                        }
+                                    }
                                     onActivated: {
                                         if (currentIndex >= 0 && currentIndex < backend.audioOutputDevices.length) {
                                             backend.selectedAudioOutputDevice = backend.audioOutputDevices[currentIndex].id || ""
@@ -14660,9 +14723,12 @@ ApplicationWindow {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             var g = chatContextMenuPopup.targetChatGuid
+                            var t = chatContextMenuPopup.targetChatTitle
                             chatContextMenuPopup.visible = false
                             if (g.length > 0) {
-                                backend.deleteChat(g)
+                                root.pendingDeleteChatGuid = g
+                                root.pendingDeleteChatTitle = t || g
+                                root.showDeleteChatModal = true
                             }
                         }
                     }
@@ -14716,6 +14782,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
                     text: i18n.tr("Delete the entire conversation with ") + (root.pendingDeleteChatTitle || root.pendingDeleteChatGuid) + i18n.tr("? This removes the thread from imsg, the macOS Relay, and Messages in iCloud across your iPhone and other Apple devices.")
+                    textFormat: Text.PlainText
                     font.pixelSize: theme.fontSize - 1
                     color: theme.foreground
                     opacity: 0.9
@@ -15012,8 +15079,9 @@ ApplicationWindow {
                                 var lp = cp.localUrl
                                 if (lp.indexOf("file://") === 0) {
                                     lp = decodeURIComponent(lp.slice(7))
+                                    if (/^\/[A-Za-z]:/.test(lp)) lp = lp.slice(1)
                                 }
-                                if (lp.indexOf("/") === 0) {
+                                if (lp.indexOf("/") === 0 || /^[A-Za-z]:[\\/]/.test(lp)) {
                                     backend.sendAttachment(backend.selectedChatGuid, lp)
                                     root.closePhotoViewer()
                                     return
@@ -15734,7 +15802,7 @@ ApplicationWindow {
                             root.pendingSendEffectId = "";
                             root.pendingSendEffectName = "";
                             backend.sendMessageWithEffect(txt, modelData.id, root.replyTargetGuid);
-                            root.triggerExpressiveEffect(modelData.name);
+                            root.triggerExpressiveEffect(modelData.id || modelData.name);
                             composerInput.text = "";
                             root.showEmojiPicker = false;
                             root.emojiAutocompleteResults = [];
@@ -16604,6 +16672,7 @@ ApplicationWindow {
 
                 Text {
                     text: backend.selectedChatTitle
+                    textFormat: Text.PlainText
                     font.pixelSize: theme.fontSize - 1
                     color: theme.foreground
                     elide: Text.ElideRight
@@ -16716,6 +16785,15 @@ ApplicationWindow {
         property string targetChatGuid: ""
         property string targetDraftSnapshot: ""
         property var suggestions: []
+        property real anchorPtX: 0
+        property real anchorPtY: 0
+        function repositionMenu() {
+            var menuH = Math.max(composerSpellMenu.implicitHeight, composerSpellMenu.height, 84)
+            composerSpellMenu.x = Math.max(12, Math.min(composerSpellMenu.anchorPtX, root.width - composerSpellMenu.width - 12))
+            composerSpellMenu.y = Math.max(12, Math.min(composerSpellMenu.anchorPtY - menuH - 6, root.height - menuH - 12))
+        }
+        onOpened: repositionMenu()
+        onImplicitHeightChanged: if (opened) repositionMenu()
         modal: false
         focus: true
         width: 210
