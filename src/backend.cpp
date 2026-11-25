@@ -4,6 +4,7 @@
 #include "backend.h"
 #include "theme.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QClipboard>
 #include <QCoreApplication>
@@ -18,8 +19,18 @@
 #include <QBuffer>
 #include <QImageReader>
 #include <QImageWriter>
+#include <QLocalSocket>
 #include <QScopeGuard>
 #include <QTemporaryDir>
+#include <QWindow>
+#ifdef BLUEPILL_HAS_DBUS
+#include <QDBusConnection>
+#include <QDBusConnectionInterface>
+#include <QDBusInterface>
+#include <QDBusPendingCall>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
+#endif
 #ifndef Q_OS_WIN
 #include <cerrno>
 #include <fcntl.h>
@@ -28,9 +39,13 @@
 #endif
 #ifdef BLUEPILL_HAS_MULTIMEDIA
 #include <QAudioDevice>
+#include <QAudioInput>
 #include <QAudioOutput>
+#include <QMediaCaptureSession>
 #include <QMediaDevices>
+#include <QMediaFormat>
 #include <QMediaPlayer>
+#include <QMediaRecorder>
 #endif
 #include <cmath>
 #include <cstdint>
@@ -784,6 +799,14 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
 }
 
 Backend::~Backend() {
+    if (m_singleInstanceServer) {
+        m_singleInstanceServer->close();
+        m_singleInstanceServer->deleteLater();
+        m_singleInstanceServer.clear();
+    }
+    if (m_trayIcon) {
+        m_trayIcon->hide();
+    }
     stopCloudSignInListener();
     if (m_cloudExchangeReply) {
         m_cloudExchangeReply->abort();
@@ -822,6 +845,7 @@ void Backend::setStateFilePath(const QString &path) {
     m_showTopBarStatusPill = false;
     m_showPinnedRow = true;
     m_hoverMessageActions = false;
+    m_minimizeToTrayOnClose = true;
     m_onboardingCompleted = false;
     m_hasExplicitOnboardingCompleted = false;
     m_stayOnHomePage = false;
@@ -914,6 +938,9 @@ void Backend::loadAppState() {
     }
     if (obj.contains(QStringLiteral("hoverMessageActions"))) {
         m_hoverMessageActions = obj.value(QStringLiteral("hoverMessageActions")).toBool(false);
+    }
+    if (obj.contains(QStringLiteral("minimizeToTrayOnClose"))) {
+        m_minimizeToTrayOnClose = obj.value(QStringLiteral("minimizeToTrayOnClose")).toBool(true);
     }
     if (obj.contains(QStringLiteral("onboardingCompleted"))) {
         m_onboardingCompleted = obj.value(QStringLiteral("onboardingCompleted")).toBool(false);
@@ -1161,6 +1188,7 @@ bool Backend::saveAppState() const {
     root.insert(QStringLiteral("showTopBarStatusPill"), m_showTopBarStatusPill);
     root.insert(QStringLiteral("showPinnedRow"), m_showPinnedRow);
     root.insert(QStringLiteral("hoverMessageActions"), m_hoverMessageActions);
+    root.insert(QStringLiteral("minimizeToTrayOnClose"), m_minimizeToTrayOnClose);
     root.insert(QStringLiteral("onboardingCompleted"), m_onboardingCompleted);
     root.insert(QStringLiteral("lastKnownServerStatus"), m_lastKnownServerStatus);
     QJsonArray pinnedArr;
@@ -1635,6 +1663,163 @@ void Backend::setHoverMessageActions(bool enabled) {
     m_hoverMessageActions = enabled;
     saveAppState();
     emit uiPreferencesChanged();
+}
+
+void Backend::setMinimizeToTrayOnClose(bool enabled) {
+    if (m_minimizeToTrayOnClose == enabled) return;
+    m_minimizeToTrayOnClose = enabled;
+    saveAppState();
+    emit uiPreferencesChanged();
+}
+
+bool Backend::shouldMinimizeToTrayOnClose() const {
+    if (!m_minimizeToTrayOnClose || m_explicitQuit) {
+        return false;
+    }
+    if (m_trayAvailableOverrideForTest.has_value()) {
+        return *m_trayAvailableOverrideForTest;
+    }
+    return QSystemTrayIcon::isSystemTrayAvailable();
+}
+
+void Backend::quitApplication() {
+    m_explicitQuit = true;
+    if (m_trayIcon) {
+        m_trayIcon->hide();
+    }
+    if (auto *app = QApplication::instance()) {
+        Q_UNUSED(app);
+        QApplication::quit();
+    }
+}
+
+void Backend::raiseWindow() {
+    if (auto *win = qobject_cast<QWindow *>(m_rootWindow)) {
+        if (!win->isVisible()) {
+            win->show();
+        }
+        if (win->windowState() & Qt::WindowMinimized) {
+            win->showNormal();
+        }
+        win->raise();
+        win->requestActivate();
+    }
+    emit requestRaiseWindow();
+}
+
+void Backend::setupSystemTray() {
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+        return;
+    }
+    if (!qobject_cast<QApplication *>(QCoreApplication::instance())) {
+        return;
+    }
+    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+        return;
+    }
+    QApplication::setQuitOnLastWindowClosed(false);
+    if (!m_trayLastWindowClosedHooked) {
+        m_trayLastWindowClosedHooked = true;
+        connect(qApp, &QGuiApplication::lastWindowClosed, this, [this]() {
+            if (!m_minimizeToTrayOnClose || m_explicitQuit) {
+                quitApplication();
+            }
+        });
+    }
+    if (!m_trayIcon) {
+        m_trayIcon = new QSystemTrayIcon(QIcon(QStringLiteral(":/bluepill.svg")), this);
+        m_trayIcon->setToolTip(QStringLiteral("BluePill"));
+        connect(m_trayIcon, &QSystemTrayIcon::activated, this,
+                [this](QSystemTrayIcon::ActivationReason reason) {
+                    if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) {
+                        raiseWindow();
+                    }
+                });
+        connect(m_trayIcon, &QSystemTrayIcon::messageClicked, this, [this]() {
+            if (!m_lastNotifiedChatGuid.isEmpty()) {
+                selectChat(m_lastNotifiedChatGuid);
+            }
+            raiseWindow();
+        });
+    }
+    if (!m_trayMenu) {
+        m_trayMenu = new QMenu();
+        QAction *openAct = m_trayMenu->addAction(QStringLiteral("Open BluePill"));
+        connect(openAct, &QAction::triggered, this, &Backend::raiseWindow);
+        m_trayMenu->addSeparator();
+        QAction *quitAct = m_trayMenu->addAction(QStringLiteral("Quit"));
+        connect(quitAct, &QAction::triggered, this, &Backend::quitApplication);
+        m_trayIcon->setContextMenu(m_trayMenu);
+    }
+    if (!m_trayIcon->isVisible()) {
+        m_trayIcon->show();
+    }
+}
+
+bool Backend::startSingleInstanceServer(const QString &serverName) {
+    if (serverName.trimmed().isEmpty()) return false;
+    if (m_singleInstanceServer) {
+        m_singleInstanceServer->close();
+        m_singleInstanceServer->deleteLater();
+        m_singleInstanceServer.clear();
+    }
+    QLocalServer::removeServer(serverName);
+    auto *srv = new QLocalServer(this);
+    if (!srv->listen(serverName)) {
+        srv->deleteLater();
+        return false;
+    }
+    m_singleInstanceServer = srv;
+    connect(srv, &QLocalServer::newConnection, this, [this, srv]() {
+        while (srv->hasPendingConnections()) {
+            QLocalSocket *sock = srv->nextPendingConnection();
+            if (!sock) continue;
+            QPointer<QLocalSocket> safeSock(sock);
+            auto handled = std::make_shared<bool>(false);
+            auto handlePayload = [this, safeSock, handled](bool disconnectAfter) {
+                if (*handled) return;
+                const QByteArray payload = safeSock ? safeSock->readAll().trimmed() : QByteArray();
+                if (payload.isEmpty() || payload.contains("RAISE")) {
+                    *handled = true;
+                    raiseWindow();
+                }
+                if (disconnectAfter && safeSock && safeSock->state() != QLocalSocket::UnconnectedState) {
+                    safeSock->disconnectFromServer();
+                }
+            };
+            connect(sock, &QLocalSocket::readyRead, this, [handlePayload]() {
+                handlePayload(true);
+            });
+            connect(sock, &QLocalSocket::disconnected, this, [safeSock, handlePayload]() {
+                handlePayload(false);
+                if (safeSock) safeSock->deleteLater();
+            });
+            if (sock->bytesAvailable() > 0 || sock->state() == QLocalSocket::UnconnectedState) {
+                handlePayload(sock->state() != QLocalSocket::UnconnectedState);
+            } else {
+                QTimer::singleShot(150, sock, [safeSock, handlePayload]() {
+                    if (safeSock && safeSock->state() == QLocalSocket::ConnectedState) {
+                        handlePayload(true);
+                    }
+                });
+            }
+        }
+    });
+    return true;
+}
+
+bool Backend::notifyExistingInstance(const QString &serverName, int timeoutMs) {
+    if (serverName.trimmed().isEmpty()) return false;
+    QLocalSocket sock;
+    sock.connectToServer(serverName);
+    if (!sock.waitForConnected(qMax(50, timeoutMs))) {
+        return false;
+    }
+    sock.write("RAISE\n");
+    sock.flush();
+    sock.waitForBytesWritten(qMax(50, timeoutMs));
+    sock.disconnectFromServer();
+    return true;
 }
 
 void Backend::reconcileOnboardingForConfiguredInstall() {
@@ -2223,6 +2408,8 @@ bool Backend::cloudLoggedIn() const {
     const bool isTestLoopback = m_allowLocalhostCloudForTest &&
                                 (host == QStringLiteral("127.0.0.1") || host == QStringLiteral("localhost"));
     const bool isCloudHost = isTestLoopback ||
+                              host == QStringLiteral("bluepill.app") ||
+                              host.endsWith(QStringLiteral(".bluepill.app")) ||
                               host == QStringLiteral("bluepill.nertwork.com") ||
                               host.endsWith(QStringLiteral(".bluepill.nertwork.com"));
     if (!isCloudHost) return false;
@@ -2279,7 +2466,7 @@ void Backend::startCloudSignIn(const QString &provider) {
         webBase = qEnvironmentVariable("BLUEPILL_CLOUD_WEB_URL").trimmed();
     }
     if (webBase.isEmpty()) {
-        webBase = QStringLiteral("https://bluepill.nertwork.com");
+        webBase = QStringLiteral("https://bluepill.app");
     }
     while (webBase.endsWith(QLatin1Char('/'))) webBase.chop(1);
 
@@ -2514,7 +2701,7 @@ void Backend::exchangeCloudAuthCode(const QString &code, const QString &state) {
         apiBase = qEnvironmentVariable("BLUEPILL_CLOUD_API_URL").trimmed();
     }
     if (apiBase.isEmpty()) {
-        apiBase = QStringLiteral("https://api.bluepill.nertwork.com");
+        apiBase = QStringLiteral("https://api.bluepill.app");
     }
     while (apiBase.endsWith(QLatin1Char('/'))) apiBase.chop(1);
 
@@ -2650,7 +2837,7 @@ void Backend::setAutoUpdateCheckEnabled(bool enabled) {
 
 void Backend::checkForUpdatesNow() {
     if (!cloudLoggedIn()) {
-        m_updateStatusText = QStringLiteral("Sign in at bluepill.nertwork.com to enable Cloud Managed Updates.");
+        m_updateStatusText = QStringLiteral("Sign in at bluepill.app to enable Cloud Managed Updates.");
         emit updateStateChanged();
         emit toastMessage(m_updateStatusText);
         return;
@@ -2675,7 +2862,7 @@ void Backend::checkForCloudUpdates(bool manual) {
 
     const quint64 epGen = m_serverEndpointGeneration;
     const QString feedUrlStr = m_updatesFeedUrlOverride.isEmpty()
-                                   ? QStringLiteral("https://api.bluepill.nertwork.com/api/v1/updates/latest")
+                                   ? QStringLiteral("https://api.bluepill.app/api/v1/updates/latest")
                                    : m_updatesFeedUrlOverride;
     QNetworkRequest feedReq{QUrl(feedUrlStr)};
     feedReq.setTransferTimeout(8000);
@@ -2972,7 +3159,27 @@ ClientUpdateEnv Backend::currentClientUpdateEnv() const {
 }
 
 bool Backend::silentAutoUpdateSupported() const {
+#ifdef Q_OS_WIN
+    return true;
+#else
     return detectClientUpdateStrategy(currentClientUpdateEnv()).silentSupported;
+#endif
+}
+
+QStringList Backend::windowsInstallerArgs(bool silent) {
+    if (silent) {
+        return {
+            QStringLiteral("/VERYSILENT"),
+            QStringLiteral("/SUPPRESSMSGBOXES"),
+            QStringLiteral("/NORESTART"),
+            QStringLiteral("/CLOSEAPPLICATIONS"),
+            QStringLiteral("/RESTARTAPPLICATIONS"),
+        };
+    }
+    return {
+        QStringLiteral("/CLOSEAPPLICATIONS"),
+        QStringLiteral("/RESTARTAPPLICATIONS"),
+    };
 }
 
 QString Backend::clientUpdateMethod() const {
@@ -2999,11 +3206,14 @@ bool Backend::isTrustedUpdateUrl(const QUrl &url, bool allowLocalhostForTest) {
     if (host == QStringLiteral("github.com") ||
         host == QStringLiteral("objects.githubusercontent.com") ||
         host == QStringLiteral("release-assets.githubusercontent.com") ||
+        host == QStringLiteral("bluepill.app") ||
         host == QStringLiteral("bluepill.nertwork.com")) {
         return true;
     }
-    static const QString kSuffix = QStringLiteral(".bluepill.nertwork.com");
-    return host.endsWith(kSuffix) && host.size() > kSuffix.size();
+    static const QString kPrimarySuffix = QStringLiteral(".bluepill.app");
+    static const QString kLegacySuffix = QStringLiteral(".bluepill.nertwork.com");
+    return (host.endsWith(kPrimarySuffix) && host.size() > kPrimarySuffix.size()) ||
+           (host.endsWith(kLegacySuffix) && host.size() > kLegacySuffix.size());
 }
 
 void Backend::downloadVerifiedClientPackage(
@@ -3548,21 +3758,7 @@ void Backend::confirmClientUpdate() {
                     emit updateStateChanged();
                     return;
                 }
-                bool launched = false;
-                if (silent) {
-                    launched = QProcess::startDetached(outPath, {
-                        QStringLiteral("/VERYSILENT"),
-                        QStringLiteral("/SUPPRESSMSGBOXES"),
-                        QStringLiteral("/NORESTART"),
-                        QStringLiteral("/CLOSEAPPLICATIONS"),
-                        QStringLiteral("/NORESTARTAPPLICATIONS"),
-                    });
-                } else {
-                    launched = QProcess::startDetached(outPath, {
-                        QStringLiteral("/CLOSEAPPLICATIONS"),
-                        QStringLiteral("/RESTARTAPPLICATIONS"),
-                    });
-                }
+                const bool launched = QProcess::startDetached(outPath, windowsInstallerArgs(silent));
                 if (!launched) {
                     if (tempDir) tempDir->remove();
                     m_updateStatusText = QStringLiteral("Failed to launch BluePill v%1 installer.").arg(m_clientLatestVersion);
@@ -3574,7 +3770,7 @@ void Backend::confirmClientUpdate() {
                                          ? QStringLiteral("Installing BluePill v%1 silently and restarting...").arg(m_clientLatestVersion)
                                          : QStringLiteral("Launched BluePill v%1 installer...").arg(m_clientLatestVersion);
                 emit updateStateChanged();
-                QTimer::singleShot(400, qApp, &QCoreApplication::quit);
+                QTimer::singleShot(0, this, &Backend::quitApplication);
             });
         return;
     }
@@ -4824,6 +5020,24 @@ QString Backend::formatExpressiveEffectLabel(const QString &styleId) {
     if (s.contains(QStringLiteral("CKHappyBirthdayEffect"), Qt::CaseInsensitive)) return QStringLiteral("sent with balloons");
     if (s.contains(QStringLiteral("CKHeartEffect"), Qt::CaseInsensitive)) return QStringLiteral("sent with love");
     return QString();
+}
+
+QString Backend::formatExpressiveEffectName(const QString &styleId) {
+    const QString s = styleId.trimmed();
+    if (s.isEmpty()) return QString();
+    if (s.endsWith(QStringLiteral(".invisibleink"), Qt::CaseInsensitive)) return QStringLiteral("🕵️ Invisible Ink");
+    if (s.endsWith(QStringLiteral(".impact"), Qt::CaseInsensitive)) return QStringLiteral("💥 Slam");
+    if (s.endsWith(QStringLiteral(".loud"), Qt::CaseInsensitive)) return QStringLiteral("📢 Loud");
+    if (s.endsWith(QStringLiteral(".gentle"), Qt::CaseInsensitive)) return QStringLiteral("🪶 Gentle");
+    if (s.contains(QStringLiteral("CKConfettiEffect"), Qt::CaseInsensitive)) return QStringLiteral("🎉 Confetti");
+    if (s.contains(QStringLiteral("CKLasersEffect"), Qt::CaseInsensitive)) return QStringLiteral("✨ Lasers");
+    if (s.contains(QStringLiteral("CKFireworksEffect"), Qt::CaseInsensitive)) return QStringLiteral("🎆 Fireworks");
+    if (s.contains(QStringLiteral("CKEchoEffect"), Qt::CaseInsensitive)) return QStringLiteral("🗣️ Echo");
+    if (s.contains(QStringLiteral("CKSparklesEffect"), Qt::CaseInsensitive)) return QStringLiteral("🎊 Celebration");
+    if (s.contains(QStringLiteral("CKSpotlightEffect"), Qt::CaseInsensitive)) return QStringLiteral("🔦 Spotlight");
+    if (s.contains(QStringLiteral("CKHappyBirthdayEffect"), Qt::CaseInsensitive)) return QStringLiteral("🎈 Balloons");
+    if (s.contains(QStringLiteral("CKHeartEffect"), Qt::CaseInsensitive)) return QStringLiteral("❤️ Love");
+    return formatExpressiveEffectLabel(s);
 }
 
 static const QRegularExpression &sharedMessageUrlRegex() {
@@ -9201,16 +9415,7 @@ QVariantList Backend::buildMessageListFromApi(
             }
         }
         const QString sendEffectLabel = formatExpressiveEffectLabel(rawEffect);
-        QString expressiveEffectName;
-        if (rawEffect.endsWith(QStringLiteral(".invisibleink"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🕵️ Invisible Ink");
-        else if (rawEffect.endsWith(QStringLiteral(".impact"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("💥 Slam");
-        else if (rawEffect.endsWith(QStringLiteral(".loud"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("📢 Loud");
-        else if (rawEffect.endsWith(QStringLiteral(".gentle"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🪶 Gentle");
-        else if (rawEffect.contains(QStringLiteral("CKConfettiEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎉 Confetti");
-        else if (rawEffect.contains(QStringLiteral("CKLasersEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("✨ Lasers");
-        else if (rawEffect.contains(QStringLiteral("CKFireworksEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎆 Fireworks");
-        else if (rawEffect.contains(QStringLiteral("CKEchoEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🗣️ Echo");
-        else expressiveEffectName = sendEffectLabel;
+        const QString expressiveEffectName = formatExpressiveEffectName(rawEffect);
         const int errorCode = m.value(QStringLiteral("error")).toInt(0);
         const bool isFailed = isFromMe && (errorCode != 0);
         if (isFailed) {
@@ -9679,6 +9884,7 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
                         const QString effId = m_recentOutboundEffects.value(incomingText);
                         vm.insert(QStringLiteral("expressiveSendStyleId"), effId);
                         vm.insert(QStringLiteral("sendEffectLabel"), formatExpressiveEffectLabel(effId));
+                        vm.insert(QStringLiteral("expressiveEffect"), formatExpressiveEffectName(effId));
                     }
                 };
                 if (existingRealIdx >= 0) {
@@ -10978,17 +11184,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), optNowMs);
     if (!cleanEffectId.isEmpty()) {
         optimistic.insert(QStringLiteral("expressiveSendStyleId"), cleanEffectId);
-        QString expressiveEffectName;
-        if (cleanEffectId.endsWith(QStringLiteral(".invisibleink"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🕵️ Invisible Ink");
-        else if (cleanEffectId.endsWith(QStringLiteral(".impact"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("💥 Slam");
-        else if (cleanEffectId.endsWith(QStringLiteral(".loud"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("📢 Loud");
-        else if (cleanEffectId.endsWith(QStringLiteral(".gentle"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🪶 Gentle");
-        else if (cleanEffectId.contains(QStringLiteral("CKConfettiEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎉 Confetti");
-        else if (cleanEffectId.contains(QStringLiteral("CKLasersEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("✨ Lasers");
-        else if (cleanEffectId.contains(QStringLiteral("CKFireworksEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎆 Fireworks");
-        else if (cleanEffectId.contains(QStringLiteral("CKEchoEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🗣️ Echo");
-        else expressiveEffectName = formatExpressiveEffectLabel(cleanEffectId);
-        optimistic.insert(QStringLiteral("expressiveEffect"), expressiveEffectName);
+        optimistic.insert(QStringLiteral("expressiveEffect"), formatExpressiveEffectName(cleanEffectId));
         optimistic.insert(QStringLiteral("sendEffectLabel"), formatExpressiveEffectLabel(cleanEffectId));
     }
     if (m_demoMode && m_demoChatMessages.contains(canonicalGuid)) {
@@ -12227,6 +12423,104 @@ void Backend::copyToClipboard(const QString &text, const QString &label) {
     }
 }
 
+QString Backend::formatMessagesForClipboard(const QVariantList &messages, const QStringList &guids, bool includeMetadata) {
+    QSet<QString> wanted;
+    for (const QString &g : guids) {
+        const QString trimmed = g.trimmed();
+        if (!trimmed.isEmpty()) wanted.insert(trimmed);
+    }
+    if (wanted.isEmpty()) return QString();
+
+    QStringList lines;
+    for (const QVariant &v : messages) {
+        const QVariantMap msg = v.toMap();
+        const QString guid = msg.value(QStringLiteral("guid")).toString().trimmed();
+        const QString tempGuid = msg.value(QStringLiteral("tempGuid")).toString().trimmed();
+        if ((!guid.isEmpty() && wanted.contains(guid)) ||
+            (!tempGuid.isEmpty() && wanted.contains(tempGuid))) {
+            QString text = msg.value(QStringLiteral("text")).toString();
+            if (text.trimmed().isEmpty()) {
+                const QString attName = msg.value(QStringLiteral("attachmentName")).toString().trimmed();
+                if (!attName.isEmpty()) {
+                    text = QStringLiteral("[Attachment: %1]").arg(attName);
+                } else {
+                    continue;
+                }
+            }
+            if (includeMetadata) {
+                const qint64 dateMs = msg.value(QStringLiteral("dateCreated")).toLongLong();
+                QString timeStr = dateMs > 0
+                                      ? QDateTime::fromMSecsSinceEpoch(dateMs).toString(QStringLiteral("HH:mm"))
+                                      : msg.value(QStringLiteral("timeText")).toString().trimmed();
+                if (timeStr.isEmpty()) timeStr = QStringLiteral("--:--");
+                QString sender = msg.value(QStringLiteral("senderName")).toString().trimmed();
+                if (sender.isEmpty()) {
+                    sender = msg.value(QStringLiteral("isFromMe")).toBool()
+                                 ? QStringLiteral("You")
+                                 : QStringLiteral("Unknown");
+                }
+                lines.append(QStringLiteral("[%1] %2: %3").arg(timeStr, sender, text));
+            } else {
+                lines.append(text);
+            }
+        }
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+void Backend::copyMessagesToClipboard(const QStringList &guids, bool includeMetadata) {
+    QSet<QString> wanted;
+    for (const QString &g : guids) {
+        const QString trimmed = g.trimmed();
+        if (!trimmed.isEmpty()) wanted.insert(trimmed);
+    }
+    if (wanted.isEmpty()) return;
+
+    int matchedCount = 0;
+    for (const QVariant &v : std::as_const(m_messages)) {
+        const QVariantMap msg = v.toMap();
+        const QString guid = msg.value(QStringLiteral("guid")).toString().trimmed();
+        const QString tempGuid = msg.value(QStringLiteral("tempGuid")).toString().trimmed();
+        if ((!guid.isEmpty() && wanted.contains(guid)) ||
+            (!tempGuid.isEmpty() && wanted.contains(tempGuid))) {
+            const QString text = msg.value(QStringLiteral("text")).toString();
+            const QString attName = msg.value(QStringLiteral("attachmentName")).toString().trimmed();
+            if (!text.trimmed().isEmpty() || !attName.isEmpty()) {
+                ++matchedCount;
+            }
+        }
+    }
+
+    const QString formatted = formatMessagesForClipboard(m_messages, guids, includeMetadata);
+    if (formatted.isEmpty() || matchedCount == 0) return;
+
+    m_lastCopiedImagePath.clear();
+    m_lastCopiedImageTimeMs = 0;
+
+    if (QClipboard *cb = QGuiApplication::clipboard()) {
+        cb->setText(formatted, QClipboard::Clipboard);
+        if (cb->supportsSelection()) {
+            cb->setText(formatted, QClipboard::Selection);
+        }
+    }
+
+#ifdef Q_OS_LINUX
+    if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
+        QFileInfo::exists(QStringLiteral("/usr/bin/wl-copy"))) {
+        QProcess *proc = new QProcess(this);
+        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                proc, &QObject::deleteLater);
+        proc->start(QStringLiteral("/usr/bin/wl-copy"), QStringList{});
+        proc->write(formatted.toUtf8());
+        proc->closeWriteChannel();
+    }
+#endif
+
+    emit toastMessage(QStringLiteral("✓ Copied %1 %2")
+                          .arg(matchedCount)
+                          .arg(matchedCount == 1 ? QStringLiteral("message") : QStringLiteral("messages")));
+}
+
 bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString &attachmentGuid) {
     QString localPath;
     const QString raw = localUrlOrPath.trimmed();
@@ -13252,6 +13546,59 @@ void Backend::startNewChat(const QString &address, const QString &text) {
     const QString msg = replaceEmojiShortcodes(text.trimmed());
     if (rawInput.isEmpty()) return;
 
+    // Support comma/semicolon-separated multi-recipient input (#91), preserving commas inside display names (e.g. "Rivera, Alex <a@b.com>")
+    if (rawInput.contains(QLatin1Char(',')) || rawInput.contains(QLatin1Char(';'))) {
+        QStringList cleanParts;
+        QString cur;
+        bool inQuotes = false;
+        bool inAngle = false;
+        for (int i = 0; i < rawInput.size(); ++i) {
+            const QChar ch = rawInput.at(i);
+            if (ch == QLatin1Char('"')) {
+                inQuotes = !inQuotes;
+                cur.append(ch);
+            } else if (!inQuotes && ch == QLatin1Char('<')) {
+                inAngle = true;
+                cur.append(ch);
+            } else if (!inQuotes && ch == QLatin1Char('>')) {
+                inAngle = false;
+                cur.append(ch);
+            } else if (!inQuotes && !inAngle && (ch == QLatin1Char(';') || ch == QLatin1Char(','))) {
+                bool commaInDisplayName = false;
+                if (ch == QLatin1Char(',') && !cur.contains(QLatin1Char('<')) && !cur.contains(QLatin1Char('@'))) {
+                    const int nextAngleOpen = rawInput.indexOf(QLatin1Char('<'), i + 1);
+                    const int nextAngleClose = (nextAngleOpen >= 0) ? rawInput.indexOf(QLatin1Char('>'), nextAngleOpen + 1) : -1;
+                    const int nextSemi = rawInput.indexOf(QLatin1Char(';'), i + 1);
+                    const int nextComma = rawInput.indexOf(QLatin1Char(','), i + 1);
+                    if (nextAngleOpen >= 0 && nextAngleClose > nextAngleOpen &&
+                        (nextSemi < 0 || nextAngleOpen < nextSemi) &&
+                        (nextComma < 0 || nextAngleOpen < nextComma)) {
+                        commaInDisplayName = true;
+                    }
+                }
+                if (commaInDisplayName) {
+                    cur.append(ch);
+                } else {
+                    const QString p = cur.trimmed();
+                    if (!p.isEmpty()) cleanParts.append(p);
+                    cur.clear();
+                }
+            } else {
+                cur.append(ch);
+            }
+        }
+        const QString tail = cur.trimmed();
+        if (!tail.isEmpty()) cleanParts.append(tail);
+
+        if (cleanParts.size() >= 2) {
+            createGroupChat(cleanParts, text);
+            return;
+        }
+        if (cleanParts.size() == 1) {
+            rawInput = cleanParts.first();
+        }
+    }
+
     if (!m_searchQuery.isEmpty()) {
         m_searchQuery.clear();
         emit filterChanged();
@@ -13367,6 +13714,184 @@ void Backend::startNewChat(const QString &address, const QString &text) {
     if (!msg.isEmpty()) {
         sendMessage(newChatGuid, msg);
     }
+}
+
+void Backend::createGroupChat(const QStringList &addresses, const QString &message, const QString &service) {
+    const QString msg = replaceEmojiShortcodes(message.trimmed());
+
+    if (!m_searchQuery.isEmpty()) {
+        m_searchQuery.clear();
+        emit filterChanged();
+        emit chatsChanged();
+    }
+
+    static const QRegularExpression reAngle(QStringLiteral(R"(<([^>]+)>)"));
+    QStringList uniqueAddrs;
+    QSet<QString> seenNorm;
+
+    for (const QString &rawItem : addresses) {
+        QString item = rawItem.trimmed();
+        if (item.isEmpty()) continue;
+        const auto mAngle = reAngle.match(item);
+        if (mAngle.hasMatch()) {
+            item = mAngle.captured(1).trimmed();
+        }
+        if (item.isEmpty()) continue;
+
+        bool hasDigitsOrAt = item.contains(QLatin1Char('@'));
+        if (!hasDigitsOrAt) {
+            int digitCount = 0;
+            for (const QChar &ch : item) {
+                if (ch.isDigit()) ++digitCount;
+            }
+            hasDigitsOrAt = (digitCount >= 7);
+        }
+        if (!hasDigitsOrAt) {
+            const QVariantList matches = searchContacts(item, 1);
+            if (!matches.isEmpty()) {
+                const QString candAddr = matches.first().toMap().value(QStringLiteral("address")).toString().trimmed();
+                if (!candAddr.isEmpty()) {
+                    item = candAddr;
+                }
+            }
+        }
+
+        const QString canonical = canonicalizeAddress(item);
+        if (canonical.isEmpty()) continue;
+        const QString dedupKey = canonical.toLower();
+        if (seenNorm.contains(dedupKey)) continue;
+        seenNorm.insert(dedupKey);
+        uniqueAddrs.append(canonical);
+    }
+
+    if (uniqueAddrs.isEmpty()) return;
+    if (uniqueAddrs.size() == 1) {
+        startNewChat(uniqueAddrs.first(), message);
+        return;
+    }
+
+    // Reuse an existing group chat matching the exact canonical participant set
+    for (const ChatEntry &c : std::as_const(m_chats)) {
+        if (!c.isGroup || c.participantHandles.size() < 2) continue;
+        QSet<QString> existingSet;
+        for (const QString &ph : c.participantHandles) {
+            const QString canonPh = canonicalizeAddress(ph);
+            existingSet.insert((canonPh.isEmpty() ? ph.trimmed() : canonPh).toLower());
+        }
+        if (existingSet == seenNorm) {
+            selectChat(c.guid);
+            if (!msg.isEmpty()) {
+                sendMessage(c.guid, msg);
+            }
+            return;
+        }
+    }
+
+    QString normSvc = normalizeServiceName(service.trimmed());
+    if (normSvc.isEmpty()) normSvc = QStringLiteral("iMessage");
+
+    if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) {
+        const QString newGroupGuid = QStringLiteral("%1;+;group-%2")
+                                         .arg(normSvc, QUuid::createUuid().toString(QUuid::Id128).left(12));
+        m_chatParticipants.insert(newGroupGuid, uniqueAddrs);
+
+        ChatEntry entry;
+        entry.guid = newGroupGuid;
+        entry.chatIdentifier = newGroupGuid.section(QStringLiteral(";+;"), 1);
+        entry.participantHandles = uniqueAddrs;
+        entry.isGroup = true;
+        entry.service = normSvc;
+        entry.lastMessageDate = QDateTime::currentMSecsSinceEpoch();
+        entry.lastMessagePreview = msg.isEmpty() ? QStringLiteral("New group conversation") : msg;
+        entry.relativeTime = QStringLiteral("now");
+        entry.unreadCount = 0;
+        rebuildChatPresentation(entry);
+
+        m_chats.prepend(entry);
+        sortChats();
+        selectChat(newGroupGuid);
+        if (!msg.isEmpty()) {
+            sendMessage(newGroupGuid, msg);
+        }
+        return;
+    }
+
+    QJsonArray addrArr;
+    for (const QString &a : uniqueAddrs) {
+        addrArr.append(a);
+    }
+    QJsonObject payload;
+    payload.insert(QStringLiteral("addresses"), addrArr);
+    payload.insert(QStringLiteral("message"), msg);
+    payload.insert(QStringLiteral("service"), normSvc);
+    payload.insert(QStringLiteral("method"), QStringLiteral("private-api"));
+
+    ++m_activeSendCount;
+    emit sendingMessageChanged();
+
+    QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/chat/new"));
+    req.setPriority(QNetworkRequest::HighPriority);
+    req.setTransferTimeout(45000);
+    QNetworkReply *reply = m_sendNam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, uniqueAddrs, normSvc, msg]() {
+        reply->deleteLater();
+        --m_activeSendCount;
+        emit sendingMessageChanged();
+
+        const QByteArray raw = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            QString detail;
+            const QJsonObject errObj = QJsonDocument::fromJson(raw).object();
+            detail = errObj.value(QStringLiteral("message")).toString().trimmed();
+            if (detail.isEmpty()) detail = errObj.value(QStringLiteral("error")).toString().trimmed();
+            if (detail.isEmpty()) detail = reply->errorString();
+            emit toastMessage(QStringLiteral("⚠ Failed to create group chat: ") + detail);
+            return;
+        }
+
+        const QJsonObject root = QJsonDocument::fromJson(raw).object();
+        const QJsonObject data = root.value(QStringLiteral("data")).toObject();
+        QString createdGuid = data.value(QStringLiteral("guid")).toString().trimmed();
+        if (createdGuid.isEmpty()) {
+            createdGuid = data.value(QStringLiteral("chatGuid")).toString().trimmed();
+        }
+        if (createdGuid.isEmpty()) {
+            emit toastMessage(QStringLiteral("⚠ Failed to create group chat: server did not return a chat GUID"));
+            return;
+        }
+
+        const QString canonicalGuid = resolveCanonicalChatGuid(createdGuid);
+        bool exists = false;
+        for (const ChatEntry &c : std::as_const(m_chats)) {
+            if (c.guid == canonicalGuid || c.guid == createdGuid) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            m_chatParticipants.insert(canonicalGuid, uniqueAddrs);
+            ChatEntry entry;
+            entry.guid = canonicalGuid;
+            entry.chatIdentifier = data.value(QStringLiteral("chatIdentifier")).toString().trimmed();
+            if (entry.chatIdentifier.isEmpty()) {
+                entry.chatIdentifier = canonicalGuid.section(QStringLiteral(";+;"), 1);
+            }
+            entry.participantHandles = uniqueAddrs;
+            entry.isGroup = true;
+            entry.service = normSvc;
+            entry.lastMessageDate = QDateTime::currentMSecsSinceEpoch();
+            entry.lastMessagePreview = msg.isEmpty() ? QStringLiteral("New group conversation") : msg;
+            entry.relativeTime = QStringLiteral("now");
+            entry.unreadCount = 0;
+            rebuildChatPresentation(entry);
+            m_chats.prepend(entry);
+            sortChats();
+            emit chatsChanged();
+        }
+
+        selectChat(canonicalGuid);
+        fetchChatsMetadata();
+    });
 }
 
 void Backend::registerWindow(QObject *window) {
@@ -13662,7 +14187,49 @@ void Backend::previewNotificationSound(const QString &preset) {
     playNotificationSound(chosen, true);
 }
 
-void Backend::showDesktopNotification(const QString &title, const QString &body) {
+void Backend::ensureDbusNotificationSubscription() {
+#if defined(BLUEPILL_HAS_DBUS) && !defined(Q_OS_WIN)
+    if (m_dbusNotifConnected) return;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    if (!bus.isConnected()) return;
+    bus.connect(QStringLiteral("org.freedesktop.Notifications"),
+                QStringLiteral("/org/freedesktop/Notifications"),
+                QStringLiteral("org.freedesktop.Notifications"),
+                QStringLiteral("ActionInvoked"),
+                this,
+                SLOT(onDbusNotificationActionInvoked(uint,QString)));
+    bus.connect(QStringLiteral("org.freedesktop.Notifications"),
+                QStringLiteral("/org/freedesktop/Notifications"),
+                QStringLiteral("org.freedesktop.Notifications"),
+                QStringLiteral("NotificationClosed"),
+                this,
+                SLOT(onDbusNotificationClosed(uint,uint)));
+    m_dbusNotifConnected = true;
+#endif
+}
+
+void Backend::onDbusNotificationActionInvoked(uint notifId, const QString &actionKey) {
+    Q_UNUSED(actionKey);
+    handleNotificationActivated(notifId);
+}
+
+void Backend::onDbusNotificationClosed(uint notifId, uint reason) {
+    Q_UNUSED(reason);
+    m_notificationChatMap.remove(notifId);
+}
+
+void Backend::handleNotificationActivated(uint notifId) {
+    const QString chatGuid = m_notificationChatMap.take(notifId);
+    if (!chatGuid.isEmpty()) {
+        selectChat(chatGuid);
+    }
+    raiseWindow();
+}
+
+void Backend::showDesktopNotification(const QString &title, const QString &body, const QString &chatGuid) {
+    if (!chatGuid.isEmpty()) {
+        m_lastNotifiedChatGuid = chatGuid;
+    }
     const bool isOffscreen = (QGuiApplication::platformName() == QStringLiteral("offscreen"));
     if (isOffscreen || m_demoMode || !m_notificationBannerEnabled) {
         return;
@@ -13671,20 +14238,62 @@ void Backend::showDesktopNotification(const QString &title, const QString &body)
     if (!qobject_cast<QApplication *>(QCoreApplication::instance())) {
         return;
     }
-    if (!m_trayIcon && QSystemTrayIcon::isSystemTrayAvailable()) {
-        m_trayIcon = new QSystemTrayIcon(QIcon(QStringLiteral(":/bluepill.svg")), this);
-        m_trayIcon->setToolTip(QStringLiteral("BluePill"));
-        m_trayIcon->show();
-    }
+    setupSystemTray();
     if (m_trayIcon) {
         m_trayIcon->showMessage(title, body, QSystemTrayIcon::Information, 5000);
     }
 #else
-    QProcess::startDetached(QStringLiteral("notify-send"),
-                            {QStringLiteral("-a"), QStringLiteral("BluePill"),
-                             QStringLiteral("-i"), QStringLiteral("messaging-im"),
-                             QStringLiteral("-u"), QStringLiteral("normal"),
-                             title, body});
+    auto sendNotifyFallback = [title, body]() {
+        QProcess::startDetached(QStringLiteral("notify-send"),
+                                {QStringLiteral("-a"), QStringLiteral("BluePill"),
+                                 QStringLiteral("-i"), QStringLiteral("messaging-im"),
+                                 QStringLiteral("-u"), QStringLiteral("normal"),
+                                 title, body});
+    };
+#ifdef BLUEPILL_HAS_DBUS
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    if (bus.isConnected() && bus.interface() &&
+        bus.interface()->isServiceRegistered(QStringLiteral("org.freedesktop.Notifications"))) {
+        ensureDbusNotificationSubscription();
+        QDBusInterface iface(QStringLiteral("org.freedesktop.Notifications"),
+                             QStringLiteral("/org/freedesktop/Notifications"),
+                             QStringLiteral("org.freedesktop.Notifications"),
+                             bus);
+        if (iface.isValid()) {
+            QVariantMap hints;
+            hints.insert(QStringLiteral("desktop-entry"), QStringLiteral("bluepill"));
+            QDBusPendingCall call = iface.asyncCall(
+                QStringLiteral("Notify"),
+                QStringLiteral("BluePill"),
+                quint32(0),
+                QStringLiteral("messaging-im"),
+                title,
+                body,
+                QStringList{QStringLiteral("default"), QStringLiteral("Open")},
+                hints,
+                qint32(5000));
+            auto *watcher = new QDBusPendingCallWatcher(call, this);
+            connect(watcher, &QDBusPendingCallWatcher::finished, this,
+                    [this, watcher, chatGuid, sendNotifyFallback]() {
+                        watcher->deleteLater();
+                        QDBusPendingReply<uint> reply = *watcher;
+                        if (reply.isError()) {
+                            sendNotifyFallback();
+                            return;
+                        }
+                        const uint notifId = reply.value();
+                        if (notifId > 0 && !chatGuid.isEmpty()) {
+                            if (m_notificationChatMap.size() > 200) {
+                                m_notificationChatMap.clear();
+                            }
+                            m_notificationChatMap.insert(notifId, chatGuid);
+                        }
+                    });
+            return;
+        }
+    }
+#endif
+    sendNotifyFallback();
 #endif
 }
 
@@ -13702,7 +14311,7 @@ void Backend::notifyIncomingMessage(const QString &chatGuid, const QString &send
         return;
     }
     m_notificationCountForTest++;
-    showDesktopNotification(sender, preview);
+    showDesktopNotification(sender, preview, chatGuid);
     if (m_notificationSoundEnabled) {
         playNotificationSound();
     }
@@ -13800,6 +14409,34 @@ void Backend::refreshAudioDevices() {
             for (const QVariant &v : parsedOut) outputs.append(v);
         }
     }
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+    if (QGuiApplication::platformName() != QStringLiteral("offscreen")) {
+        if (!inputDiscoveryOk) {
+            const auto audioIns = QMediaDevices::audioInputs();
+            if (!audioIns.isEmpty()) {
+                inputDiscoveryOk = true;
+                for (const QAudioDevice &dev : audioIns) {
+                    inputs.append(QVariantMap{
+                        {QStringLiteral("id"), QString::fromUtf8(dev.id())},
+                        {QStringLiteral("label"), dev.description()}
+                    });
+                }
+            }
+        }
+        if (!outputDiscoveryOk) {
+            const auto audioOuts = QMediaDevices::audioOutputs();
+            if (!audioOuts.isEmpty()) {
+                outputDiscoveryOk = true;
+                for (const QAudioDevice &dev : audioOuts) {
+                    outputs.append(QVariantMap{
+                        {QStringLiteral("id"), QString::fromUtf8(dev.id())},
+                        {QStringLiteral("label"), dev.description()}
+                    });
+                }
+            }
+        }
+    }
+#endif
 #endif
 
     m_audioInputDevices = inputs;
@@ -15271,6 +15908,50 @@ bool Backend::startLocalAudioProcess(const QString &localFile, quint64 playbackG
 }
 
 void Backend::stopVoiceRecordProcess(bool waitForFlush) {
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+    if (m_mediaRecorder) {
+        QMediaRecorder *rec = m_mediaRecorder;
+        rec->disconnect(this);
+        if (rec->recorderState() != QMediaRecorder::StoppedState) {
+            if (waitForFlush) {
+                QEventLoop loop;
+                QTimer timeoutTimer;
+                timeoutTimer.setSingleShot(true);
+                connect(rec, &QMediaRecorder::recorderStateChanged, &loop,
+                        [&loop](QMediaRecorder::RecorderState st) {
+                            if (st == QMediaRecorder::StoppedState) {
+                                loop.quit();
+                            }
+                        });
+                connect(&timeoutTimer, &QTimer::timeout, &loop, &QEventLoop::quit);
+                timeoutTimer.start(1500);
+                rec->stop();
+                if (rec->recorderState() != QMediaRecorder::StoppedState) {
+                    loop.exec(QEventLoop::ExcludeUserInputEvents);
+                }
+            } else {
+                rec->stop();
+            }
+        }
+        const QString actualPath = rec->actualLocation().toLocalFile();
+        if (!actualPath.isEmpty() && actualPath != m_currentVoiceRecordingPath && QFileInfo::exists(actualPath)) {
+            m_currentVoiceRecordingPath = actualPath;
+        }
+        m_mediaRecorder = nullptr;
+        rec->deleteLater();
+    }
+    if (m_captureSession) {
+        m_captureSession->setAudioInput(nullptr);
+        m_captureSession->setRecorder(nullptr);
+        m_captureSession->deleteLater();
+        m_captureSession = nullptr;
+    }
+    if (m_audioInput) {
+        m_audioInput->deleteLater();
+        m_audioInput = nullptr;
+    }
+    m_usingMultimediaRecorder = false;
+#endif
     if (!m_voiceRecordProcess) return;
     QProcess *proc = m_voiceRecordProcess;
     m_voiceRecordProcess = nullptr;
@@ -15283,6 +15964,88 @@ void Backend::stopVoiceRecordProcess(bool waitForFlush) {
         }
     }
     proc->deleteLater();
+}
+
+bool Backend::startMultimediaVoiceRecording(const QString &targetPath) {
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+    const QList<QAudioDevice> inputs = QMediaDevices::audioInputs();
+    if (inputs.isEmpty()) {
+        return false;
+    }
+    QAudioDevice chosen = QMediaDevices::defaultAudioInput();
+    const QString desiredIn = effectiveAudioInputDevice();
+    if (!desiredIn.isEmpty()) {
+        for (const QAudioDevice &dev : inputs) {
+            if (QString::fromUtf8(dev.id()) == desiredIn ||
+                dev.description().compare(desiredIn, Qt::CaseInsensitive) == 0) {
+                chosen = dev;
+                break;
+            }
+        }
+    }
+    if (chosen.isNull()) {
+        chosen = inputs.first();
+    }
+
+    QMediaFormat fmt(QMediaFormat::Wave);
+    fmt.setAudioCodec(QMediaFormat::AudioCodec::Wave);
+    if (!fmt.isSupported(QMediaFormat::Encode)) {
+        return false;
+    }
+
+    auto *session = new QMediaCaptureSession(this);
+    auto *audioIn = new QAudioInput(chosen, this);
+    auto *recorder = new QMediaRecorder(this);
+    session->setAudioInput(audioIn);
+    session->setRecorder(recorder);
+
+    recorder->setMediaFormat(fmt);
+    recorder->setAudioChannelCount(1);
+    recorder->setAudioSampleRate(16000);
+    recorder->setQuality(QMediaRecorder::NormalQuality);
+    recorder->setOutputLocation(QUrl::fromLocalFile(targetPath));
+
+    m_captureSession = session;
+    m_audioInput = audioIn;
+    m_mediaRecorder = recorder;
+    m_usingMultimediaRecorder = true;
+
+    connect(recorder, &QMediaRecorder::errorOccurred, this,
+            [this, recorder](QMediaRecorder::Error, const QString &errStr) {
+                if (m_mediaRecorder != recorder) return;
+                stopVoiceRecordProcess(false);
+                if (!m_recordingVoice) return;
+                m_recordingVoice = false;
+                m_voiceRecordingTimer.stop();
+                const QString pendingPath = m_currentVoiceRecordingPath;
+                m_currentVoiceRecordingPath.clear();
+                const QString salvaged = finalizeCapturedVoiceWav(pendingPath);
+                if (!salvaged.isEmpty()) {
+                    int dur = wavDurationSeconds(salvaged);
+                    if (dur <= 0) dur = qMax(1, m_voiceRecordingSeconds);
+                    m_recordedVoicePath = salvaged;
+                    m_recordedVoiceDurationSeconds = dur;
+                    m_recordedVoiceWaveform = computeAudioFileWaveformBars(salvaged, salvaged, 28);
+                    m_hasRecordedVoiceMemo = true;
+                } else {
+                    clearStagedVoiceMemo(true);
+                }
+                emit voiceRecordingChanged();
+                emit toastMessage(errStr.isEmpty()
+                                      ? QStringLiteral("⚠ Microphone recording stopped unexpectedly")
+                                      : QStringLiteral("⚠ Microphone recording error: ") + errStr);
+            });
+
+    recorder->record();
+    if (recorder->error() != QMediaRecorder::NoError) {
+        stopVoiceRecordProcess(false);
+        return false;
+    }
+    return true;
+#else
+    Q_UNUSED(targetPath);
+    return false;
+#endif
 }
 
 void Backend::toggleAudioPlayback(const QString &attachmentGuid, const QString &sourceUrl) {
@@ -15605,9 +16368,62 @@ void Backend::startVoiceRecording() {
 
 #ifndef IMSG_UNIT_TEST
     if (QGuiApplication::platformName() != QStringLiteral("offscreen")) {
+        bool startedNative = false;
         QString bin;
         QStringList args;
         const QString effectiveIn = effectiveAudioInputDevice();
+
+#ifdef Q_OS_WIN
+        // Primary on Windows: native Qt6 Multimedia capture
+        startedNative = startMultimediaVoiceRecording(targetPath);
+        if (!startedNative) {
+            const QString ffmpegBin = findBundledOrSystemExecutable(QStringLiteral("ffmpeg"));
+            if (!ffmpegBin.isEmpty()) {
+                QString dshowName = effectiveIn;
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+                const auto ins = QMediaDevices::audioInputs();
+                if (!dshowName.isEmpty()) {
+                    for (const QAudioDevice &dev : ins) {
+                        if (QString::fromUtf8(dev.id()) == dshowName) {
+                            dshowName = dev.description();
+                            break;
+                        }
+                    }
+                } else if (!ins.isEmpty()) {
+                    dshowName = ins.first().description();
+                }
+#endif
+                if (dshowName.isEmpty()) {
+                    // Discover DirectShow audio capture device via bundled/system ffmpeg even without Qt Multimedia
+                    QProcess probe;
+                    probe.setProcessChannelMode(QProcess::MergedChannels);
+                    probe.start(ffmpegBin, {QStringLiteral("-hide_banner"), QStringLiteral("-list_devices"),
+                                            QStringLiteral("true"), QStringLiteral("-f"), QStringLiteral("dshow"),
+                                            QStringLiteral("-i"), QStringLiteral("dummy")});
+                    if (probe.waitForFinished(2500)) {
+                        const QString out = QString::fromUtf8(probe.readAll());
+                        static const QRegularExpression reDshowAudio(QStringLiteral(R"re("([^"]+)"\s*\(audio\))re"));
+                        const auto m = reDshowAudio.match(out);
+                        if (m.hasMatch()) {
+                            dshowName = m.captured(1).trimmed();
+                        }
+                    } else {
+                        probe.kill();
+                    }
+                }
+                if (!dshowName.isEmpty()) {
+                    bin = ffmpegBin;
+                    args << QStringLiteral("-y") << QStringLiteral("-loglevel") << QStringLiteral("error")
+                         << QStringLiteral("-f") << QStringLiteral("dshow")
+                         << QStringLiteral("-i") << (QStringLiteral("audio=") + dshowName)
+                         << QStringLiteral("-ac") << QStringLiteral("1")
+                         << QStringLiteral("-ar") << QStringLiteral("16000")
+                         << QStringLiteral("-sample_fmt") << QStringLiteral("s16")
+                         << targetPath;
+                }
+            }
+        }
+#else
         if (!QStandardPaths::findExecutable(QStringLiteral("pw-record")).isEmpty()) {
             bin = QStringLiteral("pw-record");
             args << QStringLiteral("--format=s16")
@@ -15617,90 +16433,104 @@ void Backend::startVoiceRecording() {
                 args << QStringLiteral("--target") << effectiveIn;
             }
             args << targetPath;
-        } else if (!QStandardPaths::findExecutable(QStringLiteral("ffmpeg")).isEmpty()) {
-            bin = QStringLiteral("ffmpeg");
-            args << QStringLiteral("-y") << QStringLiteral("-loglevel") << QStringLiteral("error")
-                 << QStringLiteral("-f") << QStringLiteral("pulse")
-                 << QStringLiteral("-i") << (effectiveIn.isEmpty() ? QStringLiteral("default") : effectiveIn)
-                 << QStringLiteral("-ac") << QStringLiteral("1")
-                 << QStringLiteral("-ar") << QStringLiteral("16000")
-                 << QStringLiteral("-sample_fmt") << QStringLiteral("s16")
-                 << targetPath;
-        } else if (!QStandardPaths::findExecutable(QStringLiteral("arecord")).isEmpty()) {
-            bin = QStringLiteral("arecord");
-            args << QStringLiteral("-q")
-                 << QStringLiteral("-f") << QStringLiteral("S16_LE")
-                 << QStringLiteral("-r") << QStringLiteral("16000")
-                 << QStringLiteral("-c") << QStringLiteral("1")
-                 << targetPath;
+        } else {
+            const QString ffmpegBin = findBundledOrSystemExecutable(QStringLiteral("ffmpeg"));
+            if (!ffmpegBin.isEmpty()) {
+                bin = ffmpegBin;
+                args << QStringLiteral("-y") << QStringLiteral("-loglevel") << QStringLiteral("error")
+                     << QStringLiteral("-f") << QStringLiteral("pulse")
+                     << QStringLiteral("-i") << (effectiveIn.isEmpty() ? QStringLiteral("default") : effectiveIn)
+                     << QStringLiteral("-ac") << QStringLiteral("1")
+                     << QStringLiteral("-ar") << QStringLiteral("16000")
+                     << QStringLiteral("-sample_fmt") << QStringLiteral("s16")
+                     << targetPath;
+            } else if (!QStandardPaths::findExecutable(QStringLiteral("arecord")).isEmpty()) {
+                bin = QStringLiteral("arecord");
+                args << QStringLiteral("-q")
+                     << QStringLiteral("-f") << QStringLiteral("S16_LE")
+                     << QStringLiteral("-r") << QStringLiteral("16000")
+                     << QStringLiteral("-c") << QStringLiteral("1")
+                     << targetPath;
+            } else {
+                startedNative = startMultimediaVoiceRecording(targetPath);
+            }
         }
-        if (bin.isEmpty()) {
-            emit toastMessage(QStringLiteral("⚠ No microphone capture tool found (pw-record/ffmpeg/arecord)"));
-            return;
+#endif
+
+        if (!startedNative) {
+            if (bin.isEmpty()) {
+                emit toastMessage(QStringLiteral("⚠ No microphone capture tool found (pw-record/ffmpeg/arecord)"));
+                return;
+            }
+            QProcess *proc = new QProcess(this);
+#ifdef Q_OS_WIN
+            proc->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *cpa) {
+                cpa->flags |= 0x08000000; // CREATE_NO_WINDOW
+            });
+#endif
+            if (!effectiveIn.isEmpty()) {
+                QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+                env.insert(QStringLiteral("PULSE_SOURCE"), effectiveIn);
+                proc->setProcessEnvironment(env);
+            }
+            proc->start(bin, args);
+            if (!proc->waitForStarted(600)) {
+                proc->deleteLater();
+                emit toastMessage(QStringLiteral("⚠ Failed to start microphone recording"));
+                return;
+            }
+            m_voiceRecordProcess = proc;
+            connect(proc, &QProcess::errorOccurred, this,
+                    [this, proc](QProcess::ProcessError) {
+                        if (m_voiceRecordProcess != proc) return;
+                        m_voiceRecordProcess = nullptr;
+                        proc->disconnect(this);
+                        proc->deleteLater();
+                        if (!m_recordingVoice) return;
+                        m_recordingVoice = false;
+                        m_voiceRecordingTimer.stop();
+                        const QString pendingPath = m_currentVoiceRecordingPath;
+                        m_currentVoiceRecordingPath.clear();
+                        const QString salvaged = finalizeCapturedVoiceWav(pendingPath);
+                        if (!salvaged.isEmpty()) {
+                            int dur = wavDurationSeconds(salvaged);
+                            if (dur <= 0) dur = qMax(1, m_voiceRecordingSeconds);
+                            m_recordedVoicePath = salvaged;
+                            m_recordedVoiceDurationSeconds = dur;
+                            m_recordedVoiceWaveform = computeAudioFileWaveformBars(salvaged, salvaged, 28);
+                            m_hasRecordedVoiceMemo = true;
+                        } else {
+                            clearStagedVoiceMemo(true);
+                        }
+                        emit voiceRecordingChanged();
+                        emit toastMessage(QStringLiteral("⚠ Microphone recording stopped unexpectedly"));
+                    });
+            connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+                    [this, proc](int, QProcess::ExitStatus) {
+                        if (m_voiceRecordProcess != proc) return;
+                        m_voiceRecordProcess = nullptr;
+                        proc->disconnect(this);
+                        proc->deleteLater();
+                        if (!m_recordingVoice) return;
+                        m_recordingVoice = false;
+                        m_voiceRecordingTimer.stop();
+                        const QString pendingPath = m_currentVoiceRecordingPath;
+                        m_currentVoiceRecordingPath.clear();
+                        const QString salvaged = finalizeCapturedVoiceWav(pendingPath);
+                        if (!salvaged.isEmpty()) {
+                            int dur = wavDurationSeconds(salvaged);
+                            if (dur <= 0) dur = qMax(1, m_voiceRecordingSeconds);
+                            m_recordedVoicePath = salvaged;
+                            m_recordedVoiceDurationSeconds = dur;
+                            m_recordedVoiceWaveform = computeAudioFileWaveformBars(salvaged, salvaged, 28);
+                            m_hasRecordedVoiceMemo = true;
+                        } else {
+                            clearStagedVoiceMemo(true);
+                        }
+                        emit voiceRecordingChanged();
+                        emit toastMessage(QStringLiteral("⚠ Microphone recording stopped unexpectedly"));
+                    });
         }
-        QProcess *proc = new QProcess(this);
-        if (!effectiveIn.isEmpty()) {
-            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-            env.insert(QStringLiteral("PULSE_SOURCE"), effectiveIn);
-            proc->setProcessEnvironment(env);
-        }
-        proc->start(bin, args);
-        if (!proc->waitForStarted(600)) {
-            proc->deleteLater();
-            emit toastMessage(QStringLiteral("⚠ Failed to start microphone recording"));
-            return;
-        }
-        m_voiceRecordProcess = proc;
-        connect(proc, &QProcess::errorOccurred, this,
-                [this, proc](QProcess::ProcessError) {
-                    if (m_voiceRecordProcess != proc) return;
-                    m_voiceRecordProcess = nullptr;
-                    proc->disconnect(this);
-                    proc->deleteLater();
-                    if (!m_recordingVoice) return;
-                    m_recordingVoice = false;
-                    m_voiceRecordingTimer.stop();
-                    const QString pendingPath = m_currentVoiceRecordingPath;
-                    m_currentVoiceRecordingPath.clear();
-                    const QString salvaged = finalizeCapturedVoiceWav(pendingPath);
-                    if (!salvaged.isEmpty()) {
-                        int dur = wavDurationSeconds(salvaged);
-                        if (dur <= 0) dur = qMax(1, m_voiceRecordingSeconds);
-                        m_recordedVoicePath = salvaged;
-                        m_recordedVoiceDurationSeconds = dur;
-                        m_recordedVoiceWaveform = computeAudioFileWaveformBars(salvaged, salvaged, 28);
-                        m_hasRecordedVoiceMemo = true;
-                    } else {
-                        clearStagedVoiceMemo(true);
-                    }
-                    emit voiceRecordingChanged();
-                    emit toastMessage(QStringLiteral("⚠ Microphone recording stopped unexpectedly"));
-                });
-        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-                [this, proc](int, QProcess::ExitStatus) {
-                    if (m_voiceRecordProcess != proc) return;
-                    m_voiceRecordProcess = nullptr;
-                    proc->disconnect(this);
-                    proc->deleteLater();
-                    if (!m_recordingVoice) return;
-                    m_recordingVoice = false;
-                    m_voiceRecordingTimer.stop();
-                    const QString pendingPath = m_currentVoiceRecordingPath;
-                    m_currentVoiceRecordingPath.clear();
-                    const QString salvaged = finalizeCapturedVoiceWav(pendingPath);
-                    if (!salvaged.isEmpty()) {
-                        int dur = wavDurationSeconds(salvaged);
-                        if (dur <= 0) dur = qMax(1, m_voiceRecordingSeconds);
-                        m_recordedVoicePath = salvaged;
-                        m_recordedVoiceDurationSeconds = dur;
-                        m_recordedVoiceWaveform = computeAudioFileWaveformBars(salvaged, salvaged, 28);
-                        m_hasRecordedVoiceMemo = true;
-                    } else {
-                        clearStagedVoiceMemo(true);
-                    }
-                    emit voiceRecordingChanged();
-                    emit toastMessage(QStringLiteral("⚠ Microphone recording stopped unexpectedly"));
-                });
     }
 #endif
 

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Autonomous AI Agent Install Playbook — BluePill Documentation</title>
     <meta name="description" content="BluePill documentation: Autonomous AI Agent Install Playbook. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
-    <link rel="canonical" href="https://bluepill.nertwork.com/docs">
+    <link rel="canonical" href="https://bluepill.app/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
     <!-- Open Graph / Twitter -->
@@ -467,13 +467,16 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
+
+
             </div>
         </aside>
 
         <main class="doc-content">
             <div class="doc-banner">
                 <div>
-                    <strong>💊 BluePill v1.2.12 Documentation Portal</strong>
+                    <strong>💊 BluePill v1.2.15 Documentation Portal</strong>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
@@ -544,7 +547,7 @@ timeout 120s brew install nertwork/tap/bluepill &lt;/dev/null
 # Verify installed binary
 timeout 5s bluepill-server --version &lt;/dev/null
 
-# Optional: pair with BluePill Cloud Relay (token from https://bluepill.nertwork.com/signup)
+# Optional: pair with BluePill Cloud Relay (token from https://bluepill.app/signup)
 # timeout 30s bluepill-server relay-setup --token &quot;${BLUEPILL_RELAY_TOKEN}&quot; &lt;/dev/null
 </code></pre>
 <h3 id="step-23-generate-secure-server-configuration">Step 2.3: Generate Secure Server Configuration</h3>
@@ -562,7 +565,8 @@ if [[ ! -f &quot;$CONFIG_FILE&quot; ]]; then
   &quot;port&quot;: 1235,
   &quot;password&quot;: &quot;${GENERATED_KEY}&quot;,
   &quot;helperPort&quot;: 45670,
-  &quot;enableBackgroundDaemons&quot;: true
+  &quot;enableBackgroundDaemons&quot;: true,
+  &quot;autoUpdate&quot;: true
 }
 EOF_CFG
     chmod 600 &quot;${CONFIG_FILE}&quot;
@@ -754,11 +758,12 @@ else
     echo &quot;[✗] REST Ping: FAILED (${PING_RESP})&quot;
 fi
 
-# 2. Server Info &amp; Private API Check
+# 2. Server Info, Full Disk Access &amp; Private API Check
 INFO_RESP=$(timeout 5s curl -s -f &quot;${RELAY_ADDR}/api/v1/server/info?password=${RELAY_PWD}&quot; &lt;/dev/null || echo &quot;{}&quot;)
 OS_VER=$(echo &quot;$INFO_RESP&quot; | jq -r '.data.os_version // &quot;Unknown&quot;')
 PRIV_API=$(echo &quot;$INFO_RESP&quot; | jq -r '.data.private_api // false')
-echo &quot;[✓] Server OS: ${OS_VER}, Private API Active: ${PRIV_API}&quot;
+CHAT_DB_OK=$(echo &quot;$INFO_RESP&quot; | jq -r '.data.chat_db_readable // true')
+echo &quot;[✓] Server OS: ${OS_VER}, Private API Active: ${PRIV_API}, chat.db Readable: ${CHAT_DB_OK}&quot;
 
 # 3. Web UI Accessibility Check
 WEB_CODE=$(timeout 5s curl -s -o /dev/null -w &quot;%{http_code}&quot; &quot;${RELAY_ADDR}/web&quot; &lt;/dev/null || echo &quot;000&quot;)

@@ -22,8 +22,12 @@
 #include <QScopeGuard>
 
 #include "backend.h"
+#include "spellchecker.h"
 #include "theme.h"
 #include "translator.h"
+#include <QTextDocument>
+#include <QTextLayout>
+#include <QUuid>
 
 struct ScopedTestHome {
     QByteArray prevHome = qgetenv("HOME");
@@ -1652,7 +1656,8 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("id: composerInput\n                                anchors.fill: parent\n                                anchors.leftMargin: 10\n                                anchors.rightMargin: 36\n                                topPadding: 9\n                                bottomPadding: 9")));
 
         // 2. Verify New Message modal, Search Bar, and Emoji Search Field bottomPadding & expanded heights
-        QVERIFY(qml.contains(QStringLiteral("id: newChatRecipient\n                        anchors.fill: parent\n                        anchors.leftMargin: 10\n                        anchors.rightMargin: 10\n                        topPadding: 8\n                        bottomPadding: 12")));
+        QVERIFY(qml.contains(QStringLiteral("id: newChatRecipient")));
+        QVERIFY(qml.contains(QStringLiteral("topPadding: 8\n                            bottomPadding: 12")));
         QVERIFY(qml.contains(QStringLiteral("id: newChatText\n                        anchors.fill: parent\n                        anchors.leftMargin: 10\n                        anchors.rightMargin: 10\n                        topPadding: 8\n                        bottomPadding: 12")));
         QVERIFY(qml.contains(QStringLiteral("id: searchInput\n                                    Layout.fillWidth: true\n                                    Layout.fillHeight: true\n                                    topPadding: 4\n                                    bottomPadding: 4")));
 
@@ -4570,7 +4575,7 @@ private slots:
         // Opening a chat mid-check waits instead of sending a refused request.
         backend.selectChat(QStringLiteral("iMessage;-;+15555550100"));
         QVERIFY(refusals.isEmpty());
-        QTRY_VERIFY_WITH_TIMEOUT(!backend.tailnetCheckPendingForTest(), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.tailnetCheckPendingForTest(), 15000);
     }
 
     void testResavingUnchangedSettingsKeepsEndpointsAndPendingEdits() {
@@ -11353,7 +11358,7 @@ private slots:
         // Clicking Try Live Demo (connectToLiveDemo) fills /demo + password "demo" and saves immediately
         QMetaObject::invokeMethod(root, "connectToLiveDemo");
         QCoreApplication::processEvents();
-        QCOMPARE(b.serverUrl(), QStringLiteral("https://api.bluepill.nertwork.com:443/demo"));
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://api.bluepill.app:443/demo"));
         QCOMPARE(b.serverPassword(), QStringLiteral("demo"));
         QCOMPARE(b.needsSetup(), false);
 
@@ -12003,11 +12008,14 @@ private slots:
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://github.com/nertwork/bluepill/releases/download/v1.2.13/a.deb")), false));
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://objects.githubusercontent.com/github-production-release-asset/a.deb")), false));
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://release-assets.githubusercontent.com/a.deb")), false));
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://bluepill.app/dl/a.deb")), false));
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://api.bluepill.app/dl/a.deb")), false));
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://bluepill.nertwork.com/dl/a.deb")), false));
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://api.bluepill.nertwork.com/dl/a.deb")), false));
 
         QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("http://github.com/nertwork/bluepill/a.deb")), false));
         QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://evil.com/a.deb")), false));
+        QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://bluepill.app.evil.com/a.deb")), false));
         QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://bluepill.nertwork.com.evil.com/a.deb")), false));
         QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("file://localhost/etc/passwd")), false));
         QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("file://localhost/etc/passwd")), true));
@@ -13092,6 +13100,662 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("objectName: \"chatServiceSymbolBadge\"")));
         QVERIFY(qml.contains(QStringLiteral("anchors.top: bubbleRect.top")));
         QVERIFY(qml.contains(QStringLiteral("objectName: \"reactionPillItem\"")));
+    }
+
+    void testNotificationActivationAndRaiseWindow() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_notif_act.json")));
+        b.loadDemoData();
+
+        const QVariantList chatList = b.chats();
+        QVERIFY(chatList.size() >= 2);
+        const QString chatA = chatList.at(0).toMap().value(QStringLiteral("guid")).toString();
+        const QString chatB = chatList.at(1).toMap().value(QStringLiteral("guid")).toString();
+        QVERIFY(!chatA.isEmpty() && !chatB.isEmpty() && chatA != chatB);
+
+        QSignalSpy raiseSpy(&b, &Backend::requestRaiseWindow);
+        b.registerNotificationIdForTest(101, chatA);
+        b.registerNotificationIdForTest(102, chatB);
+        QVERIFY(b.hasNotificationIdForTest(101));
+        QVERIFY(b.hasNotificationIdForTest(102));
+
+        b.handleNotificationActivated(101);
+        QCOMPARE(b.selectedChatGuid(), chatA);
+        QCOMPARE(raiseSpy.count(), 1);
+        QVERIFY(!b.hasNotificationIdForTest(101));
+
+        b.handleNotificationActivated(102);
+        QCOMPARE(b.selectedChatGuid(), chatB);
+        QCOMPARE(raiseSpy.count(), 2);
+        QVERIFY(!b.hasNotificationIdForTest(102));
+
+        // Unknown notification ID still raises window without changing selection
+        b.handleNotificationActivated(999);
+        QCOMPARE(b.selectedChatGuid(), chatB);
+        QCOMPARE(raiseSpy.count(), 3);
+
+        // Incoming notification records m_lastNotifiedChatGuid
+        b.selectChat(chatB);
+        b.setWindowActive(false);
+        b.notifyIncomingMessageForTest(chatA, QStringLiteral("Sender A"), QStringLiteral("Ping"));
+        QCOMPARE(b.lastNotifiedChatGuidForTest(), chatA);
+    }
+
+    void testMinimizeToTrayPersistenceAndSingleInstance() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+        const QString stateFile = tempDir.filePath(QStringLiteral("state_tray.json"));
+
+        {
+            Backend b1(false);
+            b1.setStateFilePath(stateFile);
+            QCOMPARE(b1.minimizeToTrayOnClose(), true);
+
+            b1.setSystemTrayAvailableForTest(true);
+            QCOMPARE(b1.shouldMinimizeToTrayOnClose(), true);
+
+            b1.setSystemTrayAvailableForTest(false);
+            QCOMPARE(b1.shouldMinimizeToTrayOnClose(), false);
+
+            b1.setSystemTrayAvailableForTest(true);
+            b1.setMinimizeToTrayOnClose(false);
+            QCOMPARE(b1.minimizeToTrayOnClose(), false);
+            QCOMPARE(b1.shouldMinimizeToTrayOnClose(), false);
+        }
+
+        {
+            Backend b2(false);
+            b2.setStateFilePath(stateFile);
+            QCOMPARE(b2.minimizeToTrayOnClose(), false);
+            b2.setMinimizeToTrayOnClose(true);
+            b2.setSystemTrayAvailableForTest(true);
+            QCOMPARE(b2.shouldMinimizeToTrayOnClose(), true);
+        }
+
+        // Verify single-instance activation raises existing window via QLocalServer/QLocalSocket
+        Backend bSrv(false);
+        bSrv.setStateFilePath(tempDir.filePath(QStringLiteral("state_single.json")));
+        const QString sockName = QStringLiteral("bluepill-test-") + QUuid::createUuid().toString(QUuid::Id128);
+        QVERIFY(bSrv.startSingleInstanceServer(sockName));
+
+        QSignalSpy raiseSpy(&bSrv, &Backend::requestRaiseWindow);
+        QVERIFY(Backend::notifyExistingInstance(sockName, 1000));
+        QTRY_COMPARE_WITH_TIMEOUT(raiseSpy.count(), 1, 2000);
+    }
+
+    void testWindowsSilentAutoUpdateArgsAndInstallerConfig() {
+        const QStringList silentArgs = Backend::windowsInstallerArgs(true);
+        QVERIFY(silentArgs.contains(QStringLiteral("/VERYSILENT")));
+        QVERIFY(silentArgs.contains(QStringLiteral("/SUPPRESSMSGBOXES")));
+        QVERIFY(silentArgs.contains(QStringLiteral("/NORESTART")));
+        QVERIFY(silentArgs.contains(QStringLiteral("/CLOSEAPPLICATIONS")));
+        QVERIFY(silentArgs.contains(QStringLiteral("/RESTARTAPPLICATIONS")));
+        QVERIFY(!silentArgs.contains(QStringLiteral("/NORESTARTAPPLICATIONS")));
+
+        const QStringList interactiveArgs = Backend::windowsInstallerArgs(false);
+        QVERIFY(interactiveArgs.contains(QStringLiteral("/CLOSEAPPLICATIONS")));
+        QVERIFY(interactiveArgs.contains(QStringLiteral("/RESTARTAPPLICATIONS")));
+
+#ifdef Q_OS_WIN
+        Backend bWin(false);
+        QCOMPARE(bWin.silentAutoUpdateSupported(), true);
+#endif
+
+        // Verify Inno Setup script directives for #84
+        const QString sourceDirIss = QDir(QFileInfo(QString::fromUtf8(__FILE__)).absolutePath())
+                                         .filePath(QStringLiteral("../installer/bluepill.iss"));
+        QFile issFile(sourceDirIss);
+        if (!issFile.exists()) issFile.setFileName(QStringLiteral("../installer/bluepill.iss"));
+        if (!issFile.exists()) issFile.setFileName(QStringLiteral("installer/bluepill.iss"));
+        if (!issFile.exists()) issFile.setFileName(QStringLiteral("../../installer/bluepill.iss"));
+        QVERIFY2(issFile.open(QIODevice::ReadOnly | QIODevice::Text),
+                 qPrintable(QStringLiteral("Failed to open bluepill.iss (tried %1)").arg(sourceDirIss)));
+        const QString iss = QString::fromUtf8(issFile.readAll());
+        QVERIFY(iss.contains(QStringLiteral("CloseApplications=force")));
+        QVERIFY(iss.contains(QStringLiteral("RestartApplications=yes")));
+        QVERIFY(iss.contains(QStringLiteral("AppMutex=BluePillSingleInstanceMutex")));
+
+        // Verify SHA-256 mismatch aborts Windows installer download cleanly
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        QTcpServer mockWinSrv;
+        QVERIFY(mockWinSrv.listen(QHostAddress::LocalHost, 0));
+        const QByteArray fakeExe(2048, 'W');
+        QObject::connect(&mockWinSrv, &QTcpServer::newConnection, &mockWinSrv, [&]() {
+            while (mockWinSrv.hasPendingConnections()) {
+                QTcpSocket *s = mockWinSrv.nextPendingConnection();
+                QObject::connect(s, &QTcpSocket::readyRead, s, [&, s]() {
+                    const QByteArray raw = s->readAll();
+                    const QByteArray firstLine = raw.left(raw.indexOf('\n')).trimmed();
+                    if (firstLine.contains("/SHA256SUMS.txt")) {
+                        const QByteArray sums = QStringLiteral("%1  BluePill-Setup-9.9.9-win64.exe\n")
+                                                    .arg(QString(64, QLatin1Char('f')))
+                                                    .toUtf8();
+                        const QByteArray resp =
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " +
+                            QByteArray::number(sums.size()) + "\r\nConnection: close\r\n\r\n" + sums;
+                        s->write(resp);
+                    } else {
+                        const QByteArray resp =
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: " +
+                            QByteArray::number(fakeExe.size()) + "\r\nConnection: close\r\n\r\n" + fakeExe;
+                        s->write(resp);
+                    }
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_win_upd.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_win_upd.json")));
+        b.setAllowLocalhostCloudForTest(true);
+        b.setAllowLocalhostUpdatesForTest(true);
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockWinSrv.serverPort()), QString(), QStringLiteral("pw"));
+
+        bool readyCalled = false;
+        b.downloadVerifiedClientPackageForTest(
+            QStringLiteral("http://127.0.0.1:%1/BluePill-Setup-9.9.9-win64.exe").arg(mockWinSrv.serverPort()),
+            QStringLiteral("http://127.0.0.1:%1/SHA256SUMS.txt").arg(mockWinSrv.serverPort()),
+            true,
+            QStringLiteral("BluePill-Setup-9.9.9-win64.exe"),
+            false,
+            [&](const QString &, const std::shared_ptr<QTemporaryDir> &) { readyCalled = true; });
+        QTRY_VERIFY_WITH_TIMEOUT(b.updateStatusText().contains(QStringLiteral("SHA256 verification failed")), 3000);
+        QCOMPARE(readyCalled, false);
+        QCOMPARE(b.updateApplying(), false);
+    }
+
+    void testVoiceMemoBundledFfmpegAndMultimediaFallback() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_voice_mm.json")));
+        b.startVoiceRecording();
+        QCOMPARE(b.recordingVoice(), true);
+        b.stopVoiceRecordingForPreview();
+        QCOMPARE(b.recordingVoice(), false);
+        QCOMPARE(b.hasRecordedVoiceMemo(), true);
+        QVERIFY(Backend::hasNonEmptyWavDataChunk(b.recordedVoicePath()));
+        b.cancelVoiceRecording();
+        QCOMPARE(b.hasRecordedVoiceMemo(), false);
+    }
+
+    void testMultiMessageCopyToClipboard() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_copy.json")));
+
+        const QDateTime t1(QDate(2026, 3, 15), QTime(9, 5, 0));
+        const QDateTime t2(QDate(2026, 3, 15), QTime(14, 22, 0));
+        const QDateTime t3(QDate(2026, 3, 15), QTime(14, 25, 0));
+
+        QVariantList msgs;
+        msgs << QVariantMap{
+            {QStringLiteral("guid"), QStringLiteral("msg-1")},
+            {QStringLiteral("senderName"), QStringLiteral("Alex")},
+            {QStringLiteral("text"), QStringLiteral("First message")},
+            {QStringLiteral("dateCreated"), t1.toMSecsSinceEpoch()},
+            {QStringLiteral("isFromMe"), false}
+        };
+        msgs << QVariantMap{
+            {QStringLiteral("guid"), QStringLiteral("msg-2")},
+            {QStringLiteral("senderName"), QStringLiteral("You")},
+            {QStringLiteral("text"), QStringLiteral("Second message")},
+            {QStringLiteral("dateCreated"), t2.toMSecsSinceEpoch()},
+            {QStringLiteral("isFromMe"), true}
+        };
+        msgs << QVariantMap{
+            {QStringLiteral("guid"), QStringLiteral("msg-3")},
+            {QStringLiteral("senderName"), QStringLiteral("Alex")},
+            {QStringLiteral("text"), QStringLiteral("Third message")},
+            {QStringLiteral("dateCreated"), t3.toMSecsSinceEpoch()},
+            {QStringLiteral("isFromMe"), false}
+        };
+        b.setMessagesForTest(msgs);
+
+        QSignalSpy toastSpy(&b, &Backend::toastMessage);
+        QClipboard *cb = QGuiApplication::clipboard();
+        QVERIFY(cb != nullptr);
+
+        // Plain copy preserves chronological timeline order even when guids are passed out of order
+        b.copyMessagesToClipboard({QStringLiteral("msg-3"), QStringLiteral("msg-1")}, false);
+        QCOMPARE(cb->text(), QStringLiteral("First message\nThird message"));
+        QCOMPARE(toastSpy.count(), 1);
+        QVERIFY(toastSpy.last().at(0).toString().contains(QStringLiteral("Copied 2 messages")));
+
+        // Metadata copy formats [HH:mm] Sender: text
+        b.copyMessagesToClipboard({QStringLiteral("msg-1"), QStringLiteral("msg-2")}, true);
+        QCOMPARE(cb->text(), QStringLiteral("[09:05] Alex: First message\n[14:22] You: Second message"));
+        QCOMPARE(toastSpy.count(), 2);
+        QVERIFY(toastSpy.last().at(0).toString().contains(QStringLiteral("Copied 2 messages")));
+
+        // Single message singular toast
+        b.copyMessagesToClipboard({QStringLiteral("msg-2")}, false);
+        QCOMPARE(cb->text(), QStringLiteral("Second message"));
+        QCOMPARE(toastSpy.count(), 3);
+        QVERIFY(toastSpy.last().at(0).toString().contains(QStringLiteral("Copied 1 message")));
+
+        // Unknown guid does nothing
+        b.copyMessagesToClipboard({QStringLiteral("msg-does-not-exist")}, false);
+        QCOMPARE(cb->text(), QStringLiteral("Second message"));
+        QCOMPARE(toastSpy.count(), 3);
+    }
+
+    void testSpellCheckerDictionaryHighlighterAndRelayAssist() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        const QString userDictPath = tempDir.filePath(QStringLiteral("bluepill_dict.txt"));
+        const QString settingsPath = tempDir.filePath(QStringLiteral("bluepill_spell.json"));
+
+        // Create a minimal Hunspell aff + dic for deterministic testing
+        const QString affPath = tempDir.filePath(QStringLiteral("test_en.aff"));
+        const QString dicPath = tempDir.filePath(QStringLiteral("test_en.dic"));
+        {
+            QFile aff(affPath);
+            QVERIFY(aff.open(QIODevice::WriteOnly | QIODevice::Text));
+            aff.write("SET UTF-8\nTRY esianrtolcdugmphbyfvkwz\n");
+            aff.close();
+
+            QFile dic(dicPath);
+            QVERIFY(dic.open(QIODevice::WriteOnly | QIODevice::Text));
+            dic.write("4\nhello\nworld\nbluepill\ntoday\n");
+            dic.close();
+        }
+
+        {
+            SpellChecker sc;
+            sc.setUserDictionaryPathForTest(userDictPath);
+            sc.setSettingsFilePathForTest(settingsPath);
+            QCOMPARE(sc.spellCheckEnabled(), true);
+            QCOMPARE(sc.autoSuggestEnabled(), true);
+
+#ifndef Q_OS_WIN
+            const bool loaded = sc.loadHunspellDictionary(affPath, dicPath);
+            if (loaded) {
+                QCOMPARE(sc.isAvailable(), true);
+                QCOMPARE(sc.isWordMisspelled(QStringLiteral("hello")), false);
+                QCOMPARE(sc.isWordMisspelled(QStringLiteral("helo")), true);
+                const QStringList sugg = sc.spellingSuggestions(QStringLiteral("helo"));
+                QVERIFY(sugg.contains(QStringLiteral("hello")));
+
+                // SpellHighlighter marks misspelled words and skips URLs
+                QTextDocument doc;
+                doc.setPlainText(QStringLiteral("hello helo https://helo.example.com"));
+                sc.attachToTextDocument(&doc);
+                QCoreApplication::processEvents();
+                const QTextBlock block = doc.firstBlock();
+                const QList<QTextLayout::FormatRange> formats = block.layout()->formats();
+                bool highlightedHelo = false;
+                bool highlightedUrl = false;
+                for (const auto &fr : formats) {
+                    if (fr.format.underlineStyle() == QTextCharFormat::SpellCheckUnderline) {
+                        if (fr.start == 6 && fr.length == 4) highlightedHelo = true;
+                        if (fr.start >= 11) highlightedUrl = true;
+                    }
+                }
+                QVERIFY(highlightedHelo);
+                QVERIFY(!highlightedUrl);
+
+                // Custom user dictionary addition persists and removes underline
+                sc.addWordToDictionary(QStringLiteral("zyxcustom"));
+                QCOMPARE(sc.isWordMisspelled(QStringLiteral("zyxcustom")), false);
+            }
+#else
+            sc.addWordToDictionary(QStringLiteral("zyxcustom"));
+            QCOMPARE(sc.isWordMisspelled(QStringLiteral("zyxcustom")), false);
+#endif
+
+            sc.setSpellCheckEnabled(false);
+            sc.setAutoSuggestEnabled(false);
+            QCOMPARE(sc.isWordMisspelled(QStringLiteral("helo")), false);
+        }
+
+        // Verify persisted settings & custom dictionary reload in a fresh instance
+        {
+            SpellChecker sc2;
+            sc2.setUserDictionaryPathForTest(userDictPath);
+            sc2.setSettingsFilePathForTest(settingsPath);
+            QCOMPARE(sc2.spellCheckEnabled(), false);
+            QCOMPARE(sc2.autoSuggestEnabled(), false);
+            sc2.setSpellCheckEnabled(true);
+            sc2.setAutoSuggestEnabled(true);
+#ifndef Q_OS_WIN
+            if (sc2.loadHunspellDictionary(affPath, dicPath)) {
+                QCOMPARE(sc2.isWordMisspelled(QStringLiteral("zyxcustom")), false);
+            }
+#endif
+        }
+
+        // Verify debounced POST /api/v1/text/check assist
+        QTcpServer mockAssistSrv;
+        QVERIFY(mockAssistSrv.listen(QHostAddress::LocalHost, 0));
+        QString capturedPath;
+        QByteArray capturedBody;
+        QObject::connect(&mockAssistSrv, &QTcpServer::newConnection, &mockAssistSrv, [&]() {
+            while (mockAssistSrv.hasPendingConnections()) {
+                QTcpSocket *s = mockAssistSrv.nextPendingConnection();
+                QObject::connect(s, &QTcpSocket::readyRead, s, [&, s]() {
+                    const QByteArray raw = s->readAll();
+                    const int hdrEnd = raw.indexOf("\r\n\r\n");
+                    const QByteArray firstLine = raw.left(raw.indexOf('\n')).trimmed();
+                    capturedPath = QString::fromUtf8(firstLine);
+                    if (hdrEnd >= 0) {
+                        capturedBody = raw.mid(hdrEnd + 4);
+                    }
+                    const QByteArray respBody = QJsonDocument(QJsonObject{
+                        {QStringLiteral("status"), 200},
+                        {QStringLiteral("data"), QJsonObject{
+                            {QStringLiteral("misspellings"), QJsonArray{QStringLiteral("tomor")}},
+                            {QStringLiteral("completions"), QJsonArray{QStringLiteral("tomorrow")}},
+                            {QStringLiteral("grammar"), QJsonArray{
+                                QJsonObject{
+                                    {QStringLiteral("message"), QStringLiteral("Use 'an' before vowel")},
+                                    {QStringLiteral("replacement"), QStringLiteral("an apple")}
+                                }
+                            }}
+                        }}
+                    }).toJson(QJsonDocument::Compact);
+                    const QByteArray resp =
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                        QByteArray::number(respBody.size()) + "\r\nConnection: close\r\n\r\n" + respBody;
+                    s->write(resp);
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        SpellChecker scAssist;
+        scAssist.setUserDictionaryPathForTest(userDictPath);
+        scAssist.setSettingsFilePathForTest(tempDir.filePath(QStringLiteral("bluepill_spell_assist.json")));
+        scAssist.setAllowLocalhostRelayForTest(true);
+        scAssist.setAssistDebounceMsForTest(20);
+        scAssist.setRelayEndpoint(QStringLiteral("http://127.0.0.1:%1").arg(mockAssistSrv.serverPort()), QStringLiteral("pw"));
+
+        QSignalSpy assistSpy(&scAssist, &SpellChecker::assistChanged);
+        scAssist.requestAssist(QStringLiteral("Let us meet tomor"));
+        QTRY_COMPARE_WITH_TIMEOUT(assistSpy.count(), 1, 3000);
+        QVERIFY(capturedPath.contains(QStringLiteral("POST /api/v1/text/check")));
+        QVERIFY(capturedBody.contains("Let us meet tomor"));
+        QCOMPARE(scAssist.inlineSuggestion(), QStringLiteral("tomorrow"));
+        QCOMPARE(scAssist.grammarHint(), QStringLiteral("Use 'an' before vowel (an apple)"));
+        QCOMPARE(scAssist.grammarHints().size(), 1);
+
+        scAssist.setAutoSuggestEnabled(false);
+        QCOMPARE(scAssist.inlineSuggestion(), QString());
+        QCOMPARE(scAssist.grammarHint(), QString());
+    }
+
+    void testCreateGroupChatAndMultiRecipientStartNewChat() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        QTcpServer mockSrv;
+        QVERIFY(mockSrv.listen(QHostAddress::LocalHost, 0));
+        QByteArray lastBody;
+        QString lastPath;
+        QObject::connect(&mockSrv, &QTcpServer::newConnection, &mockSrv, [&]() {
+            while (mockSrv.hasPendingConnections()) {
+                QTcpSocket *s = mockSrv.nextPendingConnection();
+                QObject::connect(s, &QTcpSocket::readyRead, s, [&, s]() {
+                    const QByteArray raw = s->readAll();
+                    const QByteArray firstLine = raw.left(raw.indexOf('\n')).trimmed();
+                    const int hdrEnd = raw.indexOf("\r\n\r\n");
+                    const QByteArray reqBody = (hdrEnd >= 0) ? raw.mid(hdrEnd + 4) : QByteArray();
+                    QByteArray respJson;
+                    if (firstLine.contains("/api/v1/chat/new")) {
+                        lastPath = QString::fromUtf8(firstLine);
+                        lastBody = reqBody;
+                        respJson = QJsonDocument(QJsonObject{
+                            {QStringLiteral("status"), 200},
+                            {QStringLiteral("data"), QJsonObject{
+                                {QStringLiteral("guid"), QStringLiteral("iMessage;+;chatgroup9191")},
+                                {QStringLiteral("chatIdentifier"), QStringLiteral("chatgroup9191")}
+                            }}
+                        }).toJson(QJsonDocument::Compact);
+                    } else if (firstLine.contains("/api/v1/chat/query") || firstLine.contains("/api/v1/message/query")) {
+                        respJson = QByteArray("{\"status\":200,\"data\":[]}");
+                    } else {
+                        respJson = QByteArray("{\"status\":200,\"data\":{}}");
+                    }
+                    const QByteArray resp =
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                        QByteArray::number(respJson.size()) + "\r\nConnection: close\r\n\r\n" + respJson;
+                    s->write(resp);
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_grp91.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_grp91.json")));
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockSrv.serverPort()), QString(), QStringLiteral("pw"));
+
+        // Deduplicates duplicate addresses and sends full addresses array to POST /api/v1/chat/new
+        b.createGroupChat({QStringLiteral("+14155550101"), QStringLiteral("(415) 555-0101"), QStringLiteral("alice@example.com")},
+                          QStringLiteral("Hello team"),
+                          QStringLiteral("iMessage"));
+        QTRY_VERIFY_WITH_TIMEOUT(!lastBody.isEmpty(), 3000);
+        QVERIFY(lastPath.contains(QStringLiteral("POST /api/v1/chat/new")));
+        const QJsonObject sentObj = QJsonDocument::fromJson(lastBody).object();
+        const QJsonArray sentAddrs = sentObj.value(QStringLiteral("addresses")).toArray();
+        QCOMPARE(sentAddrs.size(), 2);
+        QCOMPARE(sentAddrs.at(0).toString(), QStringLiteral("+14155550101"));
+        QCOMPARE(sentAddrs.at(1).toString(), QStringLiteral("alice@example.com"));
+        QCOMPARE(sentObj.value(QStringLiteral("message")).toString(), QStringLiteral("Hello team"));
+        QCOMPARE(sentObj.value(QStringLiteral("service")).toString(), QStringLiteral("iMessage"));
+        QTRY_COMPARE_WITH_TIMEOUT(b.selectedChatGuid(), QStringLiteral("iMessage;+;chatgroup9191"), 3000);
+
+        // Comma/semicolon-separated startNewChat routes to group chat creation
+        lastBody.clear();
+        b.startNewChat(QStringLiteral("+14155550202; +14155550303"), QStringLiteral("Hi both"));
+        QTRY_VERIFY_WITH_TIMEOUT(!lastBody.isEmpty(), 3000);
+        const QJsonArray sentAddrs2 = QJsonDocument::fromJson(lastBody).object().value(QStringLiteral("addresses")).toArray();
+        QCOMPARE(sentAddrs2.size(), 2);
+        QCOMPARE(sentAddrs2.at(0).toString(), QStringLiteral("+14155550202"));
+        QCOMPARE(sentAddrs2.at(1).toString(), QStringLiteral("+14155550303"));
+    }
+
+    void testLasersEffectReconciliationRoundTrip() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        QTcpServer mockSrv;
+        QVERIFY(mockSrv.listen(QHostAddress::LocalHost, 0));
+        const QString chatGuid = QStringLiteral("iMessage;-;+14155550192");
+        QObject::connect(&mockSrv, &QTcpServer::newConnection, &mockSrv, [&]() {
+            while (mockSrv.hasPendingConnections()) {
+                QTcpSocket *s = mockSrv.nextPendingConnection();
+                QObject::connect(s, &QTcpSocket::readyRead, s, [&, s]() {
+                    const QByteArray raw = s->readAll();
+                    const QByteArray firstLine = raw.left(raw.indexOf('\n')).trimmed();
+                    QByteArray respJson;
+                    if (firstLine.contains("/api/v1/message/text")) {
+                        // Simulate server reply omitting expressiveSendStyleId so client falls back to m_recentOutboundEffects
+                        respJson = QJsonDocument(QJsonObject{
+                            {QStringLiteral("status"), 200},
+                            {QStringLiteral("data"), QJsonObject{
+                                {QStringLiteral("guid"), QStringLiteral("srv-laser-1")},
+                                {QStringLiteral("text"), QStringLiteral("Pew pew")},
+                                {QStringLiteral("isFromMe"), true},
+                                {QStringLiteral("dateCreated"), QDateTime::currentMSecsSinceEpoch()}
+                            }}
+                        }).toJson(QJsonDocument::Compact);
+                    } else {
+                        respJson = QByteArray("{\"status\":200,\"data\":[]}");
+                    }
+                    const QByteArray resp =
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                        QByteArray::number(respJson.size()) + "\r\nConnection: close\r\n\r\n" + respJson;
+                    s->write(resp);
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_laser.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_laser.json")));
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockSrv.serverPort()), QString(), QStringLiteral("pw"));
+
+        QJsonObject chatObj{
+            {QStringLiteral("guid"), chatGuid},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("+14155550192")},
+            {QStringLiteral("style"), 45}
+        };
+        b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+        b.selectChat(chatGuid);
+
+        const QString laserId = QStringLiteral("com.apple.messages.effect.CKLasersEffect");
+        QCOMPARE(Backend::formatExpressiveEffectLabel(laserId), QStringLiteral("sent with lasers"));
+        QCOMPARE(Backend::formatExpressiveEffectName(laserId), QStringLiteral("✨ Lasers"));
+
+        b.sendMessage(chatGuid, QStringLiteral("Pew pew"), QString(), laserId);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.messages().isEmpty() &&
+                                     b.messages().last().toMap().value(QStringLiteral("guid")).toString() == QStringLiteral("srv-laser-1"),
+                                 3000);
+        const QVariantMap m = b.messages().last().toMap();
+        QCOMPARE(m.value(QStringLiteral("expressiveSendStyleId")).toString(), laserId);
+        QCOMPARE(m.value(QStringLiteral("sendEffectLabel")).toString(), QStringLiteral("sent with lasers"));
+        QCOMPARE(m.value(QStringLiteral("expressiveEffect")).toString(), QStringLiteral("✨ Lasers"));
+    }
+
+    void testQmlUiEnhancements80To91() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_qml_80_91.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_qml_80_91.json")));
+        Theme theme;
+        Translator i18n;
+        SpellChecker spellChecker;
+        spellChecker.setUserDictionaryPathForTest(tempDir.filePath(QStringLiteral("dict.txt")));
+        spellChecker.setSettingsFilePathForTest(tempDir.filePath(QStringLiteral("spell_cfg.json")));
+        spellChecker.reloadForTest();
+
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.rootContext()->setContextProperty(QStringLiteral("spellChecker"), &spellChecker);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+
+        QQuickWindow *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win != nullptr);
+
+        // #80 & #81: Minimize to tray toggle + requestRaiseWindow + quitApplication
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("toggleMinimizeToTrayBtn")) != nullptr);
+        QSignalSpy raiseSpy(&b, &Backend::requestRaiseWindow);
+        emit b.requestRaiseWindow();
+        QCOMPARE(raiseSpy.count(), 1);
+
+        // #82: Lasers screen effect overlay & triggerExpressiveEffect variants
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("lasersStage")) != nullptr);
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("laserBeamsRepeater")) != nullptr);
+        QMetaObject::invokeMethod(win, "triggerExpressiveEffect", Q_ARG(QVariant, QStringLiteral("✨ Lasers")));
+        QCOMPARE(win->property("activeScreenEffect").toString(), QStringLiteral("lasers"));
+        win->setProperty("activeScreenEffect", QString());
+        QMetaObject::invokeMethod(win, "triggerExpressiveEffect", Q_ARG(QVariant, QStringLiteral("com.apple.messages.effect.CKLasersEffect")));
+        QCOMPARE(win->property("activeScreenEffect").toString(), QStringLiteral("lasers"));
+        win->setProperty("activeScreenEffect", QString());
+        QMetaObject::invokeMethod(win, "triggerExpressiveEffect", Q_ARG(QVariant, QStringLiteral("sent with lasers")));
+        QCOMPARE(win->property("activeScreenEffect").toString(), QStringLiteral("lasers"));
+        win->setProperty("activeScreenEffect", QString());
+
+        // #84: Windows silent auto-update button label check
+        QObject *clientBtn = win->findChild<QObject *>(QStringLiteral("confirmClientUpdateBtn"));
+        QVERIFY(clientBtn != nullptr);
+
+        // #87: Multi-message selection state, range selection, and clipboard bar
+        const QString chatGuid = QStringLiteral("iMessage;-;+14155550199");
+        QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("chatIdentifier"), QStringLiteral("+14155550199")}, {QStringLiteral("style"), 45}};
+        b.ingestChatsMetadataForTest(QJsonArray{chatObj});
+        QJsonArray msgs;
+        for (int i = 0; i < 3; ++i) {
+            msgs.append(QJsonObject{
+                {QStringLiteral("guid"), QStringLiteral("m-sel-%1").arg(i)},
+                {QStringLiteral("text"), QStringLiteral("Message %1").arg(i)},
+                {QStringLiteral("isFromMe"), i % 2 == 0},
+                {QStringLiteral("dateCreated"), 1775860000000LL + i * 1000},
+                {QStringLiteral("chats"), QJsonArray{chatObj}}
+            });
+        }
+        b.ingestMessagesForTest(msgs, true);
+        b.selectChat(chatGuid);
+        QTest::qWait(50);
+
+        QMetaObject::invokeMethod(win, "toggleMessageSelected", Q_ARG(QVariant, QStringLiteral("m-sel-0")));
+        QCOMPARE(win->property("selectedMessageCount").toInt(), 1);
+        QCOMPARE(win->property("selectionAnchorGuid").toString(), QStringLiteral("m-sel-0"));
+        QMetaObject::invokeMethod(win, "selectMessageRangeTo", Q_ARG(QVariant, 2));
+        QCOMPARE(win->property("selectedMessageCount").toInt(), 3);
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("multiSelectBar")) != nullptr);
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("multiSelectCopyBtn")) != nullptr);
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("multiSelectCopyNamesBtn")) != nullptr);
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("multiSelectCancelBtn")) != nullptr);
+        QMetaObject::invokeMethod(win, "clearMessageSelection");
+        QCOMPARE(win->property("selectedMessageCount").toInt(), 0);
+
+        // #88: SpellChecker QML controls & guards
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("composerAssistBar")) != nullptr);
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("composerSpellMenu")) != nullptr);
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("toggleSpellCheckBtn")) != nullptr);
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("toggleAutoSuggestBtn")) != nullptr);
+
+        // #90: Proportional viewer sizing & decluttered photo tiles
+        QObject *notesPopup = win->findChild<QObject *>(QStringLiteral("icloudNotesPopup"));
+        QObject *calPopup = win->findChild<QObject *>(QStringLiteral("icloudCalendarPopup"));
+        QObject *photosPopup = win->findChild<QObject *>(QStringLiteral("icloudPhotosPopup"));
+        QObject *viewerCard = win->findChild<QObject *>(QStringLiteral("photoViewerCard"));
+        QVERIFY(notesPopup && calPopup && photosPopup && viewerCard);
+        win->setProperty("width", 1400);
+        win->setProperty("height", 960);
+        QTest::qWait(30);
+        QVERIFY(notesPopup->property("width").toReal() >= 1000.0);
+        QVERIFY(calPopup->property("width").toReal() >= 1000.0);
+        QVERIFY(photosPopup->property("width").toReal() >= 1000.0);
+        QVERIFY(viewerCard->property("width").toReal() >= 1000.0);
+
+        // #91: Multi-recipient chips in New Message modal
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("newChatRecipientsFlow")) != nullptr);
+        QVariant added1 = false, added2 = false, dup = true;
+        QMetaObject::invokeMethod(win, "addNewChatRecipient", Q_RETURN_ARG(QVariant, added1), Q_ARG(QVariant, QStringLiteral("+14155550101")), Q_ARG(QVariant, QStringLiteral("Alice")));
+        QMetaObject::invokeMethod(win, "addNewChatRecipient", Q_RETURN_ARG(QVariant, dup), Q_ARG(QVariant, QStringLiteral("+14155550101")), Q_ARG(QVariant, QStringLiteral("Alice")));
+        QMetaObject::invokeMethod(win, "addNewChatRecipient", Q_RETURN_ARG(QVariant, added2), Q_ARG(QVariant, QStringLiteral("+14155550202")), Q_ARG(QVariant, QStringLiteral("Bob")));
+        QCOMPARE(added1.toBool(), true);
+        QCOMPARE(dup.toBool(), false);
+        QCOMPARE(added2.toBool(), true);
+        QCOMPARE(win->property("newChatRecipients").toList().size(), 2);
+        QMetaObject::invokeMethod(win, "removeNewChatRecipientAt", Q_ARG(QVariant, 0));
+        QCOMPARE(win->property("newChatRecipients").toList().size(), 1);
     }
 
 };

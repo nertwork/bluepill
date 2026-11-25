@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Enforce Linked GitHub Issue on Pull Requests
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -307,6 +307,19 @@ jobs:
           }
           & $windeploy --release --qmldir src --no-translations build-win-dist\bluepill.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $qtMmPlugins = Join-Path $env:QT_ROOT_DIR "plugins\multimedia"
+          if (Test-Path $qtMmPlugins) {
+              New-Item -ItemType Directory -Force -Path build-win-dist\multimedia | Out-Null
+              Copy-Item (Join-Path $qtMmPlugins "*.dll") build-win-dist\multimedia\ -Force
+          }
+          if (-not (Test-Path build-win-dist\Qt6Multimedia.dll)) {
+              Write-Error "Qt6Multimedia.dll missing from build-win-dist (BLUEPILL_HAS_MULTIMEDIA=1 requires Qt6::Multimedia)"
+              exit 1
+          }
+          if (-not (Get-ChildItem -Path build-win-dist\multimedia -Filter "*.dll" -ErrorAction SilentlyContinue)) {
+              Write-Error "Qt6 Multimedia plugins missing from build-win-dist\multimedia"
+              exit 1
+          }
           if ($env:VCToolsRedistDir -and (Test-Path $env:VCToolsRedistDir)) {
               Get-ChildItem -Path $env:VCToolsRedistDir -Filter "*.dll" -Recurse | Where-Object { $_.DirectoryName -match "\\x64\\Microsoft\.VC.*CRT$" } | ForEach-Object {
                   Copy-Item $_.FullName build-win-dist\ -Force

@@ -83,7 +83,7 @@ timeout 120s brew install nertwork/tap/bluepill </dev/null
 # Verify installed binary
 timeout 5s bluepill-server --version </dev/null
 
-# Optional: pair with BluePill Cloud Relay (token from https://bluepill.nertwork.com/signup)
+# Optional: pair with BluePill Cloud Relay (token from https://bluepill.app/signup)
 # timeout 30s bluepill-server relay-setup --token "${BLUEPILL_RELAY_TOKEN}" </dev/null
 ```
 
@@ -104,7 +104,8 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   "port": 1235,
   "password": "${GENERATED_KEY}",
   "helperPort": 45670,
-  "enableBackgroundDaemons": true
+  "enableBackgroundDaemons": true,
+  "autoUpdate": true
 }
 EOF_CFG
     chmod 600 "${CONFIG_FILE}"
@@ -322,11 +323,12 @@ else
     echo "[✗] REST Ping: FAILED (${PING_RESP})"
 fi
 
-# 2. Server Info & Private API Check
+# 2. Server Info, Full Disk Access & Private API Check
 INFO_RESP=$(timeout 5s curl -s -f "${RELAY_ADDR}/api/v1/server/info?password=${RELAY_PWD}" </dev/null || echo "{}")
 OS_VER=$(echo "$INFO_RESP" | jq -r '.data.os_version // "Unknown"')
 PRIV_API=$(echo "$INFO_RESP" | jq -r '.data.private_api // false')
-echo "[✓] Server OS: ${OS_VER}, Private API Active: ${PRIV_API}"
+CHAT_DB_OK=$(echo "$INFO_RESP" | jq -r '.data.chat_db_readable // true')
+echo "[✓] Server OS: ${OS_VER}, Private API Active: ${PRIV_API}, chat.db Readable: ${CHAT_DB_OK}"
 
 # 3. Web UI Accessibility Check
 WEB_CODE=$(timeout 5s curl -s -o /dev/null -w "%{http_code}" "${RELAY_ADDR}/web" </dev/null || echo "000")

@@ -1,4 +1,5 @@
 version: 2
+# Note: server/bluepill_server.py uses Python 3 standard library only (zero pip requirements).
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"

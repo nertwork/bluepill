@@ -8,13 +8,15 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Qml Quick QuickControls2 Network Svg Concurrent)
-find_package(Qt6 OPTIONAL_COMPONENTS Test Multimedia)
+find_package(Qt6 OPTIONAL_COMPONENTS Test Multimedia DBus)
 
 set(BLUEPILL_COMMON_SOURCES
     src/theme.h
     src/theme.cpp
     src/translator.h
     src/translator.cpp
+    src/spellchecker.h
+    src/spellchecker.cpp
     src/backend.h
     src/backend.cpp
     src/resources.qrc
@@ -50,8 +52,13 @@ if (TARGET Qt6::Multimedia)
     target_compile_definitions(bluepill PRIVATE BLUEPILL_HAS_MULTIMEDIA=1)
 endif()
 
+if (TARGET Qt6::DBus)
+    target_link_libraries(bluepill PRIVATE Qt6::DBus)
+    target_compile_definitions(bluepill PRIVATE BLUEPILL_HAS_DBUS=1)
+endif()
+
 if (WIN32)
-    target_link_libraries(bluepill PRIVATE Advapi32 Crypt32 Winmm)
+    target_link_libraries(bluepill PRIVATE Advapi32 Crypt32 Winmm Ole32)
 endif()
 
 install(TARGETS bluepill RUNTIME DESTINATION bin)
@@ -78,8 +85,12 @@ if (TARGET Qt6::Test)
         target_link_libraries(imsg_tests PRIVATE Qt6::Multimedia)
         target_compile_definitions(imsg_tests PRIVATE BLUEPILL_HAS_MULTIMEDIA=1)
     endif()
+    if (TARGET Qt6::DBus)
+        target_link_libraries(imsg_tests PRIVATE Qt6::DBus)
+        target_compile_definitions(imsg_tests PRIVATE BLUEPILL_HAS_DBUS=1)
+    endif()
     if (WIN32)
-        target_link_libraries(imsg_tests PRIVATE Advapi32 Crypt32 Winmm)
+        target_link_libraries(imsg_tests PRIVATE Advapi32 Crypt32 Winmm Ole32)
     endif()
     target_include_directories(imsg_tests PRIVATE src)
     target_compile_definitions(imsg_tests PRIVATE IMSG_UNIT_TEST=1)

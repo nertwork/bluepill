@@ -1,6 +1,8 @@
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #pragma once
 
 #include <QAbstractListModel>
@@ -9,6 +11,8 @@
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QLocalServer>
+#include <QMenu>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -30,6 +34,9 @@ class Theme;
 #ifdef BLUEPILL_HAS_MULTIMEDIA
 class QMediaPlayer;
 class QAudioOutput;
+class QMediaCaptureSession;
+class QAudioInput;
+class QMediaRecorder;
 #endif
 
 struct ChatEntry {
@@ -304,6 +311,7 @@ class Backend : public QObject {
     Q_PROPERTY(bool showTopBarStatusPill READ showTopBarStatusPill WRITE setShowTopBarStatusPill NOTIFY uiPreferencesChanged)
     Q_PROPERTY(bool showPinnedRow READ showPinnedRow WRITE setShowPinnedRow NOTIFY uiPreferencesChanged)
     Q_PROPERTY(bool hoverMessageActions READ hoverMessageActions WRITE setHoverMessageActions NOTIFY uiPreferencesChanged)
+    Q_PROPERTY(bool minimizeToTrayOnClose READ minimizeToTrayOnClose WRITE setMinimizeToTrayOnClose NOTIFY uiPreferencesChanged)
     Q_PROPERTY(bool onboardingCompleted READ onboardingCompleted WRITE setOnboardingCompleted NOTIFY uiPreferencesChanged)
     Q_PROPERTY(QString themeMode READ themeMode WRITE setThemeMode NOTIFY themeModeChanged)
     Q_PROPERTY(bool syncingHistory READ syncingHistory NOTIFY syncingHistoryChanged)
@@ -401,6 +409,17 @@ public:
     void setShowPinnedRow(bool enabled);
     bool hoverMessageActions() const { return m_hoverMessageActions; }
     void setHoverMessageActions(bool enabled);
+    bool minimizeToTrayOnClose() const { return m_minimizeToTrayOnClose; }
+    void setMinimizeToTrayOnClose(bool enabled);
+    Q_INVOKABLE bool shouldMinimizeToTrayOnClose() const;
+    Q_INVOKABLE void quitApplication();
+    Q_INVOKABLE void handleNotificationActivated(uint notifId);
+    void setupSystemTray();
+    void raiseWindow();
+    bool startSingleInstanceServer(const QString &serverName);
+    static bool notifyExistingInstance(const QString &serverName, int timeoutMs = 300);
+    static QStringList windowsInstallerArgs(bool silent = true);
+    static QString formatMessagesForClipboard(const QVariantList &messages, const QStringList &guids, bool includeMetadata);
     bool onboardingCompleted() const { return m_onboardingCompleted; }
     Q_INVOKABLE void setOnboardingCompleted(bool completed);
     Q_INVOKABLE void completeOnboarding() { setOnboardingCompleted(true); }
@@ -561,6 +580,8 @@ public:
     int messageEditWindowMs() const { return kMessageEditWindowMs; }
     Q_INVOKABLE void deleteChat(const QString &chatGuid = QString());
     Q_INVOKABLE void startNewChat(const QString &address, const QString &text = QString());
+    Q_INVOKABLE void createNewChat(const QString &address, const QString &text = QString()) { startNewChat(address, text); }
+    Q_INVOKABLE void createGroupChat(const QStringList &addresses, const QString &message = QString(), const QString &service = QString());
     Q_INVOKABLE void openAttachment(const QString &guid, const QString &transferName);
     Q_INVOKABLE void openUrl(const QString &url);
     bool cloudLoggedIn() const;
@@ -635,6 +656,7 @@ public:
 
     // Clipboard & Verification/OTP code extraction
     Q_INVOKABLE void copyToClipboard(const QString &text, const QString &label = QString());
+    Q_INVOKABLE void copyMessagesToClipboard(const QStringList &guids, bool includeMetadata = false);
     Q_INVOKABLE void copyTextToClipboard(const QString &text) { copyToClipboard(text); }
     Q_INVOKABLE bool copyImageToClipboard(const QString &localUrlOrPath, const QString &attachmentGuid = QString());
     Q_INVOKABLE static QString extractVerificationCode(const QString &text);
@@ -721,6 +743,18 @@ public:
         m_soundPlayCountForTest = 0;
         m_lastSoundPresetPlayed.clear();
     }
+    void registerNotificationIdForTest(uint notifId, const QString &chatGuid) {
+        if (notifId > 0 && !chatGuid.isEmpty()) m_notificationChatMap.insert(notifId, chatGuid);
+    }
+    bool hasNotificationIdForTest(uint notifId) const { return m_notificationChatMap.contains(notifId); }
+    QString lastNotifiedChatGuidForTest() const { return m_lastNotifiedChatGuid; }
+    void setSystemTrayAvailableForTest(bool available) { m_trayAvailableOverrideForTest = available; }
+    void clearSystemTrayAvailableOverrideForTest() { m_trayAvailableOverrideForTest.reset(); }
+    bool explicitQuitForTest() const { return m_explicitQuit; }
+    void resetExplicitQuitForTest() { m_explicitQuit = false; }
+    void notifyIncomingMessageForTest(const QString &chatGuid, const QString &sender, const QString &preview) {
+        notifyIncomingMessage(chatGuid, sender, preview);
+    }
     void rebuildSelectedChatMessagesForTest() { rebuildSelectedChatMessages(); }
     QString contactAvatarApiPathForTest(const QString &handle) const { return m_contactAvatarApiPaths.value(normalizeHandle(handle)); }
     QString contactAvatarCacheFileForTest(const QString &apiPath) const { return avatarCacheFile(apiPath); }
@@ -746,6 +780,7 @@ public:
     static bool isDecodableImageData(const QByteArray &bytes);
     static bool isDecodableImageFile(const QString &path);
     static QString formatExpressiveEffectLabel(const QString &styleId);
+    static QString formatExpressiveEffectName(const QString &styleId);
     static QString extractFirstUrl(const QString &text);
     static QString stripTrailingUrlPunctuation(QString url);
     static bool isYouTubeUrl(const QString &url);
@@ -897,10 +932,15 @@ signals:
     void cloudSignInCompleted(const QString &email, const QString &serverUrl);
 
     void toastMessage(const QString &text);
+    void requestRaiseWindow();
     void attachmentSendRejected(const QString &chatGuid, const QStringList &rejectedPaths, const QString &unsentCaption);
     void attachmentReady(const QString &attachmentGuid, const QString &localUrl);
     void linkPreviewUpdated(const QString &messageGuid, const QVariantMap &previewData);
     void pendingDeliveryCheckFinishedForTest();
+
+private slots:
+    void onDbusNotificationActionInvoked(uint notifId, const QString &actionKey);
+    void onDbusNotificationClosed(uint notifId, uint reason);
 
 private:
     // Finds a cached message; chatKey gets the m_chatMessagesCache key it's under.
@@ -984,6 +1024,7 @@ private:
     bool canSeekLocalAudioPlayback() const;
     void enforceLatestOutgoingReceiptsInTimeline();
     void stopVoiceRecordProcess(bool waitForFlush);
+    bool startMultimediaVoiceRecording(const QString &targetPath);
     QString finalizeCapturedVoiceWav(const QString &recPath);
     void clearStagedVoiceMemo(bool removeFile);
     void saveAudioDeviceConfig();
@@ -995,7 +1036,8 @@ private:
     void sortChats();
     bool shouldNotifyForIncomingMessage(const QJsonObject &m, const QString &chatGuid, qint64 dateCreated, qint64 rowId) const;
     void notifyIncomingMessage(const QString &chatGuid, const QString &sender, const QString &preview);
-    void showDesktopNotification(const QString &title, const QString &body);
+    void showDesktopNotification(const QString &title, const QString &body, const QString &chatGuid = QString());
+    void ensureDbusNotificationSubscription();
     static QString defaultBluepillConfigPath();
     QString cloudSettingsFilePath() const;
     void stopCloudSignInListener();
@@ -1143,6 +1185,9 @@ private:
     bool m_showTopBarStatusPill = false;
     bool m_showPinnedRow = true;
     bool m_hoverMessageActions = false;
+    bool m_minimizeToTrayOnClose = true;
+    bool m_explicitQuit = false;
+    std::optional<bool> m_trayAvailableOverrideForTest;
     bool m_onboardingCompleted = false;
     bool m_hasExplicitOnboardingCompleted = false;
     bool m_syncingHistory = false;
@@ -1270,6 +1315,10 @@ private:
 #ifdef BLUEPILL_HAS_MULTIMEDIA
     QPointer<QMediaPlayer> m_mediaPlayer;
     QPointer<QAudioOutput> m_mediaAudioOutput;
+    QPointer<QMediaCaptureSession> m_captureSession;
+    QPointer<QAudioInput> m_audioInput;
+    QPointer<QMediaRecorder> m_mediaRecorder;
+    bool m_usingMultimediaRecorder = false;
 #endif
 
     bool m_recordingVoice = false;
@@ -1330,6 +1379,12 @@ private:
     QString m_lastOpenedUrl;
     qint64 m_lastOpenedUrlTimeMs = 0;
     QPointer<QSystemTrayIcon> m_trayIcon;
+    QPointer<QMenu> m_trayMenu;
+    bool m_trayLastWindowClosedHooked = false;
+    QPointer<QLocalServer> m_singleInstanceServer;
+    QHash<uint32_t, QString> m_notificationChatMap;
+    QString m_lastNotifiedChatGuid;
+    bool m_dbusNotifConnected = false;
     QPointer<Theme> m_theme;
     QString m_themeMode = QStringLiteral("system");
 };

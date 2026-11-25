@@ -1,5 +1,6 @@
 #include <QKeyEvent>
 #include "backend.h"
+#include "spellchecker.h"
 #include "theme.h"
 #include "translator.h"
 
@@ -11,6 +12,8 @@
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QRegularExpression>
+#include <QScopeGuard>
 #include <QStringList>
 #include <QDir>
 #include <QFileInfo>
@@ -180,6 +183,39 @@ int main(int argc, char *argv[]) {
         viewerScreenshotPath = rawArgs.at(viewerSsIdx + 2);
     }
 
+    const bool isSpecialRun = demoMode || testStartup ||
+                              !screenshotPath.isEmpty() || !liveScreenshotPath.isEmpty() ||
+                              !homeScreenshotPath.isEmpty() || !chatScreenshotPath.isEmpty() ||
+                              !viewerScreenshotPath.isEmpty();
+#ifdef IMSG_UNIT_TEST
+    const bool enableSingleInstanceAndTray = false;
+#else
+    const bool enableSingleInstanceAndTray = !isSpecialRun;
+#endif
+
+    QString userPart = qEnvironmentVariable("USER").trimmed();
+    if (userPart.isEmpty()) userPart = qEnvironmentVariable("USERNAME").trimmed();
+    if (userPart.isEmpty()) userPart = QStringLiteral("default");
+    userPart.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9_-]")), QStringLiteral("_"));
+    const QString singleInstanceName = QStringLiteral("bluepill-single-instance-") + userPart;
+
+    if (enableSingleInstanceAndTray && Backend::notifyExistingInstance(singleInstanceName)) {
+        return 0;
+    }
+
+#ifdef Q_OS_WIN
+    HANDLE hSingleMutex = nullptr;
+    if (enableSingleInstanceAndTray) {
+        hSingleMutex = CreateMutexW(nullptr, FALSE, L"BluePillSingleInstanceMutex");
+    }
+    auto closeMutexGuard = qScopeGuard([&hSingleMutex]() {
+        if (hSingleMutex) {
+            CloseHandle(hSingleMutex);
+            hSingleMutex = nullptr;
+        }
+    });
+#endif
+
     Theme theme;
     Translator translator;
     Backend backend(!demoMode);
@@ -188,10 +224,17 @@ int main(int argc, char *argv[]) {
         backend.loadDemoData();
     }
 
+    SpellChecker spellChecker;
+    spellChecker.setRelayEndpoint(backend.serverUrl(), backend.serverPassword());
+    QObject::connect(&backend, &Backend::configChanged, &spellChecker, [&backend, &spellChecker]() {
+        spellChecker.setRelayEndpoint(backend.serverUrl(), backend.serverPassword());
+    });
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
     engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
     engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+    engine.rootContext()->setContextProperty(QStringLiteral("spellChecker"), &spellChecker);
 
     const QUrl url(QStringLiteral("qrc:/Main.qml"));
     QObject::connect(
@@ -201,6 +244,11 @@ int main(int argc, char *argv[]) {
         },
         Qt::QueuedConnection);
     engine.load(url);
+
+    if (enableSingleInstanceAndTray) {
+        backend.startSingleInstanceServer(singleInstanceName);
+        backend.setupSystemTray();
+    }
 
     if (!releaseScreenshotsDir.isEmpty()) {
         QDir().mkpath(releaseScreenshotsDir);

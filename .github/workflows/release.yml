@@ -211,6 +211,19 @@ jobs:
           }
           & $windeploy --release --qmldir src --no-translations build-win-dist\bluepill.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $qtMmPlugins = Join-Path $env:QT_ROOT_DIR "plugins\multimedia"
+          if (Test-Path $qtMmPlugins) {
+              New-Item -ItemType Directory -Force -Path build-win-dist\multimedia | Out-Null
+              Copy-Item (Join-Path $qtMmPlugins "*.dll") build-win-dist\multimedia\ -Force
+          }
+          if (-not (Test-Path build-win-dist\Qt6Multimedia.dll)) {
+              Write-Error "Qt6Multimedia.dll missing from build-win-dist (BLUEPILL_HAS_MULTIMEDIA=1 requires Qt6::Multimedia)"
+              exit 1
+          }
+          if (-not (Get-ChildItem -Path build-win-dist\multimedia -Filter "*.dll" -ErrorAction SilentlyContinue)) {
+              Write-Error "Qt6 Multimedia plugins missing from build-win-dist\multimedia"
+              exit 1
+          }
           if ($env:VCToolsRedistDir -and (Test-Path $env:VCToolsRedistDir)) {
               Get-ChildItem -Path $env:VCToolsRedistDir -Filter "*.dll" -Recurse | Where-Object { $_.DirectoryName -match "\\x64\\Microsoft\.VC.*CRT$" } | ForEach-Object {
                   Copy-Item $_.FullName build-win-dist\ -Force
@@ -319,6 +332,18 @@ jobs:
             git push origin main
           fi
 
+      - name: Refresh Cloud Updates Feed
+        run: |
+          VER="${{ needs.build-arch-and-bottle.outputs.version }}"
+          for i in 1 2 3 4 5; do
+            FEED=$(curl -fsSL --max-time 10 "https://api.bluepill.app/api/v1/updates/latest" || true)
+            echo "Updates feed attempt ${i}: ${FEED}"
+            if echo "${FEED}" | grep -q "\"${VER}\""; then
+              break
+            fi
+            sleep 3
+          done
+
   sync-aur:
     name: Sync AUR Packages (bluepill & bluepill-bin)
     needs: [build-arch-and-bottle, publish-release]
@@ -368,13 +393,33 @@ jobs:
           fi
 
           mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
           printf '%s\n' "${AUR_KEY}" > ~/.ssh/aur_key
           chmod 600 ~/.ssh/aur_key
-          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          : > ~/.ssh/known_hosts
+          for attempt in 1 2 3 4 5; do
+            if ssh-keyscan -4 -T 15 -t ed25519,ecdsa,rsa -H aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null && grep -q . ~/.ssh/known_hosts; then
+              break
+            fi
+            if ssh-keyscan -T 15 -t ed25519,ecdsa,rsa -H aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null && grep -q . ~/.ssh/known_hosts; then
+              break
+            fi
+            sleep 2
+          done
+          if ! grep -q . ~/.ssh/known_hosts; then
+            # Fallback to verified official AUR SSH host keys if ssh-keyscan is blocked/rate-limited
+            cat <<'EOF' > ~/.ssh/known_hosts
+          aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN
+          aur.archlinux.org ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLMiLrP8pVi5BFX2i3vepSUnpedeiewE5XptnUnau+ZoeUOPkpoCgZZuYfpaIQfhhJJI5qgnjJmr4hyJbe/zxow=
+          EOF
+            ssh-keygen -H -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
+          fi
+          chmod 644 ~/.ssh/known_hosts
+          AUR_SSH="ssh -i ~/.ssh/aur_key -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes"
           useradd -m builder || true
 
           # 1. Source AUR package (bluepill)
-          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/bluepill.git /tmp/aur-bluepill
+          GIT_SSH_COMMAND="${AUR_SSH}" git clone ssh://aur@aur.archlinux.org/bluepill.git /tmp/aur-bluepill
           cp pkgbuild/PKGBUILD.aur /tmp/aur-bluepill/PKGBUILD
           VER="${VER}" SRC_SHA="${SRC_SHA}" python3 - <<'PY'
           import os, pathlib, re
@@ -400,7 +445,7 @@ jobs:
           git add PKGBUILD .SRCINFO
           if ! git diff-index --quiet HEAD; then
             git commit -m "chore(release): bump to v${VER}"
-            GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master
+            GIT_SSH_COMMAND="${AUR_SSH}" git push origin master
           fi
 
           # 2. Prebuilt binary AUR package (bluepill-bin) for ~2s installs on x86_64 Arch
@@ -410,7 +455,7 @@ jobs:
           curl -fsSL "${BIN_URL}" -o "${BIN_TMP}"
           BIN_SHA=$(sha256sum "${BIN_TMP}" | awk '{print $1}')
           rm -f "${BIN_TMP}"
-          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/bluepill-bin.git /tmp/aur-bluepill-bin
+          GIT_SSH_COMMAND="${AUR_SSH}" git clone ssh://aur@aur.archlinux.org/bluepill-bin.git /tmp/aur-bluepill-bin
           cp "$GITHUB_WORKSPACE/pkgbuild/PKGBUILD.bin" /tmp/aur-bluepill-bin/PKGBUILD
           VER="${VER}" BIN_SHA="${BIN_SHA}" python3 - <<'PY'
           import os, pathlib, re
@@ -436,5 +481,5 @@ jobs:
           git add PKGBUILD .SRCINFO
           if ! git diff-index --quiet HEAD; then
             git commit -m "chore(release): bump bluepill-bin to v${VER}"
-            GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master
+            GIT_SSH_COMMAND="${AUR_SSH}" git push origin master
           fi

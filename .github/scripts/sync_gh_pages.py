@@ -73,7 +73,7 @@ def update_index_versions(idx_text: str, version: str) -> str:
         f"BluePill-Setup-{version}-win64.exe",
         idx_text,
     )
-    canonical_root = '<link rel="canonical" href="https://bluepill.nertwork.com/">'
+    canonical_root = '<link rel="canonical" href="https://bluepill.app/">'
     if re.search(r'<link\s+rel="canonical"[^>]*>', idx_text, flags=re.IGNORECASE):
         idx_text = re.sub(
             r'<link\s+rel="canonical"[^>]*>',
@@ -136,8 +136,8 @@ def convert_and_embed_html(md_path: str, html_path: str, version: str) -> bool:
             html_page,
         )
 
-    # Consolidate search ranking onto official bluepill.nertwork.com/docs
-    canonical_tag = '<link rel="canonical" href="https://bluepill.nertwork.com/docs">'
+    # Consolidate search ranking onto official bluepill.app/docs
+    canonical_tag = '<link rel="canonical" href="https://bluepill.app/docs">'
     if re.search(r'<link\s+rel="canonical"[^>]*>', html_page, flags=re.IGNORECASE):
         html_page = re.sub(
             r'<link\s+rel="canonical"[^>]*>',
