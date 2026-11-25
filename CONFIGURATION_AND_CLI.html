@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Configuration & CLI Reference — BluePill Documentation</title>
     <meta name="description" content="BluePill documentation: Configuration & CLI Reference. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
-    <link rel="canonical" href="https://bluepill.nertwork.com/docs">
+    <link rel="canonical" href="https://bluepill.app/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
     <!-- Open Graph / Twitter -->
@@ -438,6 +438,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 <li><a href="#2-desktop-state-preferences-configbluepillstatejson">2. Desktop State &amp; Preferences (~/.config/bluepill/state.json)</a><ul>
 <li><a href="#notification-audio-preferences">Notification &amp; Audio Preferences</a></li>
+<li><a href="#tray-onboarding-composer-state">Tray, Onboarding &amp; Composer State</a></li>
 <li><a href="#icloud-hub-module-toggles">iCloud Hub Module Toggles</a></li>
 </ul>
 </li>
@@ -447,6 +448,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 </ul>
 </div>
+
 
 
 
@@ -506,8 +508,8 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <p><code>BluePill</code> stores its server configuration in <code>~/.config/bluepill/config.json</code> with strict <code>0600</code> (<code>-rw-------</code>) owner-only permissions.
 - <strong>Automatic Migration from <code>imsg</code>:</strong> If <code>~/.config/bluepill/config.json</code> does not exist on first launch and <code>~/.config/imsg/config.json</code> is present, <code>BluePill</code> automatically migrates your configuration and credentials seamlessly.
 - <strong>GUI Settings &amp; Server Setup (<code>Ctrl+,</code>):</strong> Press <code>Ctrl+,</code> or click <strong><code>⚙ Settings</code></strong> in the top bar at any time to configure:
-  - <strong>BluePill Cloud Quick Connect (<code>https://bluepill.nertwork.com</code> — Default):</strong> Click <strong>"Sign in at bluepill.nertwork.com →"</strong> to open the Cloud Portal and copy your Relay URL (<code>https://api.bluepill.nertwork.com/t/your-name</code>) &amp; password, or click <strong>"Try Live Demo"</strong> for 1-click live sandbox access.
-  - <strong>Primary Server URL + Port:</strong> <code>https://api.bluepill.nertwork.com/t/your-name</code> (BluePill Cloud), <code>http://mac-ip:1235</code> (local macOS Relay), <code>https://bluepill.example.com</code> (behind TLS) or <code>ssh://user@mac-host</code> (Direct SSH mode)
+  - <strong>BluePill Cloud Quick Connect (<code>https://bluepill.app</code> — Default):</strong> Click <strong>"Sign in at bluepill.app →"</strong> to open the Cloud Portal and copy your Relay URL (<code>https://api.bluepill.app/t/your-name</code>) &amp; password, or click <strong>"Try Live Demo"</strong> for 1-click live sandbox access.
+  - <strong>Primary Server URL + Port:</strong> <code>https://api.bluepill.app/t/your-name</code> (BluePill Cloud), <code>http://mac-ip:1235</code> (local macOS Relay), <code>https://bluepill.example.com</code> (behind TLS) or <code>ssh://user@mac-host</code> (Direct SSH mode)
     - A URL without a scheme uses <code>http://</code>, because <code>bluepill-server</code> serves plain HTTP unless it's started with <code>--tls-cert</code>/<code>--tls-key</code>.
     - The <strong>Port</strong> field shows the default <code>1235</code> greyed out. Leave it empty to use <code>1235</code> for both <code>http://</code> and <code>https://</code>. Enter <code>443</code> for a TLS reverse proxy or Tailscale Serve, or <code>1234</code> for a BlueBubbles Server on its default port.
     - A port typed into the URL (<code>host:8080</code>) moves into the Port field when you leave the URL field.
@@ -516,14 +518,17 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
   - <strong>Macs on your Tailscale network:</strong> If <code>tailscale</code> is installed and connected, Settings lists the online macOS peers on your tailnet, checks each for a relay on <code>:1235</code>, and fills in the URL with one click. If exactly one relay answers on first run, it's filled in for you. A Mac shown as <em>No relay on :1235</em> may be running <code>bluepill-server</code> without <code>--host</code>, so it only listens on <code>127.0.0.1</code>.
   - <strong>Failover Server URL (Optional):</strong> <code>https://backup-relay.example.com:443</code>. Include the port inline; without one, <code>1235</code> is used.
   - <strong>API Password / Key:</strong> Your relay password/token
-  - <strong>Settings Version, Advanced Options &amp; Section Tabs (<code>Server &amp; Sync</code>, <code>UI &amp; Appearance</code>, <code>Notifications &amp; Audio</code>):</strong>
-    - Keeps BluePill Cloud sign-in and basic appearance toggles up front while tucking the active <strong>BluePill Client Version</strong> (<code>v1.2.12</code>), live <strong>Relay Status &amp; Version</strong>, history retention days, and manual URL/port/failover controls into a collapsible <strong>Advanced Options</strong> panel.
-    - <strong>Cloud Managed Updates (<code>v1.2.12+</code>):</strong> When signed into BluePill Cloud, supports 1-click confirmed client updates (Windows SHA256-verified silent Inno Setup, Arch/Omarchy <code>pkexec pacman -U</code> / <code>yay</code>, Debian <code>apt-get</code>, Fedora <code>dnf</code>) and Mac server updates (<code>bluepill-server update --confirm</code> with LaunchAgent-aware restart and SHA256 release bottle fallback).
-    - <strong>UI &amp; Appearance Preferences</strong> (persisted in <code>~/.config/bluepill/state.json</code>):
+  - <strong>Settings Header Version Badge, Collapsible Accordions &amp; Section Tabs (<code>Connection</code>, <code>Appearance</code>, <code>Notifications</code>):</strong>
+    - Displays a header version badge (<code>v1.2.15</code>) with live client/relay tooltip and keeps each Settings tab calm with collapsed-by-default accordions: <strong>Connection</strong> (<code>▸ iCloud Hub Modules</code>, <code>▸ Updates</code>, <code>▸ Self-Hosted &amp; Advanced</code>), <strong>Appearance</strong> (<code>▸ Interface &amp; Layout</code>, plus <strong>Spell Check</strong> &amp; <strong>Auto-Suggest / Grammar</strong> toggles), and <strong>Notifications</strong> (<code>▸ Audio Devices &amp; Advanced Alerts</code>, plus <strong>Minimize to Tray on Close</strong>).
+    - <strong>One-Time First-Run Onboarding Wizard:</strong> Guides new installs through BluePill Cloud SSO, Local/Tailscale relay setup, or Live Demo once (<code>onboardingCompleted</code> persisted in <code>state.json</code>).
+    - <strong>Auto-Updates ON by Default:</strong> Desktop client auto-update checks (<code>autoUpdateCheck</code> in <code>config.json</code>, default <code>true</code>) and macOS <code>bluepill-server</code> auto-updates (<code>autoUpdate</code> in <code>~/.config/bluepill/server.json</code>, default <code>true</code>, opt-out via <code>"autoUpdate": false</code> or <code>BLUEPILL_AUTO_UPDATE=0</code>) are enabled by default with opt-out toggles. Applies verified updates directly (Windows silent Inno Setup <code>/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS</code>, Arch/Omarchy <code>pkexec pacman -U</code> / <code>yay</code>, Debian <code>apt-get</code>, Fedora <code>dnf</code>, and Mac <code>brew upgrade</code> / SHA256 release bottle fallback).
+    - <strong>UI, Composer &amp; Tray Preferences</strong> (persisted in <code>~/.config/bluepill/state.json</code> and <code>config.json</code>):
       - <code>showTopBarStatusPill</code> (default <code>false</code>): Show or hide the compact connection &amp; version status pill in the top bar next to the BluePill badge.
       - <code>showPinnedRow</code> (default <code>true</code>): Show or hide the 3-column macOS-style pinned conversations grid at the top of the sidebar (up to 15 pins).
       - <code>pinnedRowFillRecent</code> (default <code>false</code>): Optionally backfill empty pinned slots with recent conversations (<code>isPinned: false</code> vs <code>isPinned: true</code>, with right-click <strong>Pin conversation</strong> / <strong>Unpin conversation</strong> and a <code>📌</code> hover action button in the sidebar).
-      - <code>hoverMessageActions</code> (default <code>true</code>): Reveal the floating Tapback (<code>❤️ 👍 👎 😂 ‼️ ❓ ➕</code>), Reply, Edit, Copy, and Delete action bar when hovering over a message bubble or photo (in addition to right-clicking), including the <strong><code>➕</code> Custom Emoji Tapback Picker</strong> for reacting with any emoji.</p>
+      - <code>minimizeToTrayOnClose</code> (default <code>true</code>): Keep BluePill running in the system tray when closing the window (<code>Ctrl+Q</code> or tray <strong>Quit</strong> exits completely).
+      - <code>spellCheckEnabled</code> / <code>autoSuggestEnabled</code> (default <code>true</code>): Enable real-time composer spell check (custom dictionary at <code>~/.config/bluepill/dictionary.txt</code> on Linux or <code>%APPDATA%/bluepill/dictionary.txt</code> on Windows) and macOS <code>POST /api/v1/text/check</code> grammar/completion hints.
+      - <strong>Right-Click Message Actions:</strong> Hover tapback bars are removed; right-click any message bubble or photo for Tapbacks (<code>❤️ 👍 👎 😂 ‼️ ❓ ➕</code>), Reply, Edit, Copy / Copy Image, Copy Code, Unsend, and Delete. Tapback pills render on the upper-left (sent) / upper-right (received) corner of bubbles.</p>
 <p>URLs in <code>config.json</code> and in environment variables are used <strong>as written</strong>: no default port is added when they're loaded. Include the port explicitly (e.g. <code>http://mac-relay.example.com:1235</code>).</p>
 <p>Example <code>~/.config/bluepill/config.json</code>:</p>
 <pre><code class="language-json">{
@@ -536,7 +541,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </code></pre>
 <h3 id="apple-account-cloud-relay-local-privacy">Apple Account, Cloud Relay &amp; Local Privacy</h3>
 <ul>
-<li><strong>Built-In BluePill Cloud Relay (<code>~/.config/bluepill/relay.json</code>):</strong> Sign in at <a href="https://bluepill.nertwork.com/portal">https://bluepill.nertwork.com/portal</a> and run <code>bluepill-server login</code> (or non-interactively <code>bluepill-server relay-setup --token &lt;TOKEN&gt;</code>, saved with <code>0600</code> permissions). <code>bluepill-server serve</code> (and <code>brew services start bluepill</code>) connects automatically to <code>wss://api.bluepill.nertwork.com/tunnel/connect</code> with zero port forwarding. Pass <code>--no-relay</code> for local-only mode or check <code>bluepill-server relay-status</code>.</li>
+<li><strong>Built-In BluePill Cloud Relay (<code>~/.config/bluepill/relay.json</code>):</strong> Sign in at <a href="https://bluepill.app/portal">https://bluepill.app/portal</a> and run <code>bluepill-server login</code> (or non-interactively <code>bluepill-server relay-setup --token &lt;TOKEN&gt;</code>, saved with <code>0600</code> permissions). <code>bluepill-server serve</code> (and <code>brew services start bluepill</code>) connects automatically to <code>wss://api.bluepill.app/tunnel/connect</code> with zero port forwarding. Pass <code>--no-relay</code> for local-only mode or check <code>bluepill-server relay-status</code>.</li>
 <li><strong>macOS Relay Endpoint:</strong> On your Mac signed into <code>Messages.app</code> with your Apple Account, run <code>bluepill-server preflight</code> and <code>brew services start bluepill</code>. Your relay listens locally on port <code>1235</code> (or custom <code>--port</code>) and stores its configuration in <code>~/.config/bluepill/server.json</code> (<code>0600</code>).</li>
 <li><strong>Local Database Privacy:</strong> <code>bluepill-server</code> accesses <code>~/Library/Messages/chat.db</code> and <code>AddressBook</code> strictly in read-only SQLite WAL mode (<code>?mode=ro</code>). On Linux/Windows, your desktop client caches recent threads locally in <code>~/.cache/imsg/</code> and optionally stores your relay password in the Freedesktop Secret Service keyring (<code>libsecret</code> / <code>secret-tool</code>).</li>
 <li><strong>Transport Security:</strong> All HTTPS and WebSocket/Socket.IO connections enforce strict TLS peer verification (<code>QSslSocket::VerifyPeer</code>), and Direct SSH (<code>ssh://user@mac-host</code>) tunnels all traffic over standard OpenSSH with zero open ports. Need help? Contact <code>support@nertwork.com</code>.</li>
@@ -574,7 +579,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <tr>
 <td style="text-align: left;"><code>BLUEPILL_RELAY_URL</code></td>
 <td style="text-align: left;"><code>BLUEPILL_TUNNEL_URL</code></td>
-<td style="text-align: left;">Cloud Relay WebSocket endpoint override (<code>wss://api.bluepill.nertwork.com/tunnel/connect</code>)</td>
+<td style="text-align: left;">Cloud Relay WebSocket endpoint override (<code>wss://api.bluepill.app/tunnel/connect</code>)</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>BLUEPILL_CONFIG_PATH</code></td>
@@ -606,6 +611,12 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><code>"system_tone"</code> — Standard desktop alert tone</li>
 <li><strong>Startup Deduplication Baseline:</strong> On launch, BluePill records baseline sync state (<code>m_initialSyncComplete</code>, <code>m_startupTimestamp</code>, <code>m_startupHighestRowId</code>) and maintains a persistent cache of <code>notifiedMessageGuids</code> to eliminate spurious startup or historical sound alerts.</li>
 </ul>
+<h3 id="tray-onboarding-composer-state">Tray, Onboarding &amp; Composer State</h3>
+<ul>
+<li><strong><code>minimizeToTrayOnClose</code> (boolean, default: <code>true</code>):</strong> Minimize to the system tray on window close; press <code>Ctrl+Q</code> or choose <strong>Quit</strong> from the tray menu to exit completely.</li>
+<li><strong><code>onboardingCompleted</code> (boolean, default: <code>false</code>, auto-<code>true</code> if already configured):</strong> Controls whether the one-time first-run onboarding wizard is displayed.</li>
+<li><strong><code>spellCheckEnabled</code> / <code>autoSuggestEnabled</code> (boolean, default: <code>true</code>):</strong> Persisted in <code>state.json</code>; enables composer spell-check underlines, right-click suggestions, custom dictionary (<code>~/.config/bluepill/dictionary.txt</code>), and macOS <code>POST /api/v1/text/check</code> grammar/auto-suggest chips.</li>
+</ul>
 <h3 id="icloud-hub-module-toggles">iCloud Hub Module Toggles</h3>
 <ul>
 <li><strong><code>notesEnabled</code> (boolean, default: <code>true</code>):</strong> Toggle the Apple Notes tab and REST client.</li>
@@ -614,13 +625,17 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </ul>
 <p>Example <code>~/.config/bluepill/state.json</code>:</p>
 <pre><code class="language-json">{
+  &quot;autoSuggestEnabled&quot;: true,
   &quot;calendarEnabled&quot;: true,
+  &quot;minimizeToTrayOnClose&quot;: true,
   &quot;notesEnabled&quot;: true,
   &quot;notificationMuteWhenActive&quot;: true,
   &quot;notificationSoundEnabled&quot;: true,
   &quot;notificationSoundPreset&quot;: &quot;crystal_ding&quot;,
   &quot;notificationsEnabled&quot;: true,
-  &quot;photosEnabled&quot;: true
+  &quot;onboardingCompleted&quot;: true,
+  &quot;photosEnabled&quot;: true,
+  &quot;spellCheckEnabled&quot;: true
 }
 </code></pre>
 <h2 id="3-headless-cli-commands-bluepill-imsg">3. Headless CLI Commands (<code>bluepill</code> &amp; <code>imsg</code>)</h2>
@@ -645,14 +660,14 @@ bluepill --demo
 <table>
 <thead>
 <tr>
-<th style="text-align: left;">Shortcut</th>
-<th style="text-align: left;">Action</th>
+<th style="text-align: left;">Shortcut / Action</th>
+<th style="text-align: left;">Effect</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td style="text-align: left;"><code>Ctrl+H</code> / <code>Alt+Home</code> / <code>Esc</code></td>
-<td style="text-align: left;">Open <strong>BluePill Home</strong> dashboard</td>
+<td style="text-align: left;">Close active conversation / active modal</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>Ctrl+,</code></td>
@@ -668,11 +683,31 @@ bluepill --demo
 </tr>
 <tr>
 <td style="text-align: left;"><code>Ctrl+N</code></td>
-<td style="text-align: left;">Start new conversation</td>
+<td style="text-align: left;">Start new 1:1 or multi-recipient group conversation</td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>Ctrl+V</code> (in Composer)</td>
-<td style="text-align: left;">Paste &amp; send image from Wayland clipboard</td>
+<td style="text-align: left;">Paste &amp; queue image from clipboard</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>Ctrl+Click</code> / <code>Shift+Click</code> (Messages)</td>
+<td style="text-align: left;">Multi-select individual or range of message bubbles</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>Ctrl+C</code> (with selection)</td>
+<td style="text-align: left;">Copy selected messages chronologically (or use <strong>Copy with Names</strong>)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>Right-Click</code> Message / Photo</td>
+<td style="text-align: left;">Open Tapback (<code>❤️ 👍 👎 😂 ‼️ ❓ ➕</code>), Reply, Edit, Copy, Unsend, Delete menu</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>Right-Click</code> Send (<code>↑</code>)</td>
+<td style="text-align: left;">Open Expressive Effects menu (<code>Slam</code>, <code>Loud</code>, <code>Gentle</code>, <code>Invisible Ink</code>, <code>Confetti</code>, <code>Lasers</code>, <code>Fireworks</code>, <code>Echo</code>)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>Right-Click</code> Misspelled Word</td>
+<td style="text-align: left;">Show spelling suggestions &amp; <strong>Add to Dictionary</strong></td>
 </tr>
 <tr>
 <td style="text-align: left;"><code>Alt+1</code> .. <code>Alt+9</code></td>
@@ -691,8 +726,8 @@ bluepill --demo
 <td style="text-align: left;">Pin/Unpin or Toggle Read/Unread</td>
 </tr>
 <tr>
-<td style="text-align: left;"><code>Double-Click</code> Message Bubble</td>
-<td style="text-align: left;">Send instant Love (<code>❤️</code>) tapback</td>
+<td style="text-align: left;"><code>Ctrl+Q</code></td>
+<td style="text-align: left;">Quit application completely (bypassing minimize-to-tray)</td>
 </tr>
 </tbody>
 </table>

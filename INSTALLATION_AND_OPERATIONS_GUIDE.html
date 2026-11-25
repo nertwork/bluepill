@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Installation & Operations Guide — BluePill Documentation</title>
     <meta name="description" content="BluePill documentation: Installation & Operations Guide. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
-    <link rel="canonical" href="https://bluepill.nertwork.com/docs">
+    <link rel="canonical" href="https://bluepill.app/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
     <!-- Open Graph / Twitter -->
@@ -472,7 +472,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </ul>
 </li>
 <li><a href="#windows-10-11-x86_64">Windows (10 / 11 x86_64)</a></li>
-<li><a href="#smart-cross-platform-client-auto-updates-bluepill-cloud">Smart Cross-Platform Client Auto-Updates (BluePill Cloud)</a></li>
+<li><a href="#smart-cross-platform-auto-updates-on-by-default-opt-out-supported">Smart Cross-Platform Auto-Updates (ON by Default, Opt-Out Supported)</a></li>
 <li><a href="#nixos-generic-linux">NixOS &amp; Generic Linux</a></li>
 </ul>
 </li>
@@ -486,7 +486,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </ul>
 </li>
 <li><a href="#configuration-self-test">Configuration &amp; Self-Test</a><ul>
-<li><a href="#1-generate-configuration-file">1. Generate Configuration File</a></li>
+<li><a href="#configuration-serverjson-self-test">Configuration (server.json) &amp; Self-Test</a></li>
 <li><a href="#2-run-built-in-self-test">2. Run Built-In Self-Test</a></li>
 <li><a href="#3-inspect-live-diagnostics-status">3. Inspect Live Diagnostics &amp; Status</a></li>
 </ul>
@@ -532,6 +532,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 </ul>
 </div>
+
 
 
 
@@ -656,14 +657,14 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </code></pre>
 <h3 id="core-components">Core Components</h3>
 <ol>
-<li><strong>Native Linux Desktop Client (<code>bluepill</code>):</strong></li>
-<li><strong>Engine:</strong> C++20 compiled binary with Qt 6.4+ / QML.</li>
+<li><strong>Native Linux &amp; Windows Desktop Client (<code>bluepill</code>):</strong></li>
+<li><strong>Engine:</strong> C++20 compiled binary with Qt 6.4+ (<code>Qt6::Multimedia</code>) / QML.</li>
 <li><strong>Footprint:</strong> ~48 MB RSS memory usage under active load.</li>
-<li><strong>Display:</strong> Wayland native (Hyprland, Sway, KDE Plasma, GNOME) and X11 fallback.</li>
-<li><strong>Latency:</strong> Instant 0ms startup using local SQLite WAL thread cache and asynchronous background delta synchronization.</li>
+<li><strong>Display &amp; Tray Lifecycle:</strong> Wayland native (Hyprland, Sway, KDE Plasma, GNOME), X11, and Windows 10/11; minimizes to the system tray on close (<code>minimizeToTrayOnClose: true</code>, <code>Ctrl+Q</code> to quit), wakes/raises the active window on second-instance launch, and focuses the conversation when clicking desktop notifications.</li>
+<li><strong>Latency:</strong> Instant 0ms startup using local cache and asynchronous background delta synchronization.</li>
 <li><strong>Push Transport:</strong> Real-time push notifications over Engine.IO v4 / Socket.IO v4 WebSocket connections.</li>
 <li>
-<p><strong>Features:</strong> Pinned conversations avatar bar, 1-click 2FA OTP copy pill, inline photo viewer lightbox, multi-photo attachments gallery, <code>Ctrl+V</code> clipboard image pasting, theme hot-reloading (Omarchy / Catppuccin / Tokyo Night / Solarized).</p>
+<p><strong>Features:</strong> Pinned conversations avatar bar, compact SMS/iMessage symbol badges, right-click Tapbacks anchored to upper bubble corners, <code>Ctrl+Click</code>/<code>Shift+Click</code> multi-message selection &amp; <code>Ctrl+C</code> / <strong>Copy with Names</strong>, multi-recipient <code>To:</code> chip group chat creation, multi-image composer queuing + iCloud Photos compose embedding, proportionally sized decluttered Photo/Notes/Calendar viewers, all 8 expressive effects (<code>Slam</code>, <code>Loud</code>, <code>Gentle</code>, <code>Invisible Ink</code>, <code>Confetti</code>, <code>Lasers</code>, <code>Fireworks</code>, <code>Echo</code>) with right-click Send &amp; effect arming pill, composer spell check + macOS grammar/auto-suggest (<code>POST /api/v1/text/check</code>), 1-click 2FA OTP copy pill, <code>Ctrl+V</code> clipboard image pasting, collapsible Settings accordions with header version badge, one-time onboarding wizard, and theme hot-reloading (Omarchy / Catppuccin / Tokyo Night / Solarized).</p>
 </li>
 <li>
 <p><strong>Headless macOS Relay Server (<code>bluepill-server</code>):</strong></p>
@@ -894,14 +895,15 @@ sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
 </code></pre>
 <hr />
 <h3 id="windows-10-11-x86_64">Windows (10 / 11 <code>x86_64</code>)</h3>
-<p>Download the per-user Inno Setup installer <code>BluePill-Setup-&lt;version&gt;-win64.exe</code> from <a href="https://github.com/nertwork/bluepill/releases/latest">GitHub Releases</a> (~53 MB; installs to <code>%LOCALAPPDATA%\Programs\BluePill</code> with zero UAC prompt, native in-process <code>Qt6::Multimedia</code> audio playback, and <code>--demo</code> shortcut).</p>
-<h3 id="smart-cross-platform-client-auto-updates-bluepill-cloud">Smart Cross-Platform Client Auto-Updates (BluePill Cloud)</h3>
-<p>When signed in to BluePill Cloud (<code>bluepill.nertwork.com</code>), the desktop client checks <code>https://api.bluepill.nertwork.com/api/v1/updates/latest</code> and applies confirmed client updates directly over an HTTPS host allowlist (<code>github.com</code>, <code>objects.githubusercontent.com</code>, <code>release-assets.githubusercontent.com</code>, <code>bluepill.nertwork.com</code>, <code>*.bluepill.nertwork.com</code>) with redirect verification (<code>UserVerifiedRedirectPolicy</code>), version regex validation, per-update <code>QTemporaryDir</code> isolation (<code>O_CREAT|O_EXCL|O_NOFOLLOW</code>), and mandatory <code>SHA256SUMS.txt</code> verification (including on-disk SHA256 re-verification):</p>
+<p>Download the per-user Inno Setup installer <code>BluePill-Setup-&lt;version&gt;-win64.exe</code> from <a href="https://github.com/nertwork/bluepill/releases/latest">GitHub Releases</a> (~53 MB; installs to <code>%LOCALAPPDATA%\Programs\BluePill</code> with zero UAC prompt, native in-process <code>Qt6::Multimedia</code> audio playback &amp; voice memo recording via <code>QMediaCaptureSession</code>/<code>QAudioInput</code>/<code>QMediaRecorder</code> + bundled <code>ffmpeg.exe</code>, single-instance <code>BluePillSingleInstanceMutex</code> wake, and <code>--demo</code> shortcut).</p>
+<h3 id="smart-cross-platform-auto-updates-on-by-default-opt-out-supported">Smart Cross-Platform Auto-Updates (ON by Default, Opt-Out Supported)</h3>
+<p>Automatic update checks are <strong>enabled by default</strong> on both the desktop client (<code>autoUpdateCheck: true</code>, toggleable in <strong>⚙ Settings → Connection → Updates</strong>) and the macOS relay (<code>autoUpdate: true</code> in <code>~/.config/bluepill/server.json</code>, opt-out via <code>"autoUpdate": false</code> or <code>BLUEPILL_AUTO_UPDATE=0</code>). When signed in to BluePill Cloud (<code>bluepill.app</code>), the desktop client checks <code>https://api.bluepill.app/api/v1/updates/latest</code> and applies confirmed client updates directly over an HTTPS host allowlist (<code>github.com</code>, <code>objects.githubusercontent.com</code>, <code>release-assets.githubusercontent.com</code>, <code>bluepill.app</code>, <code>*.bluepill.app</code>) with redirect verification (<code>UserVerifiedRedirectPolicy</code>), version regex validation, per-update <code>QTemporaryDir</code> isolation (<code>O_CREAT|O_EXCL|O_NOFOLLOW</code>), and mandatory <code>SHA256SUMS.txt</code> verification (including on-disk SHA256 re-verification):</p>
 <ul>
-<li><strong>Windows (<code>x86_64</code>):</strong> Downloads <code>BluePill-Setup-&lt;version&gt;-win64.exe</code> + <code>SHA256SUMS.txt</code> and runs silent Inno Setup (<code>/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS</code>) when installed in a user-writable directory, or interactive setup otherwise, followed by a guarded <code>QProcess::startDetached</code> relaunch.</li>
+<li><strong>Windows (<code>x86_64</code>):</strong> Downloads <code>BluePill-Setup-&lt;version&gt;-win64.exe</code> + <code>SHA256SUMS.txt</code> and runs silent in-place Inno Setup (<code>/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS</code>) when installed in a user-writable directory, or interactive setup otherwise, followed by automatic relaunch.</li>
 <li><strong>Arch Linux / Omarchy (<code>x86_64</code>):</strong> Downloads <code>bluepill-&lt;version&gt;-1-x86_64.pkg.tar.zst</code> + <code>SHA256SUMS.txt</code> and installs via <code>pkexec pacman -U --noconfirm</code> (with interactive terminal <code>sudo pacman -U</code> fallback on <code>pkexec</code> exit <code>127</code>, or <code>yay</code>/<code>paru -S --noconfirm bluepill-bin</code> / <code>bluepill</code> when using AUR).</li>
 <li><strong>Debian / Ubuntu (<code>x86_64</code>):</strong> Downloads <code>bluepill_&lt;version&gt;_amd64.deb</code> + <code>SHA256SUMS.txt</code> and installs via <code>pkexec apt-get install -y</code> (with terminal <code>sudo apt-get install -y</code> fallback).</li>
 <li><strong>Fedora / RHEL (<code>x86_64</code>):</strong> Downloads <code>bluepill-&lt;version&gt;-1.x86_64.rpm</code> + <code>SHA256SUMS.txt</code> and installs via <code>pkexec dnf install -y</code> (with terminal <code>sudo dnf install -y</code> fallback).</li>
+<li><strong>macOS Relay (<code>bluepill-server</code>):</strong> Checks on startup and every 6 hours, runs <code>brew upgrade nertwork/tap/bluepill</code> with <code>HOMEBREW_NO_AUTO_UPDATE=1</code> (preserving Python TCC/Full Disk Access permissions) or SHA256-verified bottle fallback, and restarts via <code>launchctl kickstart -k</code>.</li>
 </ul>
 <hr />
 <h3 id="nixos-generic-linux">NixOS &amp; Generic Linux</h3>
@@ -944,7 +946,7 @@ brew install nertwork/tap/bluepill
 bluepill-server --version
 # Output: bluepill-server 1.2.12
 
-# Link your Mac to BluePill Cloud (opens https://bluepill.nertwork.com/portal) &amp; start service
+# Link your Mac to BluePill Cloud (opens https://bluepill.app/portal) &amp; start service
 bluepill-server login
 brew services start bluepill
 
@@ -958,7 +960,7 @@ bluepill-server update --confirm
 <p>[!NOTE]
 <strong>Hardened Mac Server Cloud Managed Updates (<code>v1.2.12+</code>):</strong> Strictly gated to Macs signed into BluePill Cloud (never phones home when self-hosted offline). <code>bluepill-server update --confirm</code> (or <code>POST /api/v1/server/update/apply</code> from the desktop client) first attempts <code>brew update</code> + <code>brew upgrade nertwork/tap/bluepill</code>. If Homebrew lacks <code>git</code>/Xcode CLT or the tap lags behind the latest GitHub release, it automatically falls back to downloading <code>SHA256SUMS.txt</code> and <code>bluepill-&lt;ver&gt;.all.bottle.tar.gz</code> over an HTTPS host allowlist with redirect verification (<code>_SafeRedirectHandler</code>), verifies the SHA256 digest and Python AST, atomically swaps <code>bluepill-server</code>, and performs a LaunchAgent-aware restart (<code>launchctl kickstart -k</code> for <code>com.nertwork.bluepill-server</code> or <code>homebrew.mxcl.bluepill</code>, falling back to <code>brew services restart bluepill</code>).</p>
 </blockquote>
-<p>Then open the <strong>BluePill Desktop Client</strong> on Linux or Windows and click <strong>"Sign in at bluepill.nertwork.com →"</strong> (or <strong>"Try Live Demo"</strong>).</p>
+<p>Then open the <strong>BluePill Desktop Client</strong> on Linux or Windows and click <strong>"Sign in at bluepill.app →"</strong> (or <strong>"Try Live Demo"</strong>).</p>
 <hr />
 <h3 id="full-disk-access-permissions">Full Disk Access &amp; Permissions</h3>
 <p>macOS Privacy protections (TCC) protect <code>~/Library/Messages/chat.db</code> and Contacts databases. You must grant <strong>Full Disk Access</strong> to allow <code>bluepill-server</code> to read messages and resolve contacts.</p>
@@ -982,8 +984,8 @@ bluepill-server update --confirm
 <p>If this prints an integer (e.g., <code>42</code>), Full Disk Access is working properly. If you receive <code>Error: unable to open database file: unable to open database file</code> or <code>Operation not permitted</code>, re-verify your Full Disk Access entries.</p>
 <hr />
 <h3 id="configuration-self-test">Configuration &amp; Self-Test</h3>
-<h4 id="1-generate-configuration-file">1. Generate Configuration File</h4>
-<p>Create <code>~/.config/bluepill/server.json</code> with strict <code>0600</code> permissions:</p>
+<h4 id="configuration-serverjson-self-test">Configuration (<code>server.json</code>) &amp; Self-Test</h4>
+<p>Create <code>~/.config/bluepill/server.json</code> with strict <code>0600</code> permissions (<code>autoUpdate</code> defaults to <code>true</code>; set <code>"autoUpdate": false</code> or <code>BLUEPILL_AUTO_UPDATE=0</code> to opt out):</p>
 <pre><code class="language-bash">mkdir -p ~/.config/bluepill
 cat &lt;&lt; 'EOF_CONFIG' &gt; ~/.config/bluepill/server.json
 {
@@ -991,7 +993,8 @@ cat &lt;&lt; 'EOF_CONFIG' &gt; ~/.config/bluepill/server.json
   &quot;port&quot;: 1235,
   &quot;password&quot;: &quot;CHANGE_ME_TO_A_SECURE_TOKEN&quot;,
   &quot;helperPort&quot;: 45670,
-  &quot;enableBackgroundDaemons&quot;: true
+  &quot;enableBackgroundDaemons&quot;: true,
+  &quot;autoUpdate&quot;: true
 }
 EOF_CONFIG
 chmod 600 ~/.config/bluepill/server.json
@@ -1175,11 +1178,11 @@ EOF_PLIST
 <p>Every instance of <code>bluepill-server</code> includes a unified <strong>Liquid Glass / Matrix / Light</strong> Web Client accessible locally at:</p>
 <pre><code class="language-text">http://&lt;relay-host&gt;:1235/web
 </code></pre>
-<p>Or remotely through your BluePill Cloud Relay at <code>https://bluepill.nertwork.com/t/&lt;slug&gt;/web</code> (or try the hosted sandbox instantly at <a href="https://bluepill.nertwork.com/demo">https://bluepill.nertwork.com/demo</a>; Cloud Relay portal at <a href="https://bluepill.nertwork.com/signup">https://bluepill.nertwork.com/signup</a>).</p>
+<p>Or remotely through your BluePill Cloud Relay at <code>https://bluepill.app/t/&lt;slug&gt;/web</code> (or try the hosted sandbox instantly at <a href="https://bluepill.app/demo">https://bluepill.app/demo</a>; Cloud Relay portal at <a href="https://bluepill.app/signup">https://bluepill.app/signup</a>).</p>
 <h3 id="key-capabilities-hardening-in-the-web-ui-v1212">Key Capabilities &amp; Hardening in the Web UI (<code>v1.2.12+</code>):</h3>
 <ol>
 <li><strong>Authentication &amp; Security Hardening:</strong></li>
-<li>Auto-populates Cloud Relay credentials when signed into <code>bluepill.nertwork.com</code>, or accepts your relay password via the auth modal / <code>localStorage</code> (clearing empty keys cleanly and showing inline invalid-password feedback).</li>
+<li>Auto-populates Cloud Relay credentials when signed into <code>bluepill.app</code>, or accepts your relay password via the auth modal / <code>localStorage</code> (clearing empty keys cleanly and showing inline invalid-password feedback).</li>
 <li>
 <p>Enforces XSS escaping across message reactions and dynamic DOM attributes, <code>rel="noopener noreferrer"</code> on attachment download links, strict CSP (<code>object-src 'none'; base-uri 'self'</code>), <code>Cache-Control: no-store, private</code> on <code>/t/&lt;slug&gt;/web</code> responses, and <code>cookie</code> header stripping across Cloud Relay proxy modes.</p>
 </li>
@@ -1279,8 +1282,8 @@ EOF_PLIST
 <td style="text-align: center;"><code>GET</code></td>
 <td style="text-align: center;">Yes</td>
 <td style="text-align: left;">None</td>
-<td style="text-align: left;"><code>{"os_version": str, "server_version": str, "private_api": bool}</code></td>
-<td style="text-align: left;">Server version, OS, &amp; Private API status</td>
+<td style="text-align: left;"><code>{"os_version": str, "server_version": str, "private_api": bool, "chat_db_readable": bool}</code></td>
+<td style="text-align: left;">Server version, OS, FDA &amp; Private API status</td>
 </tr>
 <tr>
 <td style="text-align: left;"><strong><code>/api/v1/server/logs</code></strong></td>
@@ -1289,6 +1292,22 @@ EOF_PLIST
 <td style="text-align: left;"><code>?lines=200</code></td>
 <td style="text-align: left;"><code>{"status": 200, "data": [str, ...]}</code></td>
 <td style="text-align: left;">Retrieve in-memory log buffer</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong><code>/api/v1/chat/new</code></strong></td>
+<td style="text-align: center;"><code>POST</code></td>
+<td style="text-align: center;">Yes</td>
+<td style="text-align: left;"><code>{"addresses": [str, ...], "message": str?, "service": str?}</code></td>
+<td style="text-align: left;"><code>{"status": 200, "data": ChatObject}</code></td>
+<td style="text-align: left;">Create 1:1 or multi-recipient group chat</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong><code>/api/v1/text/check</code></strong></td>
+<td style="text-align: center;"><code>POST</code></td>
+<td style="text-align: center;">Yes</td>
+<td style="text-align: left;"><code>{"text": str, "language": str?, "cursor": int?}</code></td>
+<td style="text-align: left;"><code>{"status": 200, "data": {"misspellings": [...], "grammar": [...], "completions": [...]}}</code></td>
+<td style="text-align: left;">macOS <code>NSSpellChecker</code> spelling, grammar &amp; completions</td>
 </tr>
 <tr>
 <td style="text-align: left;"><strong><code>/api/v1/chat/query</code></strong></td>
@@ -1516,10 +1535,11 @@ brew services start bluepill
    lsof -iTCP:45670 -sTCP:LISTEN</code>
 3. Restart the helper or reinstall via your Private API management package.</p>
 <h3 id="runbook-4-verifying-full-disk-access-after-macos-upgrades">Runbook 4: Verifying Full Disk Access After macOS Upgrades</h3>
-<p>Major macOS updates (e.g. updating from Sonoma to Sequoia) frequently reset TCC privacy permissions. If messages stop syncing after an OS update:
+<p>Major macOS updates (e.g. updating from Sonoma to Sequoia) frequently reset TCC privacy permissions. When <code>chat.db</code> cannot be read, <code>bluepill-server</code> responds with HTTP <code>503</code> (<code>"error": "chat_db_unreadable"</code>) and <code>"chat_db_readable": false</code> in <code>/api/v1/server/info</code>, and the desktop client displays a yellow <strong><code>Mac needs Full Disk Access</code></strong> banner instead of <code>Disconnected</code>:
 1. Re-open <strong>System Settings -&gt; Privacy &amp; Security -&gt; Full Disk Access</strong>.
 2. Toggle your terminal / Python / sshd-keygen-wrapper entry off and back on.
-3. Test using: <code>sqlite3 ~/Library/Messages/chat.db "SELECT count(*) FROM message;" &lt;/dev/null</code>.</p>
+3. Test using: <code>sqlite3 ~/Library/Messages/chat.db "SELECT count(*) FROM message;" &lt;/dev/null</code>.
+4. The yellow <strong><code>Mac needs Full Disk Access</code></strong> banner clears automatically as soon as the next query succeeds.</p>
 <h3 id="runbook-5-icloud-hub-preflight-optional-module-toggles-notes-calendar-photos">Runbook 5: iCloud Hub Preflight &amp; Optional Module Toggles (Notes, Calendar, Photos)</h3>
 <p><code>bluepill-server</code> includes a built-in preflight engine that checks database readability (<code>NoteStore.sqlite</code>, <code>Calendar.sqlitedb</code>, <code>Photos.sqlite</code>) and automatically enables/kickstarts <code>com.apple.photolibraryd</code> and <code>com.apple.cloudphotod</code> on macOS when iCloud Photos is enabled:</p>
 <pre><code class="language-bash"># Run interactive preflight check (auto-enables photolibraryd &amp; cloudphotod on macOS)

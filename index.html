@@ -6,7 +6,7 @@
     <title>BluePill — Native Qt6 Linux iMessage Client, Web UI & Zero-Electron macOS Relay (BlueBubbles / OpenBubbles Alternative)</title>
     <meta name="description" content="BluePill is an ultra-fast, native Qt6 C++ / QML iMessage client for Linux (Wayland/X11) and zero-Electron macOS relay server. Direct SSH transport, voice memo waveforms, tapbacks, scheduled messages, and embedded Web UI.">
     <meta name="keywords" content="iMessage on Linux, BlueBubbles alternative, OpenBubbles Linux, Arch Linux iMessage, Wayland Hyprland iMessage client, macOS iMessage relay server, Qt6 iMessage, Apple iMessage on Ubuntu">
-    <link rel="canonical" href="https://bluepill.nertwork.com/">
+    <link rel="canonical" href="https://bluepill.app/">
     <link rel="icon" type="image/png" href="logo.png">
 
     <!-- Open Graph / Facebook -->
@@ -119,7 +119,7 @@
               "name": "How do I install the BluePill server on macOS?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "On macOS, install via Homebrew: 'brew install nertwork/tap/bluepill'. Run 'bluepill-server login' (opens https://bluepill.nertwork.com/portal) and start the background service with 'brew services start bluepill'."
+                "text": "On macOS, install via Homebrew: 'brew install nertwork/tap/bluepill'. Run 'bluepill-server login' (opens https://bluepill.app/portal) and start the background service with 'brew services start bluepill'."
               }
             }
           ]
@@ -179,6 +179,10 @@
         .container { max-width: 1000px; margin: 0 auto; padding: 40px 20px; }
         .hero-img-container { text-align: center; margin: 40px 0; }
         .hero-img { max-width: 100%; border-radius: 12px; border: 1px solid var(--border); box-shadow: 0 20px 40px rgba(0,0,0,0.6); }
+        .screenshot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 22px; margin: 24px 0 40px; }
+        .screenshot-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+        .screenshot-card img { width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--border); display: block; }
+        .screenshot-card .caption { margin-top: 10px; font-size: 0.9rem; color: var(--text-muted); text-align: center; }
         h2 { font-size: 2rem; margin: 50px 0 20px; padding-bottom: 10px; border-bottom: 1px solid var(--border); color: #fff; }
         h3 { font-size: 1.3rem; margin: 30px 0 15px; color: var(--accent-cyan); }
         p { margin-bottom: 18px; color: #cbd5e1; font-size: 1.05rem; }
@@ -262,13 +266,13 @@
 <div class="official-site-banner" role="region" aria-label="Official BluePill Website">
     <div class="official-site-banner-inner">
         <div class="official-site-banner-text">
-            <strong>Looking for the Official BluePill Website, Live Demo, Free Cloud Relay &amp; Downloads?</strong> Visit <strong>bluepill.nertwork.com &rarr;</strong>
+            <strong>Looking for the Official BluePill Website, Live Demo, Free Cloud Relay &amp; Downloads?</strong> Visit <strong>bluepill.app &rarr;</strong>
         </div>
         <div class="official-site-banner-actions">
-            <a href="https://bluepill.nertwork.com" class="banner-btn banner-btn-primary">Visit bluepill.nertwork.com</a>
-            <a href="https://bluepill.nertwork.com/demo" class="banner-btn banner-btn-secondary">Try Live Demo</a>
+            <a href="https://bluepill.app" class="banner-btn banner-btn-primary">Visit bluepill.app</a>
+            <a href="https://bluepill.app/demo" class="banner-btn banner-btn-secondary">Try Live Demo</a>
             <a href="https://github.com/sponsors/nertwork" class="banner-btn banner-btn-support">❤️ Sponsor on GitHub</a>
-            <a href="https://bluepill.nertwork.com/#support" class="banner-btn banner-btn-support">Support BluePill</a>
+            <a href="https://bluepill.app/#support" class="banner-btn banner-btn-support">Support BluePill</a>
         </div>
     </div>
 </div>
@@ -280,8 +284,8 @@
         <h1>BluePill</h1>
         <p class="tagline">Native Qt6 C++ / QML iMessage, RCS &amp; SMS Client for Linux &amp; Windows + Zero-Electron macOS Cloud Relay</p>
         <div class="btn-group">
-            <a href="https://bluepill.nertwork.com/demo" class="btn btn-primary">Try Live Demo</a>
-            <a href="https://bluepill.nertwork.com/signup" class="btn btn-secondary">Free Beta Cloud Relay</a>
+            <a href="https://bluepill.app/demo" class="btn btn-primary">Try Live Demo</a>
+            <a href="https://bluepill.app/signup" class="btn btn-secondary">Free Beta Cloud Relay</a>
             <a href="https://github.com/nertwork/bluepill/releases/latest" class="btn btn-secondary">Downloads (.exe / .deb / .rpm)</a>
             <a href="https://github.com/nertwork/bluepill" class="btn btn-secondary">GitHub (BluePill v1.2.15)</a>
             <a href="INSTALLATION_AND_OPERATIONS_GUIDE.html" class="btn btn-secondary">Install Guide</a>
@@ -299,8 +303,31 @@
 
 <div class="container">
     <div class="hero-img-container">
-        <img src="screenshot.png" alt="BluePill Linux Client Interface" class="hero-img">
+        <img src="screenshot.png" alt="BluePill Native Desktop Client — Active Conversation with Upper-Corner Tapbacks, 2FA OTP Pill & Sleek Pill Composer" class="hero-img">
     </div>
+
+    <section>
+        <h2>Refreshed Desktop Experience</h2>
+        <p>Built with native Qt6 C++20/QML for Linux (Wayland/X11) and Windows 10/11: minimal top bar, compact iMessage/SMS symbol badges, upper-corner tapbacks, right-click context actions, multi-message selection, multi-recipient group chat creation, and proportionally sized Photo, Notes &amp; Calendar viewers.</p>
+        <div class="screenshot-grid">
+            <div class="screenshot-card">
+                <img src="screenshots/chat-conversation.png" alt="Active Conversation with upper-corner tapback, quoted reply, 2FA OTP copy pill, and pill composer" loading="lazy">
+                <div class="caption">Active thread: upper-corner tapbacks, quoted replies, 2FA OTP copy pill &amp; pill composer</div>
+            </div>
+            <div class="screenshot-card">
+                <img src="screenshots/photo-viewer.png" alt="Decluttered proportional Photo Lightbox viewer with thumbnail strip" loading="lazy">
+                <div class="caption">Decluttered proportional Photo Lightbox with zoom, Send, Copy &amp; thumbnail strip</div>
+            </div>
+            <div class="screenshot-card">
+                <img src="screenshots/split-window-responsive.png" alt="Responsive 50% tiled split-window layout with multi-photo gallery and upper-right tapbacks" loading="lazy">
+                <div class="caption">50% tiled split-window layout with multi-photo stack &amp; upper-corner reactions</div>
+            </div>
+            <div class="screenshot-card">
+                <img src="screenshots/home-dashboard.png" alt="Clean BluePill home view with 3-column pinned conversations and compact service symbols" loading="lazy">
+                <div class="caption">Clean Home view with 3-column pinned grid &amp; compact service badges</div>
+            </div>
+        </div>
+    </section>
 
     <section>
         <h2>Why We Built BluePill: Escaping Electron Bloat</h2>
@@ -380,16 +407,32 @@
                 <p>28-bar amplitude waveform visualization extracted via FFmpeg with interactive scrub-to-seek and playback speed controls.</p>
             </div>
             <div class="card">
-                <h4>Expressive Send & Tapbacks</h4>
-                <p>Full support for heart, thumbs up, haha, exclamation, and question reactions, plus message effects and scheduled future delivery.</p>
+                <h4>Right-Click Tapbacks &amp; Multi-Select</h4>
+                <p>Right-click any message or photo for reactions (<code>❤️ 👍 👎 😂 ‼️ ❓ ➕</code>), Reply, Edit, Copy, Unsend &amp; Delete; reactions anchor cleanly to upper bubble corners. Select ranges via <code>Ctrl+Click</code> / <code>Shift+Click</code> and copy with <code>Ctrl+C</code> or <strong>Copy with Names</strong>.</p>
+            </div>
+            <div class="card">
+                <h4>Expressive Effects &amp; Arming Pill</h4>
+                <p>Supports <code>Slam</code>, <code>Loud</code>, <code>Gentle</code>, <code>Invisible Ink</code>, <code>Confetti</code>, <code>Lasers</code>, <code>Fireworks</code>, and <code>Echo</code>. Right-click Send (<code>↑</code>) to fire immediately or arm an effect pill above the composer.</p>
+            </div>
+            <div class="card">
+                <h4>Group Chats &amp; Multi-Image Composer</h4>
+                <p>Create multi-recipient group chats via the <code>To:</code> chip bar (<code>POST /api/v1/chat/new</code>), queue multiple pasted/attached or iCloud Photos in the composer, and browse proportionally sized Photo, Notes &amp; Calendar viewers.</p>
+            </div>
+            <div class="card">
+                <h4>Composer Spell Check &amp; Grammar Assist</h4>
+                <p>Real-time spell-check underlines, right-click suggestions, custom dictionary (<code>dictionary.txt</code>), and macOS relay <code>NSSpellChecker</code> grammar/auto-suggest chips via <code>POST /api/v1/text/check</code>.</p>
+            </div>
+            <div class="card">
+                <h4>Tray Lifecycle &amp; Native Multimedia</h4>
+                <p>Minimizes to system tray on close (<code>Ctrl+Q</code> to quit), wakes the single instance on relaunch, focuses threads on notification click, and records/plays voice memos natively on Windows &amp; Linux via <code>Qt6::Multimedia</code>.</p>
+            </div>
+            <div class="card">
+                <h4>Calm Settings &amp; Default Auto-Updates</h4>
+                <p>Header version badge, collapsed Settings accordions, one-time onboarding wizard, yellow <strong>Mac needs Full Disk Access</strong> alert on <code>503 chat_db_unreadable</code>, and default SHA256-verified auto-updates (opt-out supported) across Linux, Windows &amp; macOS.</p>
             </div>
             <div class="card">
                 <h4>Embedded &amp; Cloud Web UI</h4>
                 <p>Full-featured Liquid Glass / Matrix / Light web client at <code>/web</code> and <code>/t/&lt;slug&gt;/web</code> with contact resolution, <code>lastMessage</code> previews, lazy-loaded Photos, <code>.caf</code> audio transcoding, and XSS/CSP/cookie hardening.</p>
-            </div>
-            <div class="card">
-                <h4>Hardened Smart Auto-Updates</h4>
-                <p>SHA256-verified direct client updates (Windows silent Inno Setup, Arch <code>pkexec pacman -U</code>/<code>yay</code>, Debian <code>apt-get</code>, Fedora <code>dnf</code>) and Mac server updates with LaunchAgent-aware restarts &amp; release bottle fallback.</p>
             </div>
             <div class="card">
                 <h4>Local-First Privacy &amp; Keyring</h4>
@@ -406,7 +449,7 @@
         <h2>Quick Installation</h2>
 
         <h3>1. macOS Relay Server + BluePill Cloud Login (Default)</h3>
-        <p>Install via Homebrew Tap, link your Mac at <a href="https://bluepill.nertwork.com/portal" style="color: var(--accent-cyan);">bluepill.nertwork.com/portal</a>, and start the daemon:</p>
+        <p>Install via Homebrew Tap, link your Mac at <a href="https://bluepill.app/portal" style="color: var(--accent-cyan);">bluepill.app/portal</a>, and start the daemon:</p>
         <pre><code># Install from Homebrew Tap &amp; link to BluePill Cloud
 brew install nertwork/tap/bluepill
 bluepill-server login
@@ -463,7 +506,8 @@ sudo cmake --install build</code></pre>
     </section>
 
     <section>
-        <h2>Community &amp; Contributors</h2>
+        <h2>Community, Acknowledgments &amp; Contributors</h2>
+        <p><strong>Starting Point &amp; Foundation:</strong> BluePill began as a native Linux &amp; Windows client built on top of the <a href="https://bluebubbles.app/" style="color: var(--accent-cyan);"><strong>BlueBubbles</strong></a> protocol, <code>BlueBubblesHelper</code> Private API ecosystem, and open-source community. Huge credit and thanks to the <a href="https://github.com/BlueBubblesApp" style="color: var(--accent-cyan);">BlueBubbles</a> maintainers and contributors whose pioneering work made iMessage on non-Apple desktops possible &mdash; BluePill remains 100% API-compatible with BlueBubbles Server (<code>1.9.x</code>).</p>
         <p>Thank you to everyone contributing code, bug reports, and platform improvements to <strong>BluePill</strong>:</p>
         <ul>
             <li><a href="https://github.com/nertwork" style="color: var(--accent-cyan);"><strong>@nertwork (James Farr Gomez)</strong></a> — Creator &amp; Maintainer (C++20/Qt6 Linux client, macOS <code>bluepill-server</code> relay, <code>IMCore</code> bridge, Web UI, Arch AUR &amp; Homebrew packaging).</li>
@@ -473,8 +517,8 @@ sudo cmake --install build</code></pre>
     </section>
 
     <footer>
-        <p>&copy; 2026 <a href="https://bluepill.nertwork.com">Nertwork</a>. Released under the MIT License.</p>
-        <p>Live Demo: <a href="https://bluepill.nertwork.com/demo">bluepill.nertwork.com/demo</a> · Support: <a href="https://github.com/sponsors/nertwork">❤️ Sponsor on GitHub</a> · <a href="https://bluepill.nertwork.com/#support">Sponsor BluePill</a> · <a href="mailto:support@nertwork.com">support@nertwork.com</a></p>
+        <p>&copy; 2026 <a href="https://bluepill.app">Nertwork</a>. Released under the MIT License.</p>
+        <p>Live Demo: <a href="https://bluepill.app/demo">bluepill.app/demo</a> · Support: <a href="https://github.com/sponsors/nertwork">❤️ Sponsor on GitHub</a> · <a href="https://bluepill.app/#support">Sponsor BluePill</a> · <a href="mailto:support@nertwork.com">support@nertwork.com</a></p>
     </footer>
 </div>
 

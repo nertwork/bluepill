@@ -5,8 +5,8 @@
 `BluePill` stores its server configuration in `~/.config/bluepill/config.json` with strict `0600` (`-rw-------`) owner-only permissions.
 - **Automatic Migration from `imsg`:** If `~/.config/bluepill/config.json` does not exist on first launch and `~/.config/imsg/config.json` is present, `BluePill` automatically migrates your configuration and credentials seamlessly.
 - **GUI Settings & Server Setup (`Ctrl+,`):** Press `Ctrl+,` or click **`⚙ Settings`** in the top bar at any time to configure:
-  - **BluePill Cloud Quick Connect (`https://bluepill.nertwork.com` — Default):** Click **"Sign in at bluepill.nertwork.com →"** to open the Cloud Portal and copy your Relay URL (`https://api.bluepill.nertwork.com/t/your-name`) & password, or click **"Try Live Demo"** for 1-click live sandbox access.
-  - **Primary Server URL + Port:** `https://api.bluepill.nertwork.com/t/your-name` (BluePill Cloud), `http://mac-ip:1235` (local macOS Relay), `https://bluepill.example.com` (behind TLS) or `ssh://user@mac-host` (Direct SSH mode)
+  - **BluePill Cloud Quick Connect (`https://bluepill.app` — Default):** Click **"Sign in at bluepill.app →"** to open the Cloud Portal and copy your Relay URL (`https://api.bluepill.app/t/your-name`) & password, or click **"Try Live Demo"** for 1-click live sandbox access.
+  - **Primary Server URL + Port:** `https://api.bluepill.app/t/your-name` (BluePill Cloud), `http://mac-ip:1235` (local macOS Relay), `https://bluepill.example.com` (behind TLS) or `ssh://user@mac-host` (Direct SSH mode)
     - A URL without a scheme uses `http://`, because `bluepill-server` serves plain HTTP unless it's started with `--tls-cert`/`--tls-key`.
     - The **Port** field shows the default `1235` greyed out. Leave it empty to use `1235` for both `http://` and `https://`. Enter `443` for a TLS reverse proxy or Tailscale Serve, or `1234` for a BlueBubbles Server on its default port.
     - A port typed into the URL (`host:8080`) moves into the Port field when you leave the URL field.
@@ -15,14 +15,17 @@
   - **Macs on your Tailscale network:** If `tailscale` is installed and connected, Settings lists the online macOS peers on your tailnet, checks each for a relay on `:1235`, and fills in the URL with one click. If exactly one relay answers on first run, it's filled in for you. A Mac shown as *No relay on :1235* may be running `bluepill-server` without `--host`, so it only listens on `127.0.0.1`.
   - **Failover Server URL (Optional):** `https://backup-relay.example.com:443`. Include the port inline; without one, `1235` is used.
   - **API Password / Key:** Your relay password/token
-  - **Settings Version, Advanced Options & Section Tabs (`Server & Sync`, `UI & Appearance`, `Notifications & Audio`):**
-    - Keeps BluePill Cloud sign-in and basic appearance toggles up front while tucking the active **BluePill Client Version** (`v1.2.12`), live **Relay Status & Version**, history retention days, and manual URL/port/failover controls into a collapsible **Advanced Options** panel.
-    - **Cloud Managed Updates (`v1.2.12+`):** When signed into BluePill Cloud, supports 1-click confirmed client updates (Windows SHA256-verified silent Inno Setup, Arch/Omarchy `pkexec pacman -U` / `yay`, Debian `apt-get`, Fedora `dnf`) and Mac server updates (`bluepill-server update --confirm` with LaunchAgent-aware restart and SHA256 release bottle fallback).
-    - **UI & Appearance Preferences** (persisted in `~/.config/bluepill/state.json`):
+  - **Settings Header Version Badge, Collapsible Accordions & Section Tabs (`Connection`, `Appearance`, `Notifications`):**
+    - Displays a header version badge (`v1.2.15`) with live client/relay tooltip and keeps each Settings tab calm with collapsed-by-default accordions: **Connection** (`▸ iCloud Hub Modules`, `▸ Updates`, `▸ Self-Hosted & Advanced`), **Appearance** (`▸ Interface & Layout`, plus **Spell Check** & **Auto-Suggest / Grammar** toggles), and **Notifications** (`▸ Audio Devices & Advanced Alerts`, plus **Minimize to Tray on Close**).
+    - **One-Time First-Run Onboarding Wizard:** Guides new installs through BluePill Cloud SSO, Local/Tailscale relay setup, or Live Demo once (`onboardingCompleted` persisted in `state.json`).
+    - **Auto-Updates ON by Default:** Desktop client auto-update checks (`autoUpdateCheck` in `config.json`, default `true`) and macOS `bluepill-server` auto-updates (`autoUpdate` in `~/.config/bluepill/server.json`, default `true`, opt-out via `"autoUpdate": false` or `BLUEPILL_AUTO_UPDATE=0`) are enabled by default with opt-out toggles. Applies verified updates directly (Windows silent Inno Setup `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS`, Arch/Omarchy `pkexec pacman -U` / `yay`, Debian `apt-get`, Fedora `dnf`, and Mac `brew upgrade` / SHA256 release bottle fallback).
+    - **UI, Composer & Tray Preferences** (persisted in `~/.config/bluepill/state.json` and `config.json`):
       - `showTopBarStatusPill` (default `false`): Show or hide the compact connection & version status pill in the top bar next to the BluePill badge.
       - `showPinnedRow` (default `true`): Show or hide the 3-column macOS-style pinned conversations grid at the top of the sidebar (up to 15 pins).
       - `pinnedRowFillRecent` (default `false`): Optionally backfill empty pinned slots with recent conversations (`isPinned: false` vs `isPinned: true`, with right-click **Pin conversation** / **Unpin conversation** and a `📌` hover action button in the sidebar).
-      - `hoverMessageActions` (default `true`): Reveal the floating Tapback (`❤️ 👍 👎 😂 ‼️ ❓ ➕`), Reply, Edit, Copy, and Delete action bar when hovering over a message bubble or photo (in addition to right-clicking), including the **`➕` Custom Emoji Tapback Picker** for reacting with any emoji.
+      - `minimizeToTrayOnClose` (default `true`): Keep BluePill running in the system tray when closing the window (`Ctrl+Q` or tray **Quit** exits completely).
+      - `spellCheckEnabled` / `autoSuggestEnabled` (default `true`): Enable real-time composer spell check (custom dictionary at `~/.config/bluepill/dictionary.txt` on Linux or `%APPDATA%/bluepill/dictionary.txt` on Windows) and macOS `POST /api/v1/text/check` grammar/completion hints.
+      - **Right-Click Message Actions:** Hover tapback bars are removed; right-click any message bubble or photo for Tapbacks (`❤️ 👍 👎 😂 ‼️ ❓ ➕`), Reply, Edit, Copy / Copy Image, Copy Code, Unsend, and Delete. Tapback pills render on the upper-left (sent) / upper-right (received) corner of bubbles.
 
 URLs in `config.json` and in environment variables are used **as written**: no default port is added when they're loaded. Include the port explicitly (e.g. `http://mac-relay.example.com:1235`).
 
@@ -38,7 +41,7 @@ Example `~/.config/bluepill/config.json`:
 ```
 
 ### Apple Account, Cloud Relay & Local Privacy
-- **Built-In BluePill Cloud Relay (`~/.config/bluepill/relay.json`):** Sign in at [https://bluepill.nertwork.com/portal](https://bluepill.nertwork.com/portal) and run `bluepill-server login` (or non-interactively `bluepill-server relay-setup --token <TOKEN>`, saved with `0600` permissions). `bluepill-server serve` (and `brew services start bluepill`) connects automatically to `wss://api.bluepill.nertwork.com/tunnel/connect` with zero port forwarding. Pass `--no-relay` for local-only mode or check `bluepill-server relay-status`.
+- **Built-In BluePill Cloud Relay (`~/.config/bluepill/relay.json`):** Sign in at [https://bluepill.app/portal](https://bluepill.app/portal) and run `bluepill-server login` (or non-interactively `bluepill-server relay-setup --token <TOKEN>`, saved with `0600` permissions). `bluepill-server serve` (and `brew services start bluepill`) connects automatically to `wss://api.bluepill.app/tunnel/connect` with zero port forwarding. Pass `--no-relay` for local-only mode or check `bluepill-server relay-status`.
 - **macOS Relay Endpoint:** On your Mac signed into `Messages.app` with your Apple Account, run `bluepill-server preflight` and `brew services start bluepill`. Your relay listens locally on port `1235` (or custom `--port`) and stores its configuration in `~/.config/bluepill/server.json` (`0600`).
 - **Local Database Privacy:** `bluepill-server` accesses `~/Library/Messages/chat.db` and `AddressBook` strictly in read-only SQLite WAL mode (`?mode=ro`). On Linux/Windows, your desktop client caches recent threads locally in `~/.cache/imsg/` and optionally stores your relay password in the Freedesktop Secret Service keyring (`libsecret` / `secret-tool`).
 - **Transport Security:** All HTTPS and WebSocket/Socket.IO connections enforce strict TLS peer verification (`QSslSocket::VerifyPeer`), and Direct SSH (`ssh://user@mac-host`) tunnels all traffic over standard OpenSSH with zero open ports. Need help? Contact `support@nertwork.com`.
@@ -50,7 +53,7 @@ Example `~/.config/bluepill/config.json`:
 | `BLUEPILL_SECONDARY_URL` | `IMSG_SECONDARY_URL`, `BLUEBUBBLES_SECONDARY_URL` | Optional failover relay URL |
 | `BLUEPILL_PASSWORD` | `IMSG_PASSWORD`, `BLUEBUBBLES_PASSWORD` | Relay API password / token |
 | `BLUEPILL_RELAY_TOKEN` | `BLUEPILL_TUNNEL_TOKEN` | Built-in Cloud Relay tunnel token override |
-| `BLUEPILL_RELAY_URL` | `BLUEPILL_TUNNEL_URL` | Cloud Relay WebSocket endpoint override (`wss://api.bluepill.nertwork.com/tunnel/connect`) |
+| `BLUEPILL_RELAY_URL` | `BLUEPILL_TUNNEL_URL` | Cloud Relay WebSocket endpoint override (`wss://api.bluepill.app/tunnel/connect`) |
 | `BLUEPILL_CONFIG_PATH` | `IMSG_CONFIG_PATH` | Override path to `config.json` |
 | `BLUEPILL_DISABLE_TAILSCALE_DISCOVERY` | — | Set to `1` to stop Settings from running `tailscale status` and probing tailnet peers |
 
@@ -77,6 +80,11 @@ Example `~/.config/bluepill/config.json`:
   - `"system_tone"` — Standard desktop alert tone
 - **Startup Deduplication Baseline:** On launch, BluePill records baseline sync state (`m_initialSyncComplete`, `m_startupTimestamp`, `m_startupHighestRowId`) and maintains a persistent cache of `notifiedMessageGuids` to eliminate spurious startup or historical sound alerts.
 
+### Tray, Onboarding & Composer State
+- **`minimizeToTrayOnClose` (boolean, default: `true`):** Minimize to the system tray on window close; press `Ctrl+Q` or choose **Quit** from the tray menu to exit completely.
+- **`onboardingCompleted` (boolean, default: `false`, auto-`true` if already configured):** Controls whether the one-time first-run onboarding wizard is displayed.
+- **`spellCheckEnabled` / `autoSuggestEnabled` (boolean, default: `true`):** Persisted in `state.json`; enables composer spell-check underlines, right-click suggestions, custom dictionary (`~/.config/bluepill/dictionary.txt`), and macOS `POST /api/v1/text/check` grammar/auto-suggest chips.
+
 ### iCloud Hub Module Toggles
 - **`notesEnabled` (boolean, default: `true`):** Toggle the Apple Notes tab and REST client.
 - **`calendarEnabled` (boolean, default: `true`):** Toggle the Apple Calendar tab and REST client.
@@ -85,13 +93,17 @@ Example `~/.config/bluepill/config.json`:
 Example `~/.config/bluepill/state.json`:
 ```json
 {
+  "autoSuggestEnabled": true,
   "calendarEnabled": true,
+  "minimizeToTrayOnClose": true,
   "notesEnabled": true,
   "notificationMuteWhenActive": true,
   "notificationSoundEnabled": true,
   "notificationSoundPreset": "crystal_ding",
   "notificationsEnabled": true,
-  "photosEnabled": true
+  "onboardingCompleted": true,
+  "photosEnabled": true,
+  "spellCheckEnabled": true
 }
 ```
 
@@ -120,16 +132,21 @@ bluepill --demo
 
 ## 4. Keyboard Shortcuts
 
-| Shortcut | Action |
+| Shortcut / Action | Effect |
 | :--- | :--- |
-| `Ctrl+H` / `Alt+Home` / `Esc` | Open **BluePill Home** dashboard |
+| `Ctrl+H` / `Alt+Home` / `Esc` | Close active conversation / active modal |
 | `Ctrl+,` | Open **⚙ Settings** modal |
 | `Ctrl+K` / `F1` | Open **Keyboard Shortcuts** reference |
 | `Ctrl+F` / `/` | Focus sidebar conversation search |
-| `Ctrl+N` | Start new conversation |
-| `Ctrl+V` (in Composer) | Paste & send image from Wayland clipboard |
+| `Ctrl+N` | Start new 1:1 or multi-recipient group conversation |
+| `Ctrl+V` (in Composer) | Paste & queue image from clipboard |
+| `Ctrl+Click` / `Shift+Click` (Messages) | Multi-select individual or range of message bubbles |
+| `Ctrl+C` (with selection) | Copy selected messages chronologically (or use **Copy with Names**) |
+| `Right-Click` Message / Photo | Open Tapback (`❤️ 👍 👎 😂 ‼️ ❓ ➕`), Reply, Edit, Copy, Unsend, Delete menu |
+| `Right-Click` Send (`↑`) | Open Expressive Effects menu (`Slam`, `Loud`, `Gentle`, `Invisible Ink`, `Confetti`, `Lasers`, `Fireworks`, `Echo`) |
+| `Right-Click` Misspelled Word | Show spelling suggestions & **Add to Dictionary** |
 | `Alt+1` .. `Alt+9` | Jump to conversation 1–9 |
 | `Ctrl+Shift+U` / `Alt+U` | Toggle active conversation read/unread |
 | `Ctrl+Shift+A` | Mark all conversations read |
 | `Right-Click` Pinned / Sidebar Chat | Pin/Unpin or Toggle Read/Unread |
-| `Double-Click` Message Bubble | Send instant Love (`❤️`) tapback |
+| `Ctrl+Q` | Quit application completely (bypassing minimize-to-tray) |
