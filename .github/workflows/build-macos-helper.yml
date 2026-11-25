@@ -39,7 +39,7 @@ jobs:
           lipo -info dist/BluePillEmojiTapback.dylib
 
       - name: Upload Dylib Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: BluePillEmojiTapback-macos15
           path: dist/BluePillEmojiTapback.dylib

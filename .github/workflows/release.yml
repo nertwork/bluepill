@@ -91,7 +91,7 @@ jobs:
           cp bluepill-*.all.bottle.tar.gz dist-arch/
 
       - name: Upload Arch & Bottle Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-arch-bottle
           path: dist-arch/*
@@ -115,7 +115,7 @@ jobs:
         run: ./packaging/build-deb.sh dist-deb
 
       - name: Upload .deb Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-deb
           path: dist-deb/*.deb
@@ -140,7 +140,7 @@ jobs:
         run: ./packaging/build-rpm.sh dist-rpm
 
       - name: Upload .rpm Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-rpm
           path: dist-rpm/*.rpm
@@ -231,7 +231,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload Windows Installer Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-windows
           path: dist/BluePill-Setup-*.exe

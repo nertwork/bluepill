@@ -205,7 +205,7 @@ jobs:
           QT_QPA_PLATFORM=offscreen bluepill --demo --test-startup
 
       - name: Upload .deb Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bluepill-deb
           path: dist/bluepill_*.deb
@@ -237,7 +237,7 @@ jobs:
           QT_QPA_PLATFORM=offscreen bluepill --demo --test-startup
 
       - name: Upload .rpm Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bluepill-rpm
           path: dist/bluepill-*.rpm
@@ -334,7 +334,7 @@ jobs:
           Get-ChildItem dist\BluePill-Setup-*.exe
 
       - name: Upload Windows Installer Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bluepill-windows-installer
           path: dist/BluePill-Setup-*.exe
