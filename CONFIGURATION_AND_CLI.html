@@ -489,13 +489,14 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
         <main class="doc-content">
             <div class="doc-banner">
                 <div>
-                    <strong>💊 BluePill v1.2.15 Documentation Portal</strong>
+                    <strong>💊 BluePill v1.2.16 Documentation Portal</strong>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
@@ -519,7 +520,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
   - <strong>Failover Server URL (Optional):</strong> <code>https://backup-relay.example.com:443</code>. Include the port inline; without one, <code>1235</code> is used.
   - <strong>API Password / Key:</strong> Your relay password/token
   - <strong>Settings Header Version Badge, Collapsible Accordions &amp; Section Tabs (<code>Connection</code>, <code>Appearance</code>, <code>Notifications</code>):</strong>
-    - Displays a header version badge (<code>v1.2.15</code>) with live client/relay tooltip and keeps each Settings tab calm with collapsed-by-default accordions: <strong>Connection</strong> (<code>▸ iCloud Hub Modules</code>, <code>▸ Updates</code>, <code>▸ Self-Hosted &amp; Advanced</code>), <strong>Appearance</strong> (<code>▸ Interface &amp; Layout</code>, plus <strong>Spell Check</strong> &amp; <strong>Auto-Suggest / Grammar</strong> toggles), and <strong>Notifications</strong> (<code>▸ Audio Devices &amp; Advanced Alerts</code>, plus <strong>Minimize to Tray on Close</strong>).
+    - Displays a header version badge (<code>v1.2.16</code>) with live client/relay tooltip and keeps each Settings tab calm with collapsed-by-default accordions: <strong>Connection</strong> (<code>▸ iCloud Hub Modules</code>, <code>▸ Updates</code>, <code>▸ Self-Hosted &amp; Advanced</code>), <strong>Appearance</strong> (<code>▸ Interface &amp; Layout</code>, plus <strong>Spell Check</strong> &amp; <strong>Auto-Suggest / Grammar</strong> toggles), and <strong>Notifications</strong> (<code>▸ Audio Devices &amp; Advanced Alerts</code>, plus <strong>Minimize to Tray on Close</strong>).
     - <strong>One-Time First-Run Onboarding Wizard:</strong> Guides new installs through BluePill Cloud SSO, Local/Tailscale relay setup, or Live Demo once (<code>onboardingCompleted</code> persisted in <code>state.json</code>).
     - <strong>Auto-Updates ON by Default:</strong> Desktop client auto-update checks (<code>autoUpdateCheck</code> in <code>config.json</code>, default <code>true</code>) and macOS <code>bluepill-server</code> auto-updates (<code>autoUpdate</code> in <code>~/.config/bluepill/server.json</code>, default <code>true</code>, opt-out via <code>"autoUpdate": false</code> or <code>BLUEPILL_AUTO_UPDATE=0</code>) are enabled by default with opt-out toggles. Applies verified updates directly (Windows silent Inno Setup <code>/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS</code>, Arch/Omarchy <code>pkexec pacman -U</code> / <code>yay</code>, Debian <code>apt-get</code>, Fedora <code>dnf</code>, and Mac <code>brew upgrade</code> / SHA256 release bottle fallback).
     - <strong>UI, Composer &amp; Tray Preferences</strong> (persisted in <code>~/.config/bluepill/state.json</code> and <code>config.json</code>):
