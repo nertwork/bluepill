@@ -8,12 +8,13 @@ qtHaveModule(dbus) {
     DEFINES += BLUEPILL_HAS_DBUS=1
 }
 win32 {
-    LIBS += -lole32
+    LIBS += -lole32 -ladvapi32 -lcrypt32 -lwinmm
+    RC_FILE = resources/bluepill.rc
 }
 CONFIG += c++20
 
 TARGET = bluepill
-VERSION = 1.2.13
+VERSION = 1.2.16
 TEMPLATE = app
 
 DESTDIR = .

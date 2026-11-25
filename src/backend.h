@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #pragma once
 
@@ -456,7 +457,7 @@ public:
     int icloudPhotosTotal() const { return std::max(int(m_icloudPhotos.size()), m_icloudPhotosTotal); }
     int icloudPhotosPage() const { return m_icloudPhotosPage; }
     int icloudPhotosPageSize() const { return m_icloudPhotosPageSize; }
-    void setIcloudPhotosPageSize(int size);
+    Q_INVOKABLE void setIcloudPhotosPageSize(int size);
     int icloudPhotosPageCount() const {
         const int ps = std::max(1, m_icloudPhotosPageSize);
         const int tot = icloudPhotosTotal();
@@ -1263,8 +1264,13 @@ private:
     int m_pollTickCount = 0;
     bool m_pollDeltaInFlight = false;
     bool m_pollRowIdInFlight = false;
-    mutable std::atomic<bool> m_cacheFlushInFlight{false};
-    mutable std::atomic<bool> m_cacheFlushPending{false};
+    struct CacheFlushState {
+        std::atomic<bool> inFlight{false};
+        std::atomic<bool> pending{false};
+        std::mutex lifecycleMutex;
+        Backend *owner = nullptr;
+    };
+    mutable std::shared_ptr<CacheFlushState> m_cacheFlushState = std::make_shared<CacheFlushState>();
     QSet<QString> m_downloadingAttachments;
     QSet<QString> m_attemptedAttachments;
     QSet<QString> m_missingAttachments;

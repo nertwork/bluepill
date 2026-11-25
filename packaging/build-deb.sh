@@ -7,8 +7,10 @@ SKIP_TESTS="${SKIP_TESTS:-0}"
 
 VER="$(grep -m1 'project(bluepill VERSION' "${ROOT_DIR}/CMakeLists.txt" | sed -E 's/.*VERSION ([0-9.]+).*/\1/')"
 ARCH="$(dpkg --print-architecture)"
-BUILD_DIR="${BUILD_DIR:-$(mktemp -d)}"
-trap 'rm -rf "${BUILD_DIR}"' EXIT
+if [[ -z "${BUILD_DIR:-}" ]]; then
+    BUILD_DIR="$(mktemp -d)"
+    trap 'rm -rf "${BUILD_DIR}"' EXIT
+fi
 PKG_ROOT="${BUILD_DIR}/pkg"
 
 mkdir -p "${OUT_DIR}"

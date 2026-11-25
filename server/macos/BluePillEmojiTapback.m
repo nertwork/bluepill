@@ -108,8 +108,14 @@ static void bps_handle_emoji_reaction(NSDictionary *data, NSString *txId) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         Class regCls = NSClassFromString(@"IMChatRegistry");
-        id registry = regCls ? ((id (*)(id, SEL))objc_msgSend)((id)regCls, NSSelectorFromString(@"sharedInstance")) : nil;
-        id chat = registry ? ((id (*)(id, SEL, id))objc_msgSend)(registry, NSSelectorFromString(@"existingChatWithGUID:"), chatGuid) : nil;
+        SEL selShared = NSSelectorFromString(@"sharedInstance");
+        SEL selExisting = NSSelectorFromString(@"existingChatWithGUID:");
+        id registry = (regCls && [regCls respondsToSelector:selShared])
+            ? ((id (*)(id, SEL))objc_msgSend)((id)regCls, selShared)
+            : nil;
+        id chat = (registry && [registry respondsToSelector:selExisting])
+            ? ((id (*)(id, SEL, id))objc_msgSend)(registry, selExisting, chatGuid)
+            : nil;
         if (!chat) {
             os_log_error(bps_log(), "BLUEPILL_EMOJI: Chat does not exist: %{public}@", chatGuid);
             bps_send_reply(txId, nil, @"Chat does not exist!");
@@ -117,7 +123,9 @@ static void bps_handle_emoji_reaction(NSDictionary *data, NSString *txId) {
         }
 
         Class histCls = NSClassFromString(@"IMChatHistoryController");
-        id hist = histCls ? ((id (*)(id, SEL))objc_msgSend)((id)histCls, NSSelectorFromString(@"sharedInstance")) : nil;
+        id hist = (histCls && [histCls respondsToSelector:selShared])
+            ? ((id (*)(id, SEL))objc_msgSend)((id)histCls, selShared)
+            : nil;
         SEL selLoad = NSSelectorFromString(@"loadMessageWithGUID:completionBlock:");
         if (!hist || ![hist respondsToSelector:selLoad]) {
             bps_send_reply(txId, nil, @"IMChatHistoryController unavailable");
@@ -175,8 +183,14 @@ static void bps_handle_emoji_reaction(NSDictionary *data, NSString *txId) {
                     bps_send_reply(txId, nil, @"IMEmojiTapback unavailable");
                     return;
                 }
-                id tbAlloc = ((id (*)(id, SEL))objc_msgSend)((id)tbCls, @selector(alloc));
-                id tapback = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(tbAlloc, selInitEmoji, emoji, isRemoved);
+                typedef id (*bps_alloc_fn)(id, SEL) __attribute__((ns_returns_retained));
+                typedef id (*bps_init_emoji_fn)(__attribute__((ns_consumed)) id, SEL, id, BOOL) __attribute__((ns_returns_retained));
+                typedef id (*bps_init_part_fn)(__attribute__((ns_consumed)) id, SEL, id, id, id) __attribute__((ns_returns_retained));
+                typedef id (*bps_init_guid_fn)(__attribute__((ns_consumed)) id, SEL, id, id, id, NSRange, id, id) __attribute__((ns_returns_retained));
+                bps_alloc_fn allocFn = (bps_alloc_fn)objc_msgSend;
+
+                id tbAlloc = allocFn((id)tbCls, @selector(alloc));
+                id tapback = ((bps_init_emoji_fn)objc_msgSend)(tbAlloc, selInitEmoji, emoji, isRemoved);
                 if (!tapback) {
                     bps_send_reply(txId, nil, @"Failed to initialize IMEmojiTapback");
                     return;
@@ -186,10 +200,10 @@ static void bps_handle_emoji_reaction(NSDictionary *data, NSString *txId) {
                 SEL selInitPart = NSSelectorFromString(@"initWithTapback:chat:messagePartChatItem:");
                 SEL selInitGuid = NSSelectorFromString(@"initWithTapback:chat:messageGUID:messagePartRange:messageSummaryInfo:threadIdentifier:");
                 id sender = nil;
-                if (partItem && [senderCls instancesRespondToSelector:selInitPart]) {
-                    id sAlloc = ((id (*)(id, SEL))objc_msgSend)((id)senderCls, @selector(alloc));
-                    sender = ((id (*)(id, SEL, id, id, id))objc_msgSend)(sAlloc, selInitPart, tapback, chat, partItem);
-                } else if ([senderCls instancesRespondToSelector:selInitGuid]) {
+                if (senderCls && partItem && [senderCls instancesRespondToSelector:selInitPart]) {
+                    id sAlloc = allocFn((id)senderCls, @selector(alloc));
+                    sender = ((bps_init_part_fn)objc_msgSend)(sAlloc, selInitPart, tapback, chat, partItem);
+                } else if (senderCls && [senderCls instancesRespondToSelector:selInitGuid]) {
                     SEL selGuid = NSSelectorFromString(@"guid");
                     SEL selTid = NSSelectorFromString(@"threadIdentifier");
                     SEL selText = NSSelectorFromString(@"text");
@@ -205,8 +219,8 @@ static void bps_handle_emoji_reaction(NSDictionary *data, NSString *txId) {
                     NSUInteger len = (txtObj && [txtObj respondsToSelector:@selector(length)])
                         ? ((NSUInteger (*)(id, SEL))objc_msgSend)(txtObj, @selector(length))
                         : 0;
-                    id sAlloc = ((id (*)(id, SEL))objc_msgSend)((id)senderCls, @selector(alloc));
-                    sender = ((id (*)(id, SEL, id, id, id, NSRange, id, id))objc_msgSend)(
+                    id sAlloc = allocFn((id)senderCls, @selector(alloc));
+                    sender = ((bps_init_guid_fn)objc_msgSend)(
                         sAlloc, selInitGuid, tapback, chat, resolvedGuid ?: msgGuid, NSMakeRange(0, len), nil, tid
                     );
                 }
@@ -298,7 +312,8 @@ static BOOL bps_install_hook(void) {
     if (!m) {
         return NO;
     }
-    orig_handleMessage_imp = method_setImplementation(m, (IMP)bps_swizzled_handleMessage);
+    orig_handleMessage_imp = method_getImplementation(m);
+    method_setImplementation(m, (IMP)bps_swizzled_handleMessage);
     installed = YES;
     os_log_info(bps_log(), "BLUEPILL_EMOJI: Hooked -[BlueBubblesHelper handleMessage:message:] successfully");
     fprintf(stderr, "[BluePillEmojiTapback] Hooked -[BlueBubblesHelper handleMessage:message:] successfully\n");

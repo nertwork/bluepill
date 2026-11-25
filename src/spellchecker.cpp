@@ -587,7 +587,7 @@ void SpellChecker::dispatchAssistRequest() {
     const QString scheme = u.scheme().toLower();
     const QString host = u.host().toLower();
     const bool isLoopback = (host == QStringLiteral("127.0.0.1") || host == QStringLiteral("localhost") || host == QStringLiteral("::1"));
-    if (scheme != QStringLiteral("https") && !(m_allowLocalhostRelayForTest && isLoopback) && !isLoopback) {
+    if (scheme != QStringLiteral("https") && !(scheme == QStringLiteral("http") && isLoopback)) {
         return;
     }
 
