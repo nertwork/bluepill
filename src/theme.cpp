@@ -90,17 +90,10 @@ bool Theme::detectSystemIsLight() const {
     if (m_hasSystemColorSchemeOverrideForTest) {
         return m_systemColorSchemeOverrideIsLightForTest;
     }
-#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
-    if (QGuiApplication::instance()) {
-        const Qt::ColorScheme scheme = QGuiApplication::styleHints()->colorScheme();
-        if (scheme == Qt::ColorScheme::Light) {
-            return true;
-        }
-        if (scheme == Qt::ColorScheme::Dark) {
-            return false;
-        }
-    }
-#endif
+    // Prefer Omarchy's authoritative colors.toml on disk before Qt's QStyleHints::colorScheme():
+    // on Wayland/Hyprland (especially during login/workspace-restore before xdg-desktop-portal
+    // settles, or under QT_QPA_PLATFORMTHEME=gtk3 without gtk-3.0/settings.ini), Qt can report
+    // Qt::ColorScheme::Light even when the active Omarchy system theme is dark.
     const QString home = effectiveThemeHomePath();
     const QStringList candidates = {
         home + QStringLiteral("/.local/state/omarchy/current/theme/colors.toml"),
@@ -116,6 +109,17 @@ bool Theme::detectSystemIsLight() const {
             break;
         }
     }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    if (QGuiApplication::instance()) {
+        const Qt::ColorScheme scheme = QGuiApplication::styleHints()->colorScheme();
+        if (scheme == Qt::ColorScheme::Light) {
+            return true;
+        }
+        if (scheme == Qt::ColorScheme::Dark) {
+            return false;
+        }
+    }
+#endif
     return false;
 }
 
