@@ -336,7 +336,7 @@ jobs:
         run: |
           VER="${{ needs.build-arch-and-bottle.outputs.version }}"
           for i in 1 2 3 4 5; do
-            FEED=$(curl -fsSL --max-time 10 "https://api.bluepill.nertwork.com/api/v1/updates/latest" || true)
+            FEED=$(curl -fsSL --max-time 10 "https://api.bluepill.app/api/v1/updates/latest" || true)
             echo "Updates feed attempt ${i}: ${FEED}"
             if echo "${FEED}" | grep -q "\"${VER}\""; then
               break

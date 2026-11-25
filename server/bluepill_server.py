@@ -59,8 +59,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 VERSION = "1.2.15"
-DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.nertwork.com/tunnel/connect"
-DEFAULT_UPDATES_FEED_URL = "https://api.bluepill.nertwork.com/api/v1/updates/latest"
+DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.app/tunnel/connect"
+DEFAULT_UPDATES_FEED_URL = "https://api.bluepill.app/api/v1/updates/latest"
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 3600
 APPLE_EPOCH_OFFSET_SEC = 978307200
 APPLE_EPOCH_OFFSET_MS = 978307200000
@@ -9049,7 +9049,12 @@ end run
         if not raw_url:
             return False
         host = (urllib.parse.urlparse(raw_url).hostname or "").strip().lower()
-        return host == "bluepill.nertwork.com" or host.endswith(".bluepill.nertwork.com")
+        return (
+            host == "bluepill.app"
+            or host.endswith(".bluepill.app")
+            or host == "bluepill.nertwork.com"
+            or host.endswith(".bluepill.nertwork.com")
+        )
 
     @staticmethod
     def _find_brew_binary() -> str:
@@ -9107,6 +9112,7 @@ end run
         "github.com",
         "objects.githubusercontent.com",
         "release-assets.githubusercontent.com",
+        "bluepill.app",
         "bluepill.nertwork.com",
     })
     _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
@@ -9118,8 +9124,10 @@ end run
         host = (parsed.hostname or "").strip().lower()
         if scheme != "https" or not host:
             raise ValueError(f"Untrusted update URL: {url!r}")
-        if host in cls._TRUSTED_UPDATE_HOSTS or (
-            host.endswith(".bluepill.nertwork.com") and len(host) > len(".bluepill.nertwork.com")
+        if (
+            host in cls._TRUSTED_UPDATE_HOSTS
+            or (host.endswith(".bluepill.app") and len(host) > len(".bluepill.app"))
+            or (host.endswith(".bluepill.nertwork.com") and len(host) > len(".bluepill.nertwork.com"))
         ):
             return parsed.geturl()
         raise ValueError(f"Untrusted update host: {host!r}")
@@ -17222,8 +17230,9 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
     assert BluePillEngine._validate_update_url("https://github.com/nertwork/bluepill/releases/download/v1.2.12/SHA256SUMS.txt").startswith("https://")
     assert BluePillEngine._validate_update_url("https://objects.githubusercontent.com/a").startswith("https://")
     assert BluePillEngine._validate_update_url("https://release-assets.githubusercontent.com/a").startswith("https://")
+    assert BluePillEngine._validate_update_url("https://api.bluepill.app/a").startswith("https://")
     assert BluePillEngine._validate_update_url("https://api.bluepill.nertwork.com/a").startswith("https://")
-    for bad_url in ("http://github.com/a", "file:///etc/passwd", "https://evil.com/a", "https://bluepill.nertwork.com.evil.com/a"):
+    for bad_url in ("http://github.com/a", "file:///etc/passwd", "https://evil.com/a", "https://bluepill.app.evil.com/a", "https://bluepill.nertwork.com.evil.com/a"):
         try:
             BluePillEngine._validate_update_url(bad_url)
             raise AssertionError(f"Expected ValueError for untrusted URL {bad_url!r}")
@@ -17960,8 +17969,8 @@ def run_relay_setup_cli(args: argparse.Namespace, engine: BluePillEngine) -> int
         cb_thread = threading.Thread(target=lambda: cb_server.handle_request(), daemon=True)
         cb_thread.start()
 
-        cloud_web_base = os.environ.get("BLUEPILL_CLOUD_WEB_URL", "https://bluepill.nertwork.com").rstrip("/")
-        cloud_api_base = os.environ.get("BLUEPILL_CLOUD_API_URL", "https://api.bluepill.nertwork.com").rstrip("/")
+        cloud_web_base = os.environ.get("BLUEPILL_CLOUD_WEB_URL", "https://bluepill.app").rstrip("/")
+        cloud_api_base = os.environ.get("BLUEPILL_CLOUD_API_URL", "https://api.bluepill.app").rstrip("/")
         auth_url = f"{cloud_web_base}/portal/desktop-auth?port={cb_port}&state={state}"
         print("BluePill Cloud Login — opening browser for 1-click Google / GitHub / Email sign-in...")
         print(f"  If your browser didn't open, visit:\n  {auth_url}")
@@ -18014,7 +18023,7 @@ def run_relay_setup_cli(args: argparse.Namespace, engine: BluePillEngine) -> int
             relay_pw = entered_pw
 
     if not token:
-        msg = "Missing --token (or BLUEPILL_RELAY_TOKEN). Sign in at https://bluepill.nertwork.com/portal"
+        msg = "Missing --token (or BLUEPILL_RELAY_TOKEN). Sign in at https://bluepill.app/portal"
         if args.json:
             print(json.dumps({"status": "error", "error": msg}))
         else:

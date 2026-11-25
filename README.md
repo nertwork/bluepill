@@ -5,10 +5,10 @@
 <h1 align="center">BluePill — Native Qt6 iMessage, RCS &amp; SMS Client + Cloud Relay &amp; Web UI</h1>
 
 <p align="center">
-  <strong>Official Website:</strong> <a href="https://bluepill.nertwork.com"><strong>https://bluepill.nertwork.com</strong></a> ·
-  <strong>Live Interactive Demo:</strong> <a href="https://bluepill.nertwork.com/demo"><strong>Try Live Demo</strong></a> ·
-  <strong>Free Cloud Relay Signup:</strong> <a href="https://bluepill.nertwork.com/signup"><strong>Sign Up Free</strong></a> ·
-  <strong>Support Open-Source Development:</strong> <a href="https://github.com/sponsors/nertwork"><strong>❤️ Sponsor on GitHub</strong></a> · <a href="https://bluepill.nertwork.com/#support"><strong>Sponsor BluePill</strong></a>
+  <strong>Official Website:</strong> <a href="https://bluepill.app"><strong>https://bluepill.app</strong></a> ·
+  <strong>Live Interactive Demo:</strong> <a href="https://bluepill.app/demo"><strong>Try Live Demo</strong></a> ·
+  <strong>Free Cloud Relay Signup:</strong> <a href="https://bluepill.app/signup"><strong>Sign Up Free</strong></a> ·
+  <strong>Support Open-Source Development:</strong> <a href="https://github.com/sponsors/nertwork"><strong>❤️ Sponsor on GitHub</strong></a> · <a href="https://bluepill.app/#support"><strong>Sponsor BluePill</strong></a>
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
 
 <p align="center">
   <a href="https://github.com/nertwork/bluepill/releases/latest"><strong>Downloads (.exe / .deb / .rpm)</strong></a> ·
-  <a href="https://bluepill.nertwork.com/docs"><strong>Documentation</strong></a> ·
+  <a href="https://bluepill.app/docs"><strong>Documentation</strong></a> ·
   <a href="mailto:support@nertwork.com"><strong>support@nertwork.com</strong></a>
 </p>
 
@@ -35,8 +35,8 @@
 **`BluePill`** (`bluepill`, backward-compatible with `imsg`) is a complete, open-source **iMessage, RCS, and SMS ecosystem for Linux, Windows, macOS, and the Web** consisting of three unified interfaces:
 
 1. **Native Linux & Windows Desktop Client (`bluepill`):** A fast (~48 MB RSS), zero-Electron, zero-Flutter **C++20 and Qt6/QML** desktop application for **Linux** (Arch/Omarchy AUR, Debian/Ubuntu `.deb`, Fedora/RHEL `.rpm`) and **Windows** (`BluePill-Setup-*.exe`) with **0ms local cache startup**, real-time **Socket.IO v4 push**, **Pinned Conversations**, **1-click 2FA OTP copy pills**, **built-in Photo Lightbox**, and live Omarchy theme hot-reloading.
-2. **Headless macOS Relay Daemon (`bluepill-server` / `brew install nertwork/tap/bluepill`):** A lightweight (~18 MB RSS), zero-Electron macOS daemon that reads `~/Library/Messages/chat.db` directly in SQLite WAL mode (`<2ms` queries), decodes `attributedBody` typedstreams natively, resolves `AddressBook` contacts in `<5ms`, includes **built-in BluePill Cloud Relay** (`wss://api.bluepill.nertwork.com/tunnel/connect`, zero port-forwarding), and supports both **Full `IMCore` Private API mode** and **Zero-SIP `osascript` Gateway mode** — while remaining **100% API-compatible with legacy BlueBubbles Server (`1.9.x`)**.
-3. **Unified BluePill Web Client (`http://<mac-relay>:1235/web`, `https://bluepill.nertwork.com/t/<slug>/web`, or `https://bluepill.nertwork.com/demo`):** A zero-install, single-file browser client with **Liquid Glass / Matrix / Light** theme switching, **auto-populated relay credentials when signed in**, **3-column pinned chats grid**, **contact resolution & `lastMessage` conversation previews**, **lazy-loaded Photos**, **inline `<audio>` / `<video>` playback with server-side `.caf` (`audio/x-caf`) transcoding (`?transcode=1`)**, **auto-retry + `↻ Resend`**, unified **Messages, Notes, Calendar, Photos, and Contacts** tabs, inline tapbacks, 1-click 2FA OTP copy pills, real-time Socket.IO updates, and hardened XSS/CSP/`Cache-Control: no-store, private`/cookie isolation.
+2. **Headless macOS Relay Daemon (`bluepill-server` / `brew install nertwork/tap/bluepill`):** A lightweight (~18 MB RSS), zero-Electron macOS daemon that reads `~/Library/Messages/chat.db` directly in SQLite WAL mode (`<2ms` queries), decodes `attributedBody` typedstreams natively, resolves `AddressBook` contacts in `<5ms`, includes **built-in BluePill Cloud Relay** (`wss://api.bluepill.app/tunnel/connect`, zero port-forwarding), and supports both **Full `IMCore` Private API mode** and **Zero-SIP `osascript` Gateway mode** — while remaining **100% API-compatible with legacy BlueBubbles Server (`1.9.x`)**.
+3. **Unified BluePill Web Client (`http://<mac-relay>:1235/web`, `https://bluepill.app/t/<slug>/web`, or `https://bluepill.app/demo`):** A zero-install, single-file browser client with **Liquid Glass / Matrix / Light** theme switching, **auto-populated relay credentials when signed in**, **3-column pinned chats grid**, **contact resolution & `lastMessage` conversation previews**, **lazy-loaded Photos**, **inline `<audio>` / `<video>` playback with server-side `.caf` (`audio/x-caf`) transcoding (`?transcode=1`)**, **auto-retry + `↻ Resend`**, unified **Messages, Notes, Calendar, Photos, and Contacts** tabs, inline tapbacks, 1-click 2FA OTP copy pills, real-time Socket.IO updates, and hardened XSS/CSP/`Cache-Control: no-store, private`/cookie isolation.
 
 ---
 
@@ -64,17 +64,17 @@ On any Mac signed into your Apple ID (`Messages.app`):
 
 ```bash
 brew install nertwork/tap/bluepill
-bluepill-server login   # Opens https://bluepill.nertwork.com/portal to link your Mac
+bluepill-server login   # Opens https://bluepill.app/portal to link your Mac
 brew services start bluepill
 ```
 
 - **Verify Relay, Cloud Relay & Web UI:**
   - Cloud Relay Status: `bluepill-server relay-status`
-  - Cloud Managed Updates (BluePill Cloud Perk): `bluepill-server update-status` / `bluepill-server update --confirm` (or 1-click confirmation inside the desktop client UI — strictly gated to signed-in `bluepill.nertwork.com` users; never phones home when self-hosted offline). Mac server updates use LaunchAgent-aware restarts (`launchctl kickstart -k` for `com.nertwork.bluepill-server` / `homebrew.mxcl.bluepill`) and automatically fall back to SHA256-verified GitHub release bottles (`bluepill-<ver>.all.bottle.tar.gz`) if Homebrew lacks `git`/Xcode CLT or the tap lags.
-  - Smart Direct Cross-Platform Client Auto-Updates: Signed-in desktop clients verify release `SHA256SUMS.txt` over an HTTPS allowlist (`github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, `bluepill.nertwork.com`) and apply updates directly — silent Inno Setup (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS`) on Windows, `pkexec pacman -U` (or `yay`/`paru` for `bluepill-bin`) on Omarchy/Arch, `pkexec apt-get install` on Debian/Ubuntu, and `pkexec dnf install` on Fedora/RHEL (with terminal `sudo` fallback when no polkit agent is active).
+  - Cloud Managed Updates (BluePill Cloud Perk): `bluepill-server update-status` / `bluepill-server update --confirm` (or 1-click confirmation inside the desktop client UI — strictly gated to signed-in `bluepill.app` users; never phones home when self-hosted offline). Mac server updates use LaunchAgent-aware restarts (`launchctl kickstart -k` for `com.nertwork.bluepill-server` / `homebrew.mxcl.bluepill`) and automatically fall back to SHA256-verified GitHub release bottles (`bluepill-<ver>.all.bottle.tar.gz`) if Homebrew lacks `git`/Xcode CLT or the tap lags.
+  - Smart Direct Cross-Platform Client Auto-Updates: Signed-in desktop clients verify release `SHA256SUMS.txt` over an HTTPS allowlist (`github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, `bluepill.app`) and apply updates directly — silent Inno Setup (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS`) on Windows, `pkexec pacman -U` (or `yay`/`paru` for `bluepill-bin`) on Omarchy/Arch, `pkexec apt-get install` on Debian/Ubuntu, and `pkexec dnf install` on Fedora/RHEL (with terminal `sudo` fallback when no polkit agent is active).
   - Health / Info API: `curl -s http://127.0.0.1:1235/api/v1/server/info`
-  - Built-In Web UI: Open `http://127.0.0.1:1235/web` (or your hosted Cloud Relay Web UI at `https://bluepill.nertwork.com/t/<slug>/web`).
-  - Try instantly without a Mac: **[Live Interactive Demo](https://bluepill.nertwork.com/demo)** or click **"Try Live Demo"** inside the desktop client.
+  - Built-In Web UI: Open `http://127.0.0.1:1235/web` (or your hosted Cloud Relay Web UI at `https://bluepill.app/t/<slug>/web`).
+  - Try instantly without a Mac: **[Live Interactive Demo](https://bluepill.app/demo)** or click **"Try Live Demo"** inside the desktop client.
 - **100% Legacy BlueBubbles Compatible:** Already running `BlueBubbles.app` (`v1.9.x`)? `BluePill` connects to existing BlueBubbles servers out of the box with zero server changes required.
 
 ### 2. Desktop Client & CLI Setup (Linux & Windows)
@@ -85,7 +85,7 @@ brew services start bluepill
 - **Windows (`x86_64` `.exe` — Per-User Standalone, No Admin Required):** Download `BluePill-Setup-<version>-win64.exe` from **[GitHub Releases](https://github.com/nertwork/bluepill/releases/latest)** (~53 MB; installs to `%LOCALAPPDATA%\Programs\BluePill` like VS Code User Setup with silent zero-UAC auto-updates, native in-process `Qt6::Multimedia` audio playback, and optional settings cleanup on uninstall)
 
 ```bash
-# Launch the GUI — click "Sign in at bluepill.nertwork.com →" (default) or "Try Live Demo"
+# Launch the GUI — click "Sign in at bluepill.app →" (default) or "Try Live Demo"
 bluepill
 # Or launch the Built-In Web UI in your default browser
 bluepill --webui
@@ -165,7 +165,7 @@ bluepill --webui
 | **BluePill Desktop & CLI (`bluepill`)** | Arch/Omarchy, Debian/Ubuntu, Fedora/RHEL | `x86_64`, `aarch64` (ARM64) | Wayland (Hyprland, Sway, KDE, GNOME) & X11 · Qt 6.8+ (`Qt6::Multimedia`) / C++20 · PipeWire | **AUR:** `yay -S bluepill-bin` (prebuilt) / `yay -S bluepill` (source)<br>**Packages:** `.deb` & `.rpm` in [Releases](https://github.com/nertwork/bluepill/releases/latest) |
 | **BluePill Windows Client (`bluepill.exe`)** | Windows 10 / 11 | `x86_64` | Native Qt 6.8 MSVC + Inno Setup Installer | **Installer:** `BluePill-Setup-*.exe` in [Releases](https://github.com/nertwork/bluepill/releases/latest) |
 | **BluePill macOS Relay Daemon (`bluepill-server`)** | macOS Sequoia (`15.x`), Sonoma (`14.x`), Ventura (`13.x`), Tahoe (`26.x`) | `arm64` (Apple Silicon) & `x86_64` (Intel / KVM Virtual Machines) | Python 3.11+ · SQLite 3 WAL · Built-in Cloud Relay (`wss://`) · `IMCore` or `osascript` | **Homebrew:** `brew install nertwork/tap/bluepill`<br>**Cloud Login:** `bluepill-server login` |
-| **BluePill Web Client (`/web` & Cloud Portal)** | Cross-Platform (Linux, macOS, Windows, iOS, Android) | Any | Liquid Glass / Matrix / Light UI · Zero External CDN · Socket.IO | Built into `bluepill-server` (`/web`) & **[bluepill.nertwork.com](https://bluepill.nertwork.com/demo)** |
+| **BluePill Web Client (`/web` & Cloud Portal)** | Cross-Platform (Linux, macOS, Windows, iOS, Android) | Any | Liquid Glass / Matrix / Light UI · Zero External CDN · Socket.IO | Built into `bluepill-server` (`/web`) & **[bluepill.app](https://bluepill.app/demo)** |
 
 ---
 
@@ -207,6 +207,6 @@ See the full **[GitHub Contributors Graph](https://github.com/nertwork/bluepill/
 
 ## Support & License
 
-- **Live Demo & Free Beta Cloud Relay:** [https://bluepill.nertwork.com/demo](https://bluepill.nertwork.com/demo) · [https://bluepill.nertwork.com/signup](https://bluepill.nertwork.com/signup)
+- **Live Demo & Free Beta Cloud Relay:** [https://bluepill.app/demo](https://bluepill.app/demo) · [https://bluepill.app/signup](https://bluepill.app/signup)
 - **Support & Security Contact:** [support@nertwork.com](mailto:support@nertwork.com) · [GitHub Issues](https://github.com/nertwork/bluepill/issues)
 - **License:** Released under the [MIT License](LICENSE).

@@ -1,6 +1,6 @@
 class Bluepill < Formula
   desc "Headless zero-Electron macOS iMessage, SMS & RCS relay daemon + Cloud Relay + Web UI for BluePill"
-  homepage "https://bluepill.nertwork.com"
+  homepage "https://bluepill.app"
   url "https://github.com/nertwork/bluepill/archive/refs/tags/v1.2.15.tar.gz"
   sha256 "81186034e2c48595fe07179fefab57c3740c9743821c80ebc6d5cfb1d4ea4ca1"
   version "1.2.15"
@@ -32,7 +32,7 @@ class Bluepill < Formula
     <<~EOS
       BluePill Cloud Setup (Default — Zero Port-Forwarding):
         1. bluepill-server login
-           (Opens https://bluepill.nertwork.com/portal to link your Mac to BluePill Cloud)
+           (Opens https://bluepill.app/portal to link your Mac to BluePill Cloud)
         2. brew services start bluepill
         3. Grant macOS Permissions (System Settings -> Privacy & Security):
            - Full Disk Access: allow Terminal / Homebrew Python (reads chat.db, Notes, Calendar, Photos)

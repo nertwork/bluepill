@@ -922,7 +922,7 @@ ApplicationWindow {
         return true
     }
     function connectToLiveDemo() {
-        root.loadPrimaryServerFields("https://api.bluepill.nertwork.com/demo")
+        root.loadPrimaryServerFields("https://api.bluepill.app/demo")
         secondaryServerUrlInput.text = ""
         serverPasswordInput.text = "demo"
         root.primaryServerFieldsEdited = true
@@ -3718,7 +3718,7 @@ ApplicationWindow {
                                         MouseArea {
                                             anchors.fill: parent
                                             cursorShape: Qt.PointingHandCursor
-                                            onClicked: Qt.openUrlExternally("https://bluepill.nertwork.com/portal")
+                                            onClicked: Qt.openUrlExternally("https://bluepill.app/portal")
                                         }
                                     }
                                     Rectangle {
@@ -11892,7 +11892,7 @@ ApplicationWindow {
                                     MouseArea {
                                         anchors.fill: parent
                                         cursorShape: Qt.PointingHandCursor
-                                        onClicked: Qt.openUrlExternally("https://bluepill.nertwork.com/portal")
+                                        onClicked: Qt.openUrlExternally("https://bluepill.app/portal")
                                     }
                                 }
                                 Rectangle {
@@ -12520,7 +12520,7 @@ ApplicationWindow {
                                     root.savePrimaryServerSettings()
                                 }
                                 Text {
-                                    text: "https://api.bluepill.nertwork.com/t/your-name"
+                                    text: "https://api.bluepill.app/t/your-name"
                                     color: theme.darkForeground
                                     visible: !serverUrlInput.text && !serverUrlInput.activeFocus
                                     anchors.verticalCenter: parent.verticalCenter

@@ -11358,7 +11358,7 @@ private slots:
         // Clicking Try Live Demo (connectToLiveDemo) fills /demo + password "demo" and saves immediately
         QMetaObject::invokeMethod(root, "connectToLiveDemo");
         QCoreApplication::processEvents();
-        QCOMPARE(b.serverUrl(), QStringLiteral("https://api.bluepill.nertwork.com:443/demo"));
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://api.bluepill.app:443/demo"));
         QCOMPARE(b.serverPassword(), QStringLiteral("demo"));
         QCOMPARE(b.needsSetup(), false);
 
@@ -12008,11 +12008,14 @@ private slots:
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://github.com/nertwork/bluepill/releases/download/v1.2.13/a.deb")), false));
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://objects.githubusercontent.com/github-production-release-asset/a.deb")), false));
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://release-assets.githubusercontent.com/a.deb")), false));
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://bluepill.app/dl/a.deb")), false));
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://api.bluepill.app/dl/a.deb")), false));
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://bluepill.nertwork.com/dl/a.deb")), false));
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://api.bluepill.nertwork.com/dl/a.deb")), false));
 
         QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("http://github.com/nertwork/bluepill/a.deb")), false));
         QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://evil.com/a.deb")), false));
+        QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://bluepill.app.evil.com/a.deb")), false));
         QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://bluepill.nertwork.com.evil.com/a.deb")), false));
         QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("file://localhost/etc/passwd")), false));
         QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("file://localhost/etc/passwd")), true));

@@ -83,7 +83,7 @@ timeout 120s brew install nertwork/tap/bluepill </dev/null
 # Verify installed binary
 timeout 5s bluepill-server --version </dev/null
 
-# Optional: pair with BluePill Cloud Relay (token from https://bluepill.nertwork.com/signup)
+# Optional: pair with BluePill Cloud Relay (token from https://bluepill.app/signup)
 # timeout 30s bluepill-server relay-setup --token "${BLUEPILL_RELAY_TOKEN}" </dev/null
 ```
 

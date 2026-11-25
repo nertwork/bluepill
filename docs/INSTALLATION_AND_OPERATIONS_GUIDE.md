@@ -368,7 +368,7 @@ Download the per-user Inno Setup installer `BluePill-Setup-<version>-win64.exe` 
 
 ### Smart Cross-Platform Auto-Updates (ON by Default, Opt-Out Supported)
 
-Automatic update checks are **enabled by default** on both the desktop client (`autoUpdateCheck: true`, toggleable in **⚙ Settings → Connection → Updates**) and the macOS relay (`autoUpdate: true` in `~/.config/bluepill/server.json`, opt-out via `"autoUpdate": false` or `BLUEPILL_AUTO_UPDATE=0`). When signed in to BluePill Cloud (`bluepill.nertwork.com`), the desktop client checks `https://api.bluepill.nertwork.com/api/v1/updates/latest` and applies confirmed client updates directly over an HTTPS host allowlist (`github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, `bluepill.nertwork.com`, `*.bluepill.nertwork.com`) with redirect verification (`UserVerifiedRedirectPolicy`), version regex validation, per-update `QTemporaryDir` isolation (`O_CREAT|O_EXCL|O_NOFOLLOW`), and mandatory `SHA256SUMS.txt` verification (including on-disk SHA256 re-verification):
+Automatic update checks are **enabled by default** on both the desktop client (`autoUpdateCheck: true`, toggleable in **⚙ Settings → Connection → Updates**) and the macOS relay (`autoUpdate: true` in `~/.config/bluepill/server.json`, opt-out via `"autoUpdate": false` or `BLUEPILL_AUTO_UPDATE=0`). When signed in to BluePill Cloud (`bluepill.app`), the desktop client checks `https://api.bluepill.app/api/v1/updates/latest` and applies confirmed client updates directly over an HTTPS host allowlist (`github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, `bluepill.app`, `*.bluepill.app`) with redirect verification (`UserVerifiedRedirectPolicy`), version regex validation, per-update `QTemporaryDir` isolation (`O_CREAT|O_EXCL|O_NOFOLLOW`), and mandatory `SHA256SUMS.txt` verification (including on-disk SHA256 re-verification):
 
 - **Windows (`x86_64`):** Downloads `BluePill-Setup-<version>-win64.exe` + `SHA256SUMS.txt` and runs silent in-place Inno Setup (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS`) when installed in a user-writable directory, or interactive setup otherwise, followed by automatic relaunch.
 - **Arch Linux / Omarchy (`x86_64`):** Downloads `bluepill-<version>-1-x86_64.pkg.tar.zst` + `SHA256SUMS.txt` and installs via `pkexec pacman -U --noconfirm` (with interactive terminal `sudo pacman -U` fallback on `pkexec` exit `127`, or `yay`/`paru -S --noconfirm bluepill-bin` / `bluepill` when using AUR).
@@ -428,7 +428,7 @@ brew install nertwork/tap/bluepill
 bluepill-server --version
 # Output: bluepill-server 1.2.12
 
-# Link your Mac to BluePill Cloud (opens https://bluepill.nertwork.com/portal) & start service
+# Link your Mac to BluePill Cloud (opens https://bluepill.app/portal) & start service
 bluepill-server login
 brew services start bluepill
 
@@ -442,7 +442,7 @@ bluepill-server update --confirm
 > [!NOTE]
 > **Hardened Mac Server Cloud Managed Updates (`v1.2.12+`):** Strictly gated to Macs signed into BluePill Cloud (never phones home when self-hosted offline). `bluepill-server update --confirm` (or `POST /api/v1/server/update/apply` from the desktop client) first attempts `brew update` + `brew upgrade nertwork/tap/bluepill`. If Homebrew lacks `git`/Xcode CLT or the tap lags behind the latest GitHub release, it automatically falls back to downloading `SHA256SUMS.txt` and `bluepill-<ver>.all.bottle.tar.gz` over an HTTPS host allowlist with redirect verification (`_SafeRedirectHandler`), verifies the SHA256 digest and Python AST, atomically swaps `bluepill-server`, and performs a LaunchAgent-aware restart (`launchctl kickstart -k` for `com.nertwork.bluepill-server` or `homebrew.mxcl.bluepill`, falling back to `brew services restart bluepill`).
 
-Then open the **BluePill Desktop Client** on Linux or Windows and click **"Sign in at bluepill.nertwork.com →"** (or **"Try Live Demo"**).
+Then open the **BluePill Desktop Client** on Linux or Windows and click **"Sign in at bluepill.app →"** (or **"Try Live Demo"**).
 
 ---
 
@@ -663,12 +663,12 @@ Every instance of `bluepill-server` includes a unified **Liquid Glass / Matrix /
 ```text
 http://<relay-host>:1235/web
 ```
-Or remotely through your BluePill Cloud Relay at `https://bluepill.nertwork.com/t/<slug>/web` (or try the hosted sandbox instantly at [https://bluepill.nertwork.com/demo](https://bluepill.nertwork.com/demo); Cloud Relay portal at [https://bluepill.nertwork.com/signup](https://bluepill.nertwork.com/signup)).
+Or remotely through your BluePill Cloud Relay at `https://bluepill.app/t/<slug>/web` (or try the hosted sandbox instantly at [https://bluepill.app/demo](https://bluepill.app/demo); Cloud Relay portal at [https://bluepill.app/signup](https://bluepill.app/signup)).
 
 ### Key Capabilities & Hardening in the Web UI (`v1.2.12+`):
 
 1. **Authentication & Security Hardening:**
-   - Auto-populates Cloud Relay credentials when signed into `bluepill.nertwork.com`, or accepts your relay password via the auth modal / `localStorage` (clearing empty keys cleanly and showing inline invalid-password feedback).
+   - Auto-populates Cloud Relay credentials when signed into `bluepill.app`, or accepts your relay password via the auth modal / `localStorage` (clearing empty keys cleanly and showing inline invalid-password feedback).
    - Enforces XSS escaping across message reactions and dynamic DOM attributes, `rel="noopener noreferrer"` on attachment download links, strict CSP (`object-src 'none'; base-uri 'self'`), `Cache-Control: no-store, private` on `/t/<slug>/web` responses, and `cookie` header stripping across Cloud Relay proxy modes.
 
 2. **Contact Resolution, `lastMessage` Previews & Pinned Conversations:**

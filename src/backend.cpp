@@ -2408,6 +2408,8 @@ bool Backend::cloudLoggedIn() const {
     const bool isTestLoopback = m_allowLocalhostCloudForTest &&
                                 (host == QStringLiteral("127.0.0.1") || host == QStringLiteral("localhost"));
     const bool isCloudHost = isTestLoopback ||
+                              host == QStringLiteral("bluepill.app") ||
+                              host.endsWith(QStringLiteral(".bluepill.app")) ||
                               host == QStringLiteral("bluepill.nertwork.com") ||
                               host.endsWith(QStringLiteral(".bluepill.nertwork.com"));
     if (!isCloudHost) return false;
@@ -2464,7 +2466,7 @@ void Backend::startCloudSignIn(const QString &provider) {
         webBase = qEnvironmentVariable("BLUEPILL_CLOUD_WEB_URL").trimmed();
     }
     if (webBase.isEmpty()) {
-        webBase = QStringLiteral("https://bluepill.nertwork.com");
+        webBase = QStringLiteral("https://bluepill.app");
     }
     while (webBase.endsWith(QLatin1Char('/'))) webBase.chop(1);
 
@@ -2699,7 +2701,7 @@ void Backend::exchangeCloudAuthCode(const QString &code, const QString &state) {
         apiBase = qEnvironmentVariable("BLUEPILL_CLOUD_API_URL").trimmed();
     }
     if (apiBase.isEmpty()) {
-        apiBase = QStringLiteral("https://api.bluepill.nertwork.com");
+        apiBase = QStringLiteral("https://api.bluepill.app");
     }
     while (apiBase.endsWith(QLatin1Char('/'))) apiBase.chop(1);
 
@@ -2835,7 +2837,7 @@ void Backend::setAutoUpdateCheckEnabled(bool enabled) {
 
 void Backend::checkForUpdatesNow() {
     if (!cloudLoggedIn()) {
-        m_updateStatusText = QStringLiteral("Sign in at bluepill.nertwork.com to enable Cloud Managed Updates.");
+        m_updateStatusText = QStringLiteral("Sign in at bluepill.app to enable Cloud Managed Updates.");
         emit updateStateChanged();
         emit toastMessage(m_updateStatusText);
         return;
@@ -2860,7 +2862,7 @@ void Backend::checkForCloudUpdates(bool manual) {
 
     const quint64 epGen = m_serverEndpointGeneration;
     const QString feedUrlStr = m_updatesFeedUrlOverride.isEmpty()
-                                   ? QStringLiteral("https://api.bluepill.nertwork.com/api/v1/updates/latest")
+                                   ? QStringLiteral("https://api.bluepill.app/api/v1/updates/latest")
                                    : m_updatesFeedUrlOverride;
     QNetworkRequest feedReq{QUrl(feedUrlStr)};
     feedReq.setTransferTimeout(8000);
@@ -3204,11 +3206,14 @@ bool Backend::isTrustedUpdateUrl(const QUrl &url, bool allowLocalhostForTest) {
     if (host == QStringLiteral("github.com") ||
         host == QStringLiteral("objects.githubusercontent.com") ||
         host == QStringLiteral("release-assets.githubusercontent.com") ||
+        host == QStringLiteral("bluepill.app") ||
         host == QStringLiteral("bluepill.nertwork.com")) {
         return true;
     }
-    static const QString kSuffix = QStringLiteral(".bluepill.nertwork.com");
-    return host.endsWith(kSuffix) && host.size() > kSuffix.size();
+    static const QString kPrimarySuffix = QStringLiteral(".bluepill.app");
+    static const QString kLegacySuffix = QStringLiteral(".bluepill.nertwork.com");
+    return (host.endsWith(kPrimarySuffix) && host.size() > kPrimarySuffix.size()) ||
+           (host.endsWith(kLegacySuffix) && host.size() > kLegacySuffix.size());
 }
 
 void Backend::downloadVerifiedClientPackage(

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BlueBubbles Server Setup & Migration — BluePill Documentation</title>
     <meta name="description" content="BluePill documentation: BlueBubbles Server Setup & Migration. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
-    <link rel="canonical" href="https://bluepill.nertwork.com/docs">
+    <link rel="canonical" href="https://bluepill.app/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
     <!-- Open Graph / Twitter -->
@@ -448,6 +448,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
@@ -477,7 +478,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <h3 id="2-install-via-homebrew-link-bluepill-cloud-default">2. Install via Homebrew &amp; Link BluePill Cloud (Default)</h3>
 <pre><code class="language-bash">brew install nertwork/tap/bluepill
 
-# Link your Mac to BluePill Cloud (opens https://bluepill.nertwork.com/portal)
+# Link your Mac to BluePill Cloud (opens https://bluepill.app/portal)
 bluepill-server login
 
 # Start the relay daemon (auto-connects Cloud Relay when configured)
@@ -488,7 +489,7 @@ brew services start bluepill
 bluepill-server relay-status
 curl -s &quot;http://127.0.0.1:1235/api/v1/server/info&quot;
 </code></pre>
-<p>Open <strong><code>http://127.0.0.1:1235/web</code></strong> in any browser (or your Cloud Relay portal <code>https://bluepill.nertwork.com/t/&lt;slug&gt;/web</code>, or try the <strong><a href="https://bluepill.nertwork.com/demo">Live Demo</a></strong>) to use the unified <strong>Liquid Glass / Matrix / Light</strong> BluePill Web Client with contact resolution, <code>lastMessage</code> previews, lazy-loaded Photos, <code>.caf</code> audio transcoding, Notes, Calendar, and Contacts. Cloud-linked Macs also support hardened Cloud Managed Updates (<code>bluepill-server update-status</code> / <code>bluepill-server update --confirm</code>) with LaunchAgent-aware restarts and automatic SHA256-verified release bottle fallback. Support: <code>support@nertwork.com</code>.</p>
+<p>Open <strong><code>http://127.0.0.1:1235/web</code></strong> in any browser (or your Cloud Relay portal <code>https://bluepill.app/t/&lt;slug&gt;/web</code>, or try the <strong><a href="https://bluepill.app/demo">Live Demo</a></strong>) to use the unified <strong>Liquid Glass / Matrix / Light</strong> BluePill Web Client with contact resolution, <code>lastMessage</code> previews, lazy-loaded Photos, <code>.caf</code> audio transcoding, Notes, Calendar, and Contacts. Cloud-linked Macs also support hardened Cloud Managed Updates (<code>bluepill-server update-status</code> / <code>bluepill-server update --confirm</code>) with LaunchAgent-aware restarts and automatic SHA256-verified release bottle fallback. Support: <code>support@nertwork.com</code>.</p>
 <h3 id="4-connect-the-linux-client">4. Connect the Linux Client</h3>
 <p><code>bluepill-server</code> listens on <code>127.0.0.1</code> unless it's started with <code>--host</code> (e.g. <code>--host 0.0.0.0</code> or the Mac's Tailscale IP). Once the relay is reachable from Linux:
 1. Launch <code>bluepill</code> and press <strong><code>Ctrl+,</code></strong>. If Tailscale is running, your relay Mac shows up under <strong>Macs on your Tailscale network</strong>, and a single relay is filled in automatically.
@@ -528,7 +529,7 @@ curl -s &quot;http://127.0.0.1:1235/api/v1/server/info&quot;
 <td style="text-align: left;"><strong>Web Client (<code>/web</code> &amp; Cloud)</strong></td>
 <td style="text-align: left;">Any OS with a modern browser</td>
 <td style="text-align: left;">Any</td>
-<td style="text-align: left;">Liquid Glass / Matrix / Light UI · <a href="https://bluepill.nertwork.com/demo">Live Demo</a></td>
+<td style="text-align: left;">Liquid Glass / Matrix / Light UI · <a href="https://bluepill.app/demo">Live Demo</a></td>
 </tr>
 </tbody>
 </table>
