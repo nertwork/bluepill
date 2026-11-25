@@ -2,6 +2,11 @@
 
 All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **"Disconnected" when the Mac can't read Messages (`server/bluepill_server.py`, `src/backend.{h,cpp}`, `src/Main.qml`):** When macOS denies the relay access to `chat.db` (no Full Disk Access), message and chat queries used to drop the connection, so BluePill Cloud answered `502 local_bluepill_unreachable` and the client showed **Disconnected · Reconnecting** even though the relay was up. The relay now answers `503` with `"error": "chat_db_unreadable"` and a message explaining the fix, and `/api/v1/server/info` reports `"chat_db_readable"`. The client stays connected and shows **Mac needs Full Disk Access** in yellow, with one toast explaining what to do. It clears as soon as a query succeeds.
+
 ## [1.2.13] - 2026-11-23
 
 ### Added

@@ -1804,6 +1804,170 @@ private slots:
         }
     }
 
+    void testRelayThatCantReadChatDbShowsFullDiskAccessNotDisconnected() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (const char *k : credVars) qunsetenv(k);
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        // A relay that answers, but macOS won't let it open chat.db (no Full Disk Access)
+        bool dbReadable = false;
+        bool dropConnections = false;  // simulates the relay being unreachable
+        int historyLoadsServed = 0;    // startup history pages (limit 250) answered with data
+        bool dropNextHistoryLoad = false;  // the first reload after access returns hits a network error
+        QHash<QTcpSocket *, QByteArray> pending;  // requests can arrive in pieces
+        QByteArray historyPayload;                // non-empty: history pages return this body
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (QTcpSocket *sock = server.nextPendingConnection()) {
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
+                    QByteArray &buf = pending[sock];
+                    buf += sock->readAll();
+                    const int headerEnd = buf.indexOf("\r\n\r\n");
+                    if (headerEnd < 0) return;
+                    qsizetype contentLength = 0;
+                    for (const QByteArray &h : buf.left(headerEnd).split('\n')) {
+                        if (h.trimmed().toLower().startsWith("content-length:"))
+                            contentLength = h.mid(h.indexOf(':') + 1).trimmed().toLongLong();
+                    }
+                    if (buf.size() < headerEnd + 4 + contentLength) return;  // body not complete yet
+                    const QByteArray req = pending.take(sock);
+                    const QByteArray reqLine = req.split('\n').value(0).trimmed();
+                    if (dropConnections) {
+                        sock->abort();
+                        return;
+                    }
+                    QByteArray status = "200 OK";
+                    QByteArray body = "{\"status\":200,\"message\":\"Success\",\"data\":[]}";
+                    if (reqLine.contains("/api/v1/server/info")) {
+                        body = QByteArray("{\"status\":200,\"message\":\"Success\",\"data\":{\"server_version\":\"1.2.15\",\"os_version\":\"26.6\",\"private_api\":false,\"chat_db_readable\":")
+                               + (dbReadable ? "true" : "false") + "}}";
+                    } else if (dbReadable && reqLine.contains("/api/v1/message/query") && req.contains("\"limit\":250")) {
+                        if (dropNextHistoryLoad) {
+                            // An HTTP error, not a closed socket: Qt may silently resend a
+                            // request whose connection closed, which would turn this into a 200
+                            dropNextHistoryLoad = false;
+                            status = "502 Bad Gateway";
+                            body = "{\"status\":502,\"error\":\"local_bluepill_unreachable\"}";
+                        } else {
+                            ++historyLoadsServed;
+                            if (!historyPayload.isEmpty()) body = historyPayload;
+                        }
+                    } else if (!dbReadable && (reqLine.contains("/api/v1/message/query") || reqLine.contains("/api/v1/chat/query"))) {
+                        status = "503 Service Unavailable";
+                        body = "{\"status\":503,\"message\":\"The Mac cannot read chat.db: give Full Disk Access\",\"data\":null,\"error\":\"chat_db_unreadable\"}";
+                    }
+                    sock->write("HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: "
+                                + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                    sock->flush();
+                    sock->disconnectFromHost();
+                });
+            }
+        });
+        qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()).toUtf8());
+        qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_fda.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_fda.json")));
+        QSignalSpy toasts(&b, &Backend::toastMessage);
+
+        // The startup history load is refused (chat.db denied), so the initial sync can't finish
+        b.fetchRecentMessagesForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(b.macNeedsFullDiskAccess(), 3000);
+        QVERIFY(!b.initialSyncCompleteForTest());
+
+        // server/info says chat.db is unreadable: connected, but flagged
+        b.fetchServerInfoForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(b.serverStatus().startsWith(QStringLiteral("Connected v1.2.15")), 3000);
+        QVERIFY(b.macNeedsFullDiskAccess());
+        QVERIFY(b.connected());
+        QVERIFY2(b.serverStatus().contains(QStringLiteral("Full Disk Access")), qPrintable(b.serverStatus()));
+
+        // The 503 from message/query is not a network failure: no "Disconnected · Reconnecting"
+        for (int i = 0; i < 5; ++i) {
+            b.pollDeltaForTest();
+            QTest::qWait(150);
+        }
+        QVERIFY(b.connected());
+        QVERIFY(b.macNeedsFullDiskAccess());
+        QVERIFY2(!b.serverStatus().startsWith(QStringLiteral("Disconnected")), qPrintable(b.serverStatus()));
+        int fdaToasts = 0;
+        for (const QList<QVariant> &args : toasts) {
+            if (args.value(0).toString().contains(QStringLiteral("Full Disk Access"))) ++fdaToasts;
+        }
+        QCOMPARE(fdaToasts, 1);  // once, not on every poll
+
+        // A real network blip in between replaces the status with "Disconnected...";
+        // the next denial brings the Full Disk Access note back, without a second toast
+        dropConnections = true;
+        b.pollDeltaForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(!b.connected(), 3000);
+        dropConnections = false;
+        b.pollDeltaForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(b.connected(), 3000);
+        QVERIFY(b.macNeedsFullDiskAccess());
+        QVERIFY2(b.serverStatus().contains(QStringLiteral("Full Disk Access")), qPrintable(b.serverStatus()));
+        int fdaToastsAfter = 0;
+        for (const QList<QVariant> &args : toasts) {
+            if (args.value(0).toString().contains(QStringLiteral("Full Disk Access"))) ++fdaToastsAfter;
+        }
+        QCOMPARE(fdaToastsAfter, 1);
+
+        // Access granted: the next successful query clears the warning
+        dbReadable = true;
+        dropNextHistoryLoad = true;
+        b.pollDeltaForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(!b.macNeedsFullDiskAccess(), 3000);
+        QVERIFY(b.connected());
+        QCOMPARE(b.serverStatus(), QStringLiteral("Connected v1.2.15 · macOS 26.6"));
+        // ...and the startup history load is reissued. The first reissue hits a network
+        // error; the next successful poll retries it, and the initial sync completes.
+        QTRY_VERIFY_WITH_TIMEOUT(!dropNextHistoryLoad, 3000);
+        QTest::qWait(200);
+        QCOMPARE(historyLoadsServed, 0);
+        b.pollDeltaForTest();
+        QTRY_COMPARE_WITH_TIMEOUT(historyLoadsServed, 1, 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(b.initialSyncCompleteForTest(), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.syncingHistory(), 3000);
+
+        // Denied again after startup finished: the resumed load is live, so a message that
+        // arrived meanwhile is notified (not swallowed as startup history)
+        dbReadable = false;
+        b.fetchRecentMessagesForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(b.macNeedsFullDiskAccess(), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.syncingHistory(), 3000);
+        b.resetNotificationCountersForTest();
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        historyPayload = "{\"status\":200,\"data\":[{\"guid\":\"m-fda-new\",\"text\":\"Arrived while denied\","
+                         "\"isFromMe\":false,\"service\":\"iMessage\",\"originalROWID\":900,\"dateCreated\":"
+                         + QByteArray::number(nowMs) + ",\"handle\":{\"address\":\"+15555550100\"},"
+                         "\"chats\":[{\"guid\":\"iMessage;-;+15555550100\",\"style\":45}]},"
+                         // An old send that failed before BluePill started: history, so no toast
+                         "{\"guid\":\"m-fda-old-fail\",\"text\":\"Old failed send\",\"isFromMe\":true,\"error\":22,"
+                         "\"service\":\"iMessage\",\"originalROWID\":120,\"dateCreated\":"
+                         + QByteArray::number(nowMs - 3LL * 86400000LL) + ",\"chats\":[{\"guid\":\"iMessage;-;+15555550100\",\"style\":45}]}]}";
+        dbReadable = true;
+        b.pollDeltaForTest();
+        QTRY_COMPARE_WITH_TIMEOUT(historyLoadsServed, 2, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(b.notificationCountForTest(), 1, 3000);
+        for (const QList<QVariant> &args : toasts) {
+            QVERIFY2(!args.value(0).toString().contains(QStringLiteral("failed to deliver")),
+                     qPrintable(args.value(0).toString()));
+        }
+    }
+
     void testV161BackgroundImagePrefetchAndRetry() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());

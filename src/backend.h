@@ -230,6 +230,8 @@ protected:
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool connected READ connected NOTIFY statusChanged)
+    // The relay answers but macOS won't let it read chat.db (no Full Disk Access)
+    Q_PROPERTY(bool macNeedsFullDiskAccess READ macNeedsFullDiskAccess NOTIFY statusChanged)
     // How long after sending a message it can still be edited or unsent.
     Q_PROPERTY(int messageEditWindowMs READ messageEditWindowMs CONSTANT)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
@@ -347,6 +349,7 @@ public:
     ~Backend() override;
 
     bool connected() const { return m_connected; }
+    bool macNeedsFullDiskAccess() const { return m_macNeedsFullDiskAccess; }
     bool loading() const { return m_loading; }
     QString serverStatus() const { return m_serverStatus; }
     QString serverUrl() const { return m_serverUrl; }
@@ -802,6 +805,9 @@ public:
     void reconcileChatMessagesForTest(const QString &chatGuid, const QJsonArray &serverMessages);
     void handleSocketIoPayloadForTest(const QByteArray &rawPayload);
     void pollDeltaForTest() { pollDelta(); }
+    void fetchServerInfoForTest() { fetchServerInfo(); }
+    void fetchRecentMessagesForTest() { fetchRecentMessages(0); }
+    bool initialSyncCompleteForTest() const { return m_initialSyncComplete; }
     void startSocketIoForTest() { startSocketIoClient(); }
     QString socketSid() const { return m_socketSid; }
     QString resolveCanonicalChatGuidForTest(const QString &chatGuid) const { return resolveCanonicalChatGuid(chatGuid); }
@@ -1000,6 +1006,11 @@ private:
     void playNotificationSound(const QString &presetOverride = QString(), bool forcePreview = false);
     void handleNetworkFailure(const QString &context);
     void handleNetworkSuccess();
+    // A 503 "chat_db_unreadable" from the relay: reachable, but it can't read Messages.
+    // Returns true (and updates the status) when the reply is that error.
+    bool handleChatDbUnreadableReply(QNetworkReply *reply);
+    void setMacNeedsFullDiskAccess(bool needed);
+    void maybeResumeHistoryAfterDenial();
     void applyRemoteIcloudNotes(const QJsonArray &data, const QString &acknowledgedNoteId = QString(), quint64 acknowledgedMutationSeq = 0);
     void applyRemoteIcloudEvents(const QJsonArray &data, const QString &acknowledgedEventId = QString());
     void scheduleIcloudMutationRetry(bool immediate);
@@ -1059,6 +1070,7 @@ private:
     QString m_configFilePath;
     bool m_autoStart = true;
     bool m_connected = false;
+    bool m_macNeedsFullDiskAccess = false;
     bool m_loading = false;
     bool m_demoMode = false;
     bool m_autoUpdateCheckEnabled = true;
@@ -1237,6 +1249,10 @@ private:
     qint64 m_startupHighestRowId = 0;
     qint64 m_startupTimestamp = 0;
     bool m_initialSyncComplete = false;
+    // A history load was cut short by a chat.db denial; resume it once access is back
+    bool m_historyResumePending = false;
+    // History generation resumed after startup finished: its pages are live, not startup history
+    int m_liveHistoryResumeGen = -1;
     qint64 m_lastContactsFetchMs = 0;
     QString m_playingAudioGuid;
     bool m_audioPlaying = false;

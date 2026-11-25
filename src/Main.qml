@@ -1940,9 +1940,9 @@ ApplicationWindow {
                                 width: 10
                                 height: 10
                                 radius: 5
-                                color: backend.connected ? theme.green : theme.red
+                                color: !backend.connected ? theme.red : (backend.macNeedsFullDiskAccess ? theme.yellow : theme.green)
                                 border.width: 1
-                                border.color: backend.connected ? Qt.lighter(theme.green, 1.3) : Qt.lighter(theme.red, 1.3)
+                                border.color: Qt.lighter(color, 1.3)
                                 readonly property string statusText: backend.serverStatus
                                                                      + (backend.syncingHistory ? " · " + i18n.tr("Syncing history…") : "")
                                 ToolTip.visible: statusDotMouse.containsMouse
@@ -1983,9 +1983,11 @@ ApplicationWindow {
                             implicitWidth: topStatusPillRow.implicitWidth + 18
                             color: topStatusPillMouse.containsMouse
                                    ? theme.selection
-                                   : (backend.connected ? Qt.rgba(48/255, 209/255, 88/255, 0.14) : Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.14))
+                                   : (!backend.connected ? Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.14)
+                                      : backend.macNeedsFullDiskAccess ? Qt.rgba(theme.yellow.r, theme.yellow.g, theme.yellow.b, 0.14)
+                                      : Qt.rgba(48/255, 209/255, 88/255, 0.14))
                             border.width: 1
-                            border.color: backend.connected ? theme.green : theme.red
+                            border.color: !backend.connected ? theme.red : (backend.macNeedsFullDiskAccess ? theme.yellow : theme.green)
                             ToolTip.visible: topStatusPillMouse.containsMouse
                             ToolTip.text: backend.serverStatus + (backend.serverUrl.length > 0 ? " · " + backend.serverUrl : "")
                             ToolTip.delay: 250
@@ -1998,7 +2000,7 @@ ApplicationWindow {
                                     width: 7
                                     height: 7
                                     radius: 3.5
-                                    color: backend.connected ? theme.green : theme.red
+                                    color: !backend.connected ? theme.red : (backend.macNeedsFullDiskAccess ? theme.yellow : theme.green)
                                 }
                                 Text {
                                     id: topStatusPillText
@@ -2006,13 +2008,15 @@ ApplicationWindow {
                                     text: {
                                         var statusMatch = (backend.serverStatus || "").match(/v\d+\.\d+(?:\.\d+)?/i)
                                         var ver = statusMatch ? statusMatch[0] : (Qt.application.version ? ("v" + Qt.application.version) : "v1.2.7")
-                                        var st = backend.connected ? (i18n.tr("Connected") + " " + ver) : i18n.tr("Disconnected")
+                                        var st = !backend.connected ? i18n.tr("Disconnected")
+                                               : backend.macNeedsFullDiskAccess ? i18n.tr("Mac needs Full Disk Access")
+                                               : (i18n.tr("Connected") + " " + ver)
                                         var host = (backend.serverUrl || "").replace(/^https?:\/\//i, "").replace(/^ssh:\/\//i, "").replace(/\/.*$/, "")
                                         return host.length > 0 ? (st + " · " + host) : st
                                     }
                                     font.pixelSize: theme.fontSize - 3
                                     font.bold: true
-                                    color: backend.connected ? theme.green : theme.red
+                                    color: !backend.connected ? theme.red : (backend.macNeedsFullDiskAccess ? theme.yellow : theme.green)
                                 }
                             }
                         MouseArea {
@@ -10673,19 +10677,21 @@ ApplicationWindow {
                             radius: 6
                             implicitWidth: cfgStatusBadge.implicitWidth + 14
                             Layout.preferredWidth: cfgStatusBadge.implicitWidth + 14
-                            color: backend.connected
-                                       ? Qt.rgba(48/255, 209/255, 88/255, 0.16)
-                                       : Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.16)
+                            color: !backend.connected ? Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.16)
+                                   : backend.macNeedsFullDiskAccess ? Qt.rgba(theme.yellow.r, theme.yellow.g, theme.yellow.b, 0.16)
+                                   : Qt.rgba(48/255, 209/255, 88/255, 0.16)
                             border.width: 1
-                            border.color: backend.connected ? theme.green : theme.red
+                            border.color: !backend.connected ? theme.red : (backend.macNeedsFullDiskAccess ? theme.yellow : theme.green)
                             Text {
                                 id: cfgStatusBadge
                                 objectName: "cfgStatusBadge"
                                 anchors.centerIn: parent
-                                text: backend.connected ? i18n.tr("Connected") : i18n.tr("Disconnected")
+                                text: !backend.connected ? i18n.tr("Disconnected")
+                                      : backend.macNeedsFullDiskAccess ? i18n.tr("Needs Full Disk Access")
+                                      : i18n.tr("Connected")
                                 font.pixelSize: theme.fontSize - 3
                                 font.bold: true
-                                color: backend.connected ? theme.green : theme.red
+                                color: !backend.connected ? theme.red : (backend.macNeedsFullDiskAccess ? theme.yellow : theme.green)
                             }
                         }
                     }
